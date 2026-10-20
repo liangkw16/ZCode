@@ -25,7 +25,10 @@
 2. **bundle 间 segment 不一致**（main 折叠了 .kcode、agent 没折叠）→ 数据脑裂。→ Task 9 Step 3 对打包产物做字符串断言：main bundle 与 `bundled-agents/*/glm/zcode.cjs` 都含 `.kcode` 且不再含 `join(..., ".zcode"` 的全局形态。
 3. **模块加载期常量**：`skillsService.ts:50-51` 在 import 时求值，测试必须 `vi.resetModules()` 后带 stub 重新 import。→ Task 4 Step 2 测试模板强制 importFresh。
 4. **无 define 环境静默回落**：源码直跑（dev CLI、单测）回落 `.zcode`，若误判为 bug 会加错兜底。→ Task 1/6 的回落测试钉死该语义。
-5. **exportLogs 打包段错位**：zip 内相对路径（`posix.join(".zcode","cli","log")`）若漏改，导出日志标签与实际来源不一致。→ Task 5 Step 1 覆盖绝对路径与 zip 相对段两组。
+5. **exportLogs 打包段错位**：zip 内相对路径（`posix.join(".zcode","cli","log")`）若漏改，导出日志标签与实际来源不一致。→ Task 5 Step 1 覆盖绝对路径与 zip 相对段两组；同时同步改 `shouldApplyLogExportRetention` 的 `.zcode/cli/log/` 前缀识别（否则 KCode 导出恢复"全量打包旧日志"的性能问题）。
+6. **描述符/常量型派生点**（codex 审查发现）：`ZCODE_AGENT_RUNTIME.nativeConfigDir`、`ZCODE_DATA_DIR_NAME`（storage roots）、CLI `ZCODE_DIR`、`SAVED_WORKFLOW_GLOBAL_DIR` 这类**常量值**不含 `join(...,".zcode")` 形态，纯 join 正则扫不到，漏改即 KCode 继续扫/删 ZCode 的文件。→ Task 2/4/6 显式列入并在守护测试登记 import。
+7. **同常量服务两个作用域**：CLI `ZCODE_DIR` 同时拼 user（home）与 project（工作区）基座；直接改值会误改项目路径。→ Task 6 规定按 scope 参数分流（user→segment，project→`.zcode`），不允许直接改常量值。
+8. **登录发起时 ZCode 可能持有 handler**（codex 审查发现）：app 启动自注册只是初始态；顺序「启动 KCode → 启动 ZCode → 在 KCode 发起登录」会把 OAuth 回调送进 ZCode（state 只存发起进程内）。→ Task 8（登录时接管 handler）：kcode flavor 打开登录窗口前重新 `setAsDefaultProtocolClient("zcode")`。
 
 ---
 
@@ -127,15 +130,16 @@ git commit -m "feat(isolation): 数据目录 segment 单一事实源与编译期
 
 ---
 
-### Task 2: services paths 核心收口
+### Task 2: services paths 核心收口（含 agent runtime 描述符）
 
 **Files:**
 - Modify: `packages/services/src/paths.ts:45-58,234-238,241-269`
+- Modify: `packages/shared/src/zcode-agent-runtime.ts:32`
 - Test: `packages/services/test/pathsDataDirSegment.test.ts`（新建）
 
 **Interfaces:**
 - Consumes: `ZCODE_DATA_DIR_SEGMENT`（`@zcode/shared`）。
-- Produces: `getZCodeDataRootDir()` = `join(getDataBaseDir(), segment)`；`getAppConfigDir()`、`getConversationWorkspaceDir()`、`getProviderWorkspaceConfigDir()`、`copyDataDirectory()` 随之。后续 Task 的 services 收口都以此为参照实现。
+- Produces: `getZCodeDataRootDir()` = `join(getDataBaseDir(), segment)`；`getAppConfigDir()`、`getConversationWorkspaceDir()`、`getProviderWorkspaceConfigDir()`、`copyDataDirectory()` 随之；`ZCODE_AGENT_RUNTIME.nativeConfigDir` 变为 `${segment}/cli`（优先分支，不改则 Task 2 断言 `getProviderWorkspaceConfigDir()` 仍返回 `.zcode/cli`）。后续 Task 的 services 收口都以此为参照实现。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -189,15 +193,23 @@ export function getZCodeDataRootDir(): string {
 }
 ```
 
-`getProviderWorkspaceConfigDir()` 两个分支的 `".zcode"` 同换 `ZCODE_DATA_DIR_SEGMENT`。`copyDataDirectory()` 内 `join(oldBaseDir, ".zcode", "v2")` / `join(newBaseDir, ".zcode", "v2")` 同换。
+`getProviderWorkspaceConfigDir()` 的 fallback 分支 `".zcode"` 同换 `ZCODE_DATA_DIR_SEGMENT`；**优先分支**修描述符——`packages/shared/src/zcode-agent-runtime.ts:32` 改：
+
+```ts
+import { ZCODE_DATA_DIR_SEGMENT } from "./env.js";
+// …descriptor 内：
+  nativeConfigDir: `${ZCODE_DATA_DIR_SEGMENT}/cli`,
+```
+
+（env.js 不反向依赖本模块，无循环导入。）`copyDataDirectory()` 内 `join(oldBaseDir, ".zcode", "v2")` / `join(newBaseDir, ".zcode", "v2")` 同换。
 
 - [ ] **Step 4: 跑测试确认通过**（同 Step 2 命令，Expected: PASS）
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/services/src/paths.ts packages/services/test/pathsDataDirSegment.test.ts
-git commit -m "feat(isolation): services 全局数据根收口到编译期 segment"
+git add packages/services/src/paths.ts packages/shared/src/zcode-agent-runtime.ts packages/services/test/pathsDataDirSegment.test.ts
+git commit -m "feat(isolation): services 全局数据根与 agent 描述符收口到编译期 segment"
 ```
 
 ---
@@ -306,17 +318,18 @@ git commit -m "feat(isolation): 设置文件（含远控身份）随镜像根隔
 ### Task 4: services 其余全局派生点 sweep（14 文件）
 
 **Files（全部 Modify，仅列需改行）：**
-- `packages/services/src/commands/commandsService.ts:89`
-- `packages/services/src/hooks/hooksService.ts:59`（仅 home 分支 `join(baseDir, ".zcode", "cli")` 的 `".zcode"`；workspace 分支 `join(baseDir, ".zcode")` **保持字面量**）
+- `packages/services/src/commands/commandsService.ts:55,89`（:55 `userDirectorySegments` 的 `".zcode"` 改 segment；:56 `workspaceDirectorySegments` **保持**）
+- `packages/services/src/hooks/hooksService.ts:59,168`（:59 仅 home 分支 `join(baseDir, ".zcode", "cli")`；workspace 分支 `join(baseDir, ".zcode")` **保持字面量**）
 - `packages/services/src/node.ts:1136`
 - `packages/services/src/onboarding/localUsageEvidence.ts:94`
 - `packages/services/src/plugin-sync/pluginSyncService.ts:220,224`
 - `packages/services/src/session/sourceServerWorkspaceAliasRepo.ts:302,304`
-- `packages/services/src/settings-sync/settingsSyncService.ts:419,427,435,439,451`
+- `packages/services/src/settings-sync/settingsSyncService.ts`（全局 5 行：419,427,435,439,451；同文件 4 处工作区分支保持）
 - `packages/services/src/skill-sync/skillSyncService.ts:134`
-- `packages/services/src/skills/skillsService.ts:50,51,84`
-- `packages/services/src/subagents/subagentStorage.ts:53`、`subagentsService.ts:410`
+- `packages/services/src/skills/skillsService.ts:50,51,84`（:74 工作区分支保持）
+- `packages/services/src/subagents/subagentStorage.ts:53`（:24 工作区分支保持）、`subagentsService.ts:410`
 - `packages/services/src/zcode-agent/modelTrajectoryFileTail.ts:18-19`、`zcodeAgentService.ts:547`、`zcodeTaskServiceAdapter.ts:241`
+- `packages/services/src/storage/adapters/rootsResolver.ts:9`（codex 审查补充：`ZCODE_DATA_DIR_NAME = ".zcode"` 常量被资源管理器 R1/R2 扫描与删除消费，漏改会让 KCode 清理 ZCode 的文件；导出名保留，值改为 import 的 `ZCODE_DATA_DIR_SEGMENT`）
 
 **Interfaces:**
 - Consumes: `ZCODE_DATA_DIR_SEGMENT`（`@zcode/shared`）。
@@ -348,14 +361,19 @@ const SWEEP_TARGETS: ReadonlyArray<{ file: string; importFrom: string }> = [
   { file: "src/zcode-agent/modelTrajectoryFileTail.ts", importFrom: "ZCODE_DATA_DIR_SEGMENT" },
   { file: "src/zcode-agent/zcodeAgentService.ts", importFrom: "ZCODE_DATA_DIR_SEGMENT" },
   { file: "src/zcode-agent/zcodeTaskServiceAdapter.ts", importFrom: "ZCODE_DATA_DIR_SEGMENT" },
+  { file: "src/storage/adapters/rootsResolver.ts", importFrom: "ZCODE_DATA_DIR_SEGMENT" },
   { file: "src/paths.ts", importFrom: "ZCODE_DATA_DIR_SEGMENT" },
   { file: "src/setting/settingService.ts", importFrom: "ZCODE_DATA_DIR_SEGMENT" },
 ];
 
-// 文件 → 改造后仍应存在的 `".zcode"` 字面量次数（全部是工作区分支或对 claude 的引用）
+// 文件 → 改造后仍应存在的 `".zcode"` 字面量次数（已逐文件核对，全部是工作区作用域；
+// codex 审查修正：settingsSync 4、skills 1、subagentStorage 1、commands 1 为工作区分支残留）
 const REMAINING_LITERAL_COUNT: Record<string, number> = {
-  "src/hooks/hooksService.ts": 1, // workspacePath 分支 join(baseDir, ".zcode")
-  "src/zcode-agent/modelTrajectoryFileTail.ts": 0,
+  "src/hooks/hooksService.ts": 1, // :59 workspacePath 分支 join(baseDir, ".zcode")
+  "src/settings-sync/settingsSyncService.ts": 4, // 工作区 skills/commands/plugins/AGENTS.md 分支
+  "src/skills/skillsService.ts": 1, // :74 join(workspacePath, ".zcode", "skills")
+  "src/subagents/subagentStorage.ts": 1, // :24 join(workspacePath, ".zcode", "agents")
+  "src/commands/commandsService.ts": 1, // :56 workspaceDirectorySegments（:55 userDirectorySegments 要改）
 };
 
 describe("data dir segment sweep 守护", () => {
@@ -384,8 +402,10 @@ Expected: FAIL（各文件尚无 import、字面量数不符）。
 每个文件：import 加 `ZCODE_DATA_DIR_SEGMENT`（`@zcode/shared`，合并进现有 import）；将清点行中 `join(<home 形参>, ".zcode", ...)` 的 `".zcode"` 换成 `ZCODE_DATA_DIR_SEGMENT`。特别注意：
 - `skillsService.ts:50-51` 是模块级常量，直接替换字面量即可（同模块加载期求值，define 已就绪）。
 - `hooksService.ts:59`：`return workspacePath ? join(baseDir, ".zcode") : join(baseDir, ZCODE_DATA_DIR_SEGMENT, "cli");`——**只改后半**。
+- `commandsService.ts:55`：`userDirectorySegments: [ZCODE_DATA_DIR_SEGMENT, "commands"]`；:56 不动。
+- `rootsResolver.ts`：`import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";` 后 `export const ZCODE_DATA_DIR_NAME = ZCODE_DATA_DIR_SEGMENT;`（导出名与两个 join 消费点保持不变）。
 - `modelTrajectoryFileTail.ts:18-19`：候选数组两行都改（一行 homedir、一行 dataBaseDir，均为全局）。
-- 每处改完顺手确认该行不是 `workingDirectory/workspacePath/workspace` 基座（是则回退并更新 allowlist 注释，说明理由）。
+- 每处改完顺手确认该行不是 `workingDirectory/workspacePath/workspace` 基座（是则回退并核对 allowlist 注释，说明理由后再动）。
 
 - [ ] **Step 4: 跑守护测试 + 受影响 services 测试**
 
@@ -448,7 +468,7 @@ Expected: FAIL。
 
 - [ ] **Step 3: 最小实现**
 
-`exportLogs.ts`：36/49 行 `".zcode"` → `ZCODE_DATA_DIR_SEGMENT`（import from `@zcode/shared`）；968/979/984/996 行 `posix.join(".zcode", ...)` → `posix.join(ZCODE_DATA_DIR_SEGMENT, ...)`。
+`exportLogs.ts`：36/49 行 `".zcode"` → `ZCODE_DATA_DIR_SEGMENT`（import from `@zcode/shared`）；968/979/984/996 行 `posix.join(".zcode", ...)` → `posix.join(ZCODE_DATA_DIR_SEGMENT, ...)`；**并同步改 `shouldApplyLogExportRetention`（约 :767）**：`normalizedArchivePath.startsWith(".zcode/cli/log/")` → `normalizedArchivePath.startsWith(`${ZCODE_DATA_DIR_SEGMENT}/cli/log/`)`（codex 审查发现：漏改则 KCode 的旧日志过滤失效，导出包重新塞满三天前的日志）。
 `desktopRuntimeEnv.ts:536`：`join(homedir(), ".zcode")` → `join(homedir(), ZCODE_DATA_DIR_SEGMENT)`。
 `sourceServerDirectory.ts:170`：`join(getDataBaseDir(), ".zcode", "v2", "tasks-index.sqlite")` → `join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT, "v2", "tasks-index.sqlite")`。
 
@@ -470,23 +490,24 @@ git commit -m "feat(isolation): desktop 全局数据路径收口到 segment"
 
 **Files:**
 - Create: `apps/zcode-cli/packages/contracts/src/dataDirSegment.ts`
-- Modify: `apps/zcode-cli/packages/contracts/src/index.ts`（若存在桶导出；否则确认各包直接深路径 import 的现有惯例并跟随）
+- Test: `apps/zcode-cli/packages/contracts/tests/dataDirSegment.test.ts`（新建；apps/zcode-cli vitest include 只收 `packages/*/test|tests/**`，src 下不收集——codex 审查修正）
+- Modify: `apps/zcode-cli/packages/contracts/src/tools/saved-workflow.ts:31`（`SAVED_WORKFLOW_GLOBAL_DIR = ".zcode/workflows"` → `${ZCODE_DATA_DIR_SEGMENT}/workflows`，同包内 import）
 - Modify（全局派生行）：`apps/zcode-cli/packages/adapters/src/auth/shared-credentials.ts:288-289`、`adapters/src/device/cli-device-mid.ts:60`、`adapters/src/context/index.ts:237`、`adapters/src/storage/session-store/paths.ts:5`、`adapters/src/storage/workspace-hook-trust-store.ts:135`、`bootstrap/src/provider-endpoint-routing-source-headers.ts:49-50`、`cli/src/provider-runtime-env.ts:76,81,140`、`cli/src/clipboard-image.ts:33`、`cli/src/sea-runtime-tools.ts:69`、`bootstrap/src/app/script-workflow-tool-port.ts:318`、`bootstrap/src/app/script-workflow-utils.ts:174`
-- Test: `apps/zcode-cli/packages/contracts/src/dataDirSegment.test.ts`（新建）
+- Modify（scope 分流，codex 审查补充）：`adapters/src/skills/roots.ts:10,115`、`adapters/src/commands/roots.ts:10,115`——`ZCODE_DIR` 常量同时服务 user（home 基座）与 project（工作区基座）两个 scope，**不允许直接改常量值**；在 `skillRootsForBase`/对应函数内按 scope 分流：`join(baseDirectory, scope === "user" ? ZCODE_DATA_DIR_SEGMENT : ZCODE_DIR, ...)`（两个文件的 `ZCODE_DIR` 调用处均带 scope 参数，函数签名无需改）
 
 **Interfaces:**
 - Produces: `ZCODE_DATA_DIR_SEGMENT: ".zcode" | ".kcode"`（`@zcode/contracts` 导出；esbuild define `__ZCODE_DATA_DIR_SEGMENT__` 替换，无 define 回落 `".zcode"`）。CLI 内各包 import 路径按现有惯例（`@zcode/contracts` 或深路径）。
 
 - [ ] **Step 1: 写失败测试**
 
-`apps/zcode-cli/packages/contracts/src/dataDirSegment.test.ts`：
+`apps/zcode-cli/packages/contracts/tests/dataDirSegment.test.ts`：
 
 ```ts
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 async function importFresh() {
   vi.resetModules();
-  return await import("./dataDirSegment.js");
+  return await import("../src/dataDirSegment.js");
 }
 
 describe("CLI 数据目录 segment", () => {
@@ -498,12 +519,18 @@ describe("CLI 数据目录 segment", () => {
     vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", undefined);
     expect((await importFresh()).ZCODE_DATA_DIR_SEGMENT).toBe(".zcode");
   });
+
+  it("saved-workflow 全局目录前缀跟随 segment", async () => {
+    vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", ".kcode");
+    const { SAVED_WORKFLOW_GLOBAL_DIR } = await import("../src/tools/saved-workflow.js");
+    expect(SAVED_WORKFLOW_GLOBAL_DIR).toBe(".kcode/workflows");
+  });
 });
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cd apps/zcode-cli && mise exec -- node_modules/.bin/vitest run packages/contracts/src/dataDirSegment.test.ts`（若 CLI 侧 vitest 入口不同，以其 package.json test 脚本为准）
+Run: `cd apps/zcode-cli && mise exec -- node_modules/.bin/vitest run packages/contracts/tests/dataDirSegment.test.ts`
 Expected: FAIL（模块不存在）。
 
 - [ ] **Step 3: 最小实现**
@@ -545,6 +572,7 @@ git commit -m "feat(isolation): CLI 全局数据根随 segment（工作区路径
 **Files:**
 - Modify: `scripts/build-desktop-agent-cli.mjs`（`pnpmRunEnv` 处）
 - Modify: `apps/zcode-cli/packages/cli/scripts/build.mjs`（define 块）
+- Modify: `apps/zcode-cli/turbo.json`（codex 审查发现：turbo 任务 `env` 白名单只有 `ZCODE_ENV`/`NODE_ENV`，严格模式会过滤新变量、宽松模式变化也不失效缓存；`ZCODE_DESKTOP_AGENT_BUILD_MODE=turbo` 路径下 agent 会打出与 main 不一致的 segment）
 
 **Interfaces:**
 - Consumes: `resolveDesktopDataDirSegment`（identity 模块）。
@@ -569,6 +597,8 @@ const pnpmRunEnv = {
       __ZCODE_DATA_DIR_SEGMENT__: JSON.stringify(process.env.ZCODE_DATA_DIR_SEGMENT?.trim() || ".zcode"),
 ```
 
+`apps/zcode-cli/turbo.json`：把构建链相关任务（含 `"env": ["ZCODE_ENV", "NODE_ENV"]` 的 build 任务，约 :43）的数组补 `"ZCODE_DATA_DIR_SEGMENT"`；如存在其他承载 agent 构建的 env 白名单任务一并补齐。
+
 - [ ] **Step 2: 构建冒烟断言**
 
 Run:
@@ -585,48 +615,132 @@ Expected: 默认构建 bundle 中 segment 值为 `".zcode"`（抽查 `grep -o '"
 - [ ] **Step 4: Commit**
 
 ```bash
-git add scripts/build-desktop-agent-cli.mjs apps/zcode-cli/packages/cli/scripts/build.mjs
-git commit -m "feat(isolation): agent bundle 构建注入数据目录 segment define"
+git add scripts/build-desktop-agent-cli.mjs apps/zcode-cli/packages/cli/scripts/build.mjs apps/zcode-cli/turbo.json
+git commit -m "feat(isolation): agent bundle 构建注入数据目录 segment define（含 turbo env）"
 ```
 
 ---
 
-### Task 8: spec 勘误与文档更新
+### Task 8: 登录发起时接管 zcode:// handler（kcode flavor）
+
+**Files:**
+- Modify: `packages/desktop/src/main/desktopHostProcess.ts`（login 窗口创建处，约 :120-148）
+- Test: `packages/desktop/test/desktopLoginHandlerRegistration.test.ts`（新建）
+
+**Interfaces:**
+- Consumes: `isKcodePackagedRuntime`（`./desktopRuntimeEnv.js`，已存在）；electron `app.setAsDefaultProtocolClient`（`desktopOAuthDeepLink.ts` 已在启动期使用）。
+
+**背景（codex 审查发现）**：每个 app 启动时自注册为 `zcode://` 默认 handler，但顺序「启动 KCode → 启动 ZCode（取走 handler）→ 在 KCode 发起登录」会把 OAuth 回调送进 ZCode，而 OAuth state 只存在发起进程内，KCode 登录无法完成。因此 kcode flavor 必须在**发起登录时**重新接管 handler。
+
+- [ ] **Step 1: 写失败测试**
+
+```ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const setDefaultMock = vi.fn();
+const appMock = { isPackaged: true, setAsDefaultProtocolClient: setDefaultMock };
+
+vi.mock("electron", () => ({ app: appMock, BrowserWindow: vi.fn() }));
+// desktopRuntimeEnv 的 kcode 判定读编译期 ZCODE_PRODUCT_FLAVOR（mock 见下）
+vi.mock("@zcode/shared", () => ({
+  get ZCODE_PRODUCT_FLAVOR() {
+    return "kcode";
+  },
+}));
+
+describe("kcode 登录时接管 zcode:// handler", () => {
+  afterEach(() => {
+    vi.resetModules();
+    setDefaultMock.mockClear();
+  });
+
+  it("打开 login 窗口前 kcode 打包态重新注册默认 handler", async () => {
+    const { ensureDeepLinkHandlerForLogin } = await import("../src/main/desktopHostProcess.js");
+    ensureDeepLinkHandlerForLogin();
+    expect(setDefaultMock).toHaveBeenCalledWith("zcode");
+  });
+});
+```
+
+（实现时从 `desktopHostProcess.ts` 抽出导出 `ensureDeepLinkHandlerForLogin()`：`if (!isKcodePackagedRuntime) return; app.setAsDefaultProtocolClient("zcode")` + 日志；在 `page === "login"` 的窗口创建分支调用它。若该文件 electron mock 形态与上面不符，以现有 `desktopRuntimeEnv.test.ts` 的 mock 方式为准调整。）
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `mise exec -- node_modules/.bin/vitest run packages/desktop/test/desktopLoginHandlerRegistration.test.ts`
+Expected: FAIL（函数不存在）。
+
+- [ ] **Step 3: 最小实现**
+
+`desktopHostProcess.ts`（import `isKcodePackagedRuntime` from `./desktopRuntimeEnv.js`、`app` from `electron`）：
+
+```ts
+/**
+ * KCode 与 ZCode 共用 zcode:// scheme，系统默认 handler 是"最后注册者"。
+ * app 启动期的自注册只是初始态：若 KCode 先启动、ZCode 后启动，发起登录时回调会落进
+ * ZCode，而 OAuth state 只存在发起进程内，KCode 登录永远无法完成。因此在 kcode 打包态
+ * 打开登录窗口前重新接管 handler（官方 ZCode 构建不受影响）。
+ */
+export function ensureDeepLinkHandlerForLogin(): void {
+  if (!isKcodePackagedRuntime) return;
+  const ok = app.setAsDefaultProtocolClient("zcode");
+  // 复用该文件既有 logger 输出注册结果。
+}
+```
+
+在创建 login 页窗口（`page === "login"`）的分支、加载 URL 之前调用。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `mise exec -- node_modules/.bin/vitest run packages/desktop/test/desktopLoginHandlerRegistration.test.ts packages/desktop/test/desktopRuntimeEnv.test.ts`
+Expected: 新测试 PASS；desktopRuntimeEnv 仅既有 3 个基线失败。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/desktop/src/main/desktopHostProcess.ts packages/desktop/test/desktopLoginHandlerRegistration.test.ts
+git commit -m "feat(isolation): kcode 登录发起时重新接管 zcode:// 默认 handler"
+```
+
+---
+
+### Task 9: spec 勘误与文档更新
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-20-kcode-full-isolation-design.md`
 
 **Interfaces:** 无。
 
-- [ ] **Step 1: 勘误三处**
+- [ ] **Step 1: 勘误与补记三处**
 
-1. §6：`desktopOAuthDeepLink.ts:431` 每个 app 启动时已调用 `app.setAsDefaultProtocolClient("zcode")`——macOS 上后启动者即默认 handler。改为：「KCode 登录无需新代码：启动 KCode（其自注册为 zcode:// 默认 handler）后在 KCode 内发起登录，回调即落入 KCode；之后再启动 ZCode 会取回 handler，属既有 scheme 共存语义」。
-2. §4.3 credential-cipher 段更正：镜像布局不改变 `homedir()`，fallback key 两边相同；隔离由凭据文件分属两个根实现，key 相同反而支持手动拷贝凭据播种（记录此事实，删除「互不可解密」的错误论断）。
-3. §4.1 补记 CUA 结论：开源 `zcode-cua` 包与 `cuaHelperInstaller` 均无 `~/.zcode` 直连（Helper 安装根在闭源 producer，个人构建不打包 Helper，variant env 已隔离），CUA 安装根收口一项确认无需改动、出范围。
+1. §4.3 credential-cipher 段更正：镜像布局不改变 `homedir()`，fallback key 两边相同；隔离由凭据文件分属两个根实现，key 相同反而支持手动拷贝凭据播种（记录此事实，删除「互不可解密」的错误论断）。
+2. §4.1 补记 CUA 结论：开源 `zcode-cua` 包与 `cuaHelperInstaller` 均无 `~/.zcode` 直连（Helper 安装根在闭源 producer，个人构建不打包 Helper，variant env 已隔离），CUA 安装根收口一项确认无需改动、出范围。
+3. §4 改动面补记（计划期查证）：`packages/shared/src/zcode-agent-runtime.ts`（nativeConfigDir）、`packages/services/src/storage/adapters/rootsResolver.ts`（storage R1/R2 根）、CLI `skills/commands roots`（scope 分流）、`contracts/src/tools/saved-workflow.ts`（全局 workflows 前缀）、`turbo.json`（segment 进 env 白名单）、登录时接管 handler（desktopHostProcess）——已并入实施计划对应任务。
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-10-20-kcode-full-isolation-design.md
-git commit -m "docs(isolation): spec 勘误——深链注册现状与 credential-cipher 事实"
+git commit -m "docs(isolation): spec 勘误与计划期查证补记"
 ```
 
 ---
 
-### Task 9: 全量验证 + 构建 + 本机验收
+### Task 10: 全量验证 + 构建 + 本机验收
 
 **Files:** 无源码改动（验证任务）。
 
-- [ ] **Step 1: 仓库级验证**
+- [ ] **Step 1: 仓库级验证（对齐 verify:pre-push 全量组成）**
 
 Run:
 ```bash
 mise exec -- node scripts/mise-run.mjs pnpm typecheck
 mise exec -- node scripts/mise-run.mjs pnpm lint
+mise exec -- node scripts/mise-run.mjs pnpm db:schema:check
+mise exec -- node scripts/mise-run.mjs pnpm test:architecture
 mise exec -- node scripts/mise-run.mjs pnpm architecture:check -- --changed
-mise exec -- node_modules/.bin/vitest run packages/services/test packages/shared/test/env.test.ts packages/desktop/test/desktopProductIdentity.test.ts packages/desktop/test/desktopDataBaseDirBootstrap.test.ts packages/desktop/test/exportLogsSegment.test.ts packages/desktop/test/desktopRuntimeEnv.test.ts
+mise exec -- node_modules/.bin/vitest run packages/services/test packages/shared/test/env.test.ts packages/desktop/test/desktopProductIdentity.test.ts packages/desktop/test/desktopDataBaseDirBootstrap.test.ts packages/desktop/test/exportLogsSegment.test.ts packages/desktop/test/desktopLoginHandlerRegistration.test.ts packages/desktop/test/desktopRuntimeEnv.test.ts
 ```
-Expected: typecheck/lint(0 errors)/architecture OK；测试除 3 个既有基线失败（本地免签 CUA）外全 PASS。
+Expected: typecheck/lint(0 errors)/schema/architecture 全 OK；测试除 3 个既有基线失败（本地免签 CUA）外全 PASS。
 
 - [ ] **Step 2: 默认构建零变化抽查**
 
@@ -664,7 +778,12 @@ ditto packages/desktop/dist/mac-arm64/KCode.app /Applications/KCode.app && open 
 ```bash
 git add docs/desktop/zcode-preview-packaging.md
 git commit -m "docs(isolation): KCode 数据层镜像隔离落地记录"
+```
+
+推送：本 fork 缺 pre-push 钩子依赖的 origin/staging 分支，无法原样运行 `verify:pre-push`。已在其上方用显式基线跑完等价组成（lint、db:schema:check、test:architecture、architecture:check --changed、以及 `ZCODE_AFFECTED_TEST_BASE=<起始SHA> pnpm test:unit:affected --scope push`，基线机制见 docs/testing/pre-push-hook.md），之后：
+
+```bash
 git push --no-verify origin kcode
 ```
 
-（pre-push 钩子在本 fork 缺 origin/staging 不可用，等效检查已在本任务 Step 1 手动完成。）
+（如实记录：钩子未原样执行，等价五项已逐一运行并记录结果。）

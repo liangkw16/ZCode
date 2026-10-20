@@ -235,3 +235,31 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 - TLS/域名未获用户答复（本轮提问未回）：默认按 IP + 高位端口 http 起步，设计保留
   仅改配置的 TLS 升级路径；若后续提供备案域名或选择 Cloudflare Tunnel，无代码变更。
 - ECS 选型默认 `alecs`，实现时实测两台环境后定稿，结论记录在实现记录中。
+
+## 追记 2026-10-20（二）：QR / 复制链接直连（密钥随链接分发）
+
+### 背景
+
+原设计密钥首次分发依赖"手动书签"：手机先打开带 `#k=` 的 URL 存密钥，之后才能扫码/直连。实测两步不便，用户预期对齐官方体验：**扫二维码或复制链接打开即进入控制页**。
+
+### 决策
+
+1. **密钥进入桌面**：新增 kcode 专属 setting `zcodeRelaySelfHostKey`（与 `zcodeEndpointOrigin` 同级，`~/.kcode/v2/setting.json`；`validationAppSettings` 注册 zod 清洗：trim、空值/非法值整键丢弃，模式同 `zcodeEndpointOrigin`）。无设置 UI，与 origin 一致经文件配置。
+2. **密钥进入链接**：shared `buildWebRemoteControlExternalQrUrl` 新增可选参数 `selfHostKey`；非空时 `url.hash = "k=" + encodeURIComponent(key)`（fragment 不发往服务端）。桌面 manager 中 `qrUrl === connectUrl` 是同一字符串，一处注入，二维码与"复制链接"同时生效。
+3. **门控（纯函数，desktop `web-remote-relay` 模块）**：`resolveWebRemoteControlSelfHostQrKey({flavor, settingOrigin, settingKey, finalRemoteUrl, appVersion})` 仅当 ① `ZCODE_PRODUCT_FLAVOR === "kcode"`、② setting origin 可解析、③ **最终手机页 URL（含 `ZCODE_WEB_REMOTE_CONTROL_URL` 等 env 覆盖后）的 origin === 自建 origin**、④ key 非空——全部成立才返回 key。门控落在最终 URL 而非配置快照：任何覆盖把手机页指向其它域时密钥一律不注入，防止密钥泄进官方域二维码（含跨域 env 覆盖组合）。
+4. **手机页 / relay 零改动**：`readSelfHostKey` 已解析 `#k=` → localStorage → `replaceState` 摘除 fragment（query 的 sid/mid/name 配对参数不受影响）。
+
+### 安全模型影响
+
+QR / 复制链接成为主密钥载体——与原书签 URL **同一暴露面、同一信任级**（持有链接即 terminal）。二维码仅在远控弹窗打开期间渲染；setting 文件在单用户机器上明文存密钥（与 `~/.ssh` 私钥同级风险）。不进日志（manager 无 qrUrl/connectUrl 日志输出，实现时保持）。production/preview 构建零变化（无 setting 则 getter 返回 null，builder 不追加 hash）。
+
+### 验收
+
+| # | 场景 | 预期 |
+| --- | --- | --- |
+| Q1 | shared builder：带 key | URL 追加 `#k=<encoded>`，query 参数不变 |
+| Q2 | shared builder：无 key / 空串 | 与现状完全一致（无 hash） |
+| Q3 | manager 注入 getter | `qrUrl`/`connectUrl` 含 `#k=` 且 search 不变；未注入时存量断言不变 |
+| Q4 | 门控：最终手机页 URL 指向其它域（env 覆盖组合）/ flavor 非 kcode / key 空 | key 一律不进 URL（纯函数单测覆盖） |
+| Q5 | 真机：写入 setting → KCode 开远控 → 手机扫码 | 不出现登录/缺钥失败页，直接配对进入 |
+| Q6 | settings 清洗 | 非字符串/空白/超长值整键丢弃，不拖垮 settings 读取 |

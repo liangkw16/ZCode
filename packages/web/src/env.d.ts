@@ -15,6 +15,8 @@ interface ImportMetaEnv {
   readonly VITE_ZCODE_BASE_URL?: string;
   readonly VITE_ZCODE_ENDPOINT_ORIGIN?: string;
   readonly VITE_ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL?: string;
+  // 自托管免登录构建标记；密钥不进构建（经书签 URL #k= fragment 分发）。
+  readonly VITE_ZCODE_REMOTE_SELF_HOSTED?: string;
 }
 
 interface ImportMeta {

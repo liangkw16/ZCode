@@ -100,6 +100,11 @@ import {
   markWebRemoteControlBridgeTaskRead,
   markWebRemoteControlTaskRead,
 } from "#src/web-remote-control/index.js";
+import {
+  createSelfHostAuth,
+  isSelfHostRemoteBuild,
+  readSelfHostKey,
+} from "#src/web-remote-control/adapters/selfHostAuth.js";
 
 import {
   WebRemoteControlDeviceListPage,
@@ -404,8 +409,25 @@ const webRemoteControlStorage: Pick<Storage, "getItem" | "setItem"> = {
   setItem: (key, value) => window.localStorage.setItem(key, value),
 };
 
+// 自托管免登录构建：密钥经书签 URL #k= fragment 首次注入 localStorage 并摘除 fragment；
+// 构建产物不携带密钥。官方构建（未注入标记）走既有 webAuthService，行为不变。
+const selfHostBuild = isSelfHostRemoteBuild(import.meta.env);
+const selfHostKey = selfHostBuild
+  ? readSelfHostKey({ hash: window.location.hash, storage: webRemoteControlStorage })
+  : null;
+if (selfHostBuild && window.location.hash) {
+  window.history.replaceState(
+    window.history.state,
+    "",
+    window.location.pathname + window.location.search,
+  );
+}
+const remoteControlAuth = selfHostBuild
+  ? createSelfHostAuth(selfHostKey, (failure) => renderWebRemoteControlFailure(failure))
+  : webAuthService;
+
 const remoteEntry = new WebRemoteControlEntry({
-  auth: webAuthService,
+  auth: remoteControlAuth,
   getHref: () => window.location.href,
   replaceHref: (href) => window.history.replaceState(window.history.state, "", href),
   storage: webRemoteControlStorage,
@@ -425,7 +447,11 @@ const remoteEntry = new WebRemoteControlEntry({
   },
   onView: (view) => {
     if (view.kind === "callback") renderWebAuthCallbackPage();
-    else if (view.kind === "login") renderWebLoginPage();
+    else if (view.kind === "login") {
+      // 自托管模式登录页不可达：无密钥/密钥失效一律落失败页，不得引导真实 OAuth。
+      if (selfHostBuild) renderWebRemoteControlFailure({ reason: "relay-unavailable" });
+      else renderWebLoginPage();
+    }
     else if (view.kind === "devices") {
       document.title = "ZCode - Web Remote Control";
       root.render(

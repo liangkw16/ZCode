@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import {
   DATA_BASE_DIR_FORBIDDEN_WINDOWS_INSTALL_DIR_ERROR_CODE,
   ZCODE_AGENT_RUNTIME,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 
 let _dataBaseDir: string | null = null;
@@ -42,9 +43,9 @@ export function getDataBaseDir(): string {
   return defaultDataBaseDir;
 }
 
-/** {dataBaseDir}/.zcode */
+/** {dataBaseDir}/{ZCODE_DATA_DIR_SEGMENT}（默认 .zcode；kcode 构建为 .kcode 镜像根） */
 export function getZCodeDataRootDir(): string {
-  return join(getDataBaseDir(), ".zcode");
+  return join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT);
 }
 
 /** 非项目对话共享的真实工作目录；默认 ~/.zcode/workspace/default。 */
@@ -234,7 +235,7 @@ export function getLegacyDeletedTaskSessionSnapshotPath(
 export function getProviderWorkspaceConfigDir(): string {
   return ZCODE_AGENT_RUNTIME.nativeConfigDir
     ? join(getDataBaseDir(), ZCODE_AGENT_RUNTIME.nativeConfigDir)
-    : join(getDataBaseDir(), ".zcode", "cli");
+    : join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT, "cli");
 }
 
 /**
@@ -243,8 +244,8 @@ export function getProviderWorkspaceConfigDir(): string {
  * state must only live at the default homedir location.
  */
 export async function copyDataDirectory(oldBaseDir: string, newBaseDir: string): Promise<void> {
-  const oldDir = join(oldBaseDir, ".zcode", "v2");
-  const newDir = join(newBaseDir, ".zcode", "v2");
+  const oldDir = join(oldBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2");
+  const newDir = join(newBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2");
   await cp(oldDir, newDir, {
     recursive: true,
     force: false,

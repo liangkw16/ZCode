@@ -10,6 +10,8 @@
    `zcodeEndpointOrigin` 同级）后，二维码与复制链接自动携带 `#k=<secret>`，手机扫码即存即连；
    书签 URL `http://<origin>/remote/v4#k=<secret>` 保留为备用通道。
 3. 上传：`dist/main.js` → `/opt/self-host-relay/main.js`；`packages/web/dist/` → `/opt/self-host-relay/web/`。
+   上传前先 `pnpm compress:web-remote-control` 生成 `.br`/`.gz` sidecar（relay 按 Accept-Encoding 协商返回）；
+   上传时排除 `*.map`（sourcemap 不公开）。资产文件先就绪、`index.html` 最后替换，保证原文件与 sidecar 同批。
 4. systemd：unit 中 `__NODE_BIN__` 替换为 `/opt/node/bin/node`，`systemctl enable --now self-host-relay`。
 5. 云厂商安全组放行 8787/TCP（控制台操作）。
 6. 验证：`curl http://127.0.0.1:8787/remote/v4` 200；无密钥 `POST /api/v1/remote/token` 401。

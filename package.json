@@ -77,7 +77,8 @@
     "test:architecture": "node --test scripts/test/architecture-governance.test.mjs scripts/test/architecture-governance-review.test.mjs scripts/test/architecture-upstream-admission.test.mjs scripts/test/source-size-policy.test.mjs",
     "architecture:adopt": "node scripts/architecture/architecture-check.mjs adopt",
     "db:schema:check": "node --test scripts/test/sqlite-schema-contract.test.mjs && pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts",
-    "db:schema:update": "pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts --update"
+    "db:schema:update": "pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts --update",
+    "compress:web-remote-control": "node scripts/compress-web-remote-control.mjs packages/web/dist"
   },
   "dependencies": {
     "border-beam": "^1.0.1",

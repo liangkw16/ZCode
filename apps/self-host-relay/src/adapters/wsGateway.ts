@@ -20,7 +20,12 @@ interface RelayConnection {
   deviceSid: string | null;
   ownerRef: unknown;
   socket: WebSocket;
+  /** 最近一条消息到达时间：现任 terminal 活跃判定依据（正常心跳 4-6s 一次 query）。 */
+  lastSeenAt: number;
 }
+
+/** 现任 terminal 沉默超过该窗口才允许新 terminal 接管（spec 追记三 §3.1，与官方"新替旧"的有意分叉）。 */
+const TERMINAL_OWNER_STALE_MS = 15_000;
 
 export function attachSelfHostRelayWsGateway(
   server: Server,
@@ -67,11 +72,13 @@ export function attachSelfHostRelayWsGateway(
         deviceSid: null,
         ownerRef: {},
         socket: ws,
+        lastSeenAt: now(),
       };
       connections.set(connection.ownerRef, connection);
       ws.on("error", () => ws.terminate());
       ws.on("message", (data, isBinary) => {
         if (ws.readyState !== WebSocket.OPEN) return;
+        connection.lastSeenAt = now();
         let message: ReturnType<typeof parseWebRemoteControlRelayV2OutgoingMessage> = null;
         // Bugfix：深嵌套 JSON（约 5000 层）会让 zod 递归校验爆栈抛 RangeError；
         // 校验异常一律按非法消息处理，只关当前连接，不能打死进程。
@@ -91,6 +98,20 @@ export function attachSelfHostRelayWsGateway(
             send(connection, { type: "error", code: "WRONG_PARAM" });
             ws.close();
             return;
+          }
+          // 现任优先独占（spec 追记三 §3.1）：terminal 接入时若现任 terminal 活跃（15s 内有
+          // 消息），拒绝新连接（回 KICKED——客户端 60s 内第二次 KICKED 会进会话冲突终态页停止
+          // 重试，双页互踢战争终止）；现任沉默 >=15s（半开/锁屏/关页）才按官方语义替换接管。
+          // 检查与 claim 在同一同步回调内完成，并发 auth_init 不会同时通过。device 角色不受
+          // 影响：桌面重启必须无条件收回 device 位。
+          if (connection.role === "terminal") {
+            const incumbentOwner = store.getOwner(message.device_sid, "terminal");
+            const incumbent = incumbentOwner ? connections.get(incumbentOwner.owner) : undefined;
+            if (incumbent && now() - incumbent.lastSeenAt < TERMINAL_OWNER_STALE_MS) {
+              send(connection, { type: "error", code: "KICKED" });
+              ws.close();
+              return;
+            }
           }
           const claimed = store.claimOwnership(
             message.device_sid,

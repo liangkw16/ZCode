@@ -215,28 +215,15 @@ describe("畸形输入硬化", () => {
   });
 });
 
-/** 现任优先独占（spec 追记三 §3.1，codex-review 修订为"排队等接管"）：独立实例 + 可注入时钟。
- * 注意：排队定时器按真实时间触发，而静默判定读注入时钟——用例必须在等待真实定时器前
- * 推进虚拟时钟越过窗口；每个用例使用独立 deviceSid，避免断言失败后的连接泄漏跨用例污染。 */
-describe("ws2 网关：现任优先独占（排队等接管）", () => {
+/** terminal 接管语义（官方"新替旧"）与设备契约：独立实例避免污染共享套件。 */
+describe("ws2 网关：terminal 接管与设备契约", () => {
   let server2: Server;
   let base2: string;
   let ws2: string;
   let store2: RelayStore;
   let gateway2: { close(): Promise<void> };
-  let clock: number;
-  const STALE_MS = 400;
-  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  // KICKED 与 close 帧可能同批到达：close 事件会在消息微任务前发出，
-  // 事后 once("close") 永远挂起；用 readyState 轮询判定关闭。
-  const waitClosed = async (socket: WebSocket) => {
-    const deadline = Date.now() + 2_000;
-    while (socket.readyState !== WebSocket.CLOSED && Date.now() < deadline) await sleep(20);
-    expect(socket.readyState).toBe(WebSocket.CLOSED);
-  };
 
   beforeAll(async () => {
-    clock = Date.now();
     store2 = new RelayStore({ newSid: () => `d_${Math.random().toString(36).slice(2)}` });
     const router = createSelfHostRelayHttpRouter({ store: store2, secret: SECRET });
     server2 = createServer((request, response) => {
@@ -247,11 +234,7 @@ describe("ws2 网关：现任优先独占（排队等接管）", () => {
         }
       });
     });
-    gateway2 = attachSelfHostRelayWsGateway(server2, {
-      store: store2,
-      now: () => clock,
-      terminalOwnerStaleMs: STALE_MS,
-    });
+    gateway2 = attachSelfHostRelayWsGateway(server2, { store: store2 });
     server2.listen(0, "127.0.0.1");
     await once(server2, "listening");
     const port = (server2.address() as { port: number }).port;
@@ -266,7 +249,8 @@ describe("ws2 网关：现任优先独占（排队等接管）", () => {
   });
 
   function freshSid(): string {
-    return store2.registerDevice(`mid-${Math.random().toString(36).slice(2, 8)}`, clock).deviceSid;
+    return store2.registerDevice(`mid-${Math.random().toString(36).slice(2, 8)}`, Date.now())
+      .deviceSid;
   }
 
   async function mint2(role: "device" | "terminal"): Promise<string> {
@@ -289,92 +273,42 @@ describe("ws2 网关：现任优先独占（排队等接管）", () => {
   async function auth2(role: "device" | "terminal", sidToUse: string) {
     const connection = await open2(await mint2(role));
     connection.socket.send(
-      JSON.stringify({ type: "auth_init", device_sid: sidToUse, meta: { name: "inc-test" } }),
+      JSON.stringify({ type: "auth_init", device_sid: sidToUse, meta: { name: "takeover-test" } }),
     );
     return connection;
   }
 
-  it("半开恢复（P1 回归）：现任沉默时新连接排队等接管，全程无 KICKED 打给新连接", async () => {
+  // KICKED 与 close 帧可能同批到达：close 事件会在消息微任务前发出，
+  // 事后 once("close") 永远挂起；用 readyState 轮询判定关闭。
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitClosed = async (socket: WebSocket) => {
+    const deadline = Date.now() + 2_000;
+    while (socket.readyState !== WebSocket.CLOSED && Date.now() < deadline) await sleep(20);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  };
+
+  it("官方语义：现任 terminal 活跃时新 terminal 立即接管并踢旧（换设备秒切）", async () => {
     const sid = freshSid();
     const device = await auth2("device", sid);
     await device.messages.next();
     const incumbent = await auth2("terminal", sid);
-    await incumbent.messages.next();
+    await incumbent.messages.next(); // auth_ack matched
 
-    clock += 200; // 现任沉默 200 < 窗口：新连接排队而非被拒
-    const newcomer = await auth2("terminal", sid);
-    clock += STALE_MS; // 推进虚拟时钟越过窗口：真实定时器到期时静默判定通过
-    const ack = await Promise.race([
-      newcomer.messages.next(),
-      sleep(2_000).then(() => null as unknown as any),
-    ]);
-    expect(ack).toMatchObject({ type: "auth_ack", pair_status: "matched" });
-    expect(await incumbent.messages.next()).toMatchObject({ type: "error", code: "KICKED" });
-    await waitClosed(incumbent.socket);
-    newcomer.socket.close();
-    device.socket.close();
-  });
-
-  it("现任持续活跃：新连接等满窗口后收 KICKED，现任不受影响", async () => {
-    const sid = freshSid();
-    const device = await auth2("device", sid);
-    await device.messages.next();
-    const incumbent = await auth2("terminal", sid);
-    await incumbent.messages.next();
-
-    clock += 100;
-    const newcomer = await auth2("terminal", sid);
-    // 排队等待期间现任持续心跳（真实时间与虚拟时钟同步推进，刷新 lastSeen）
-    for (let i = 0; i < 3; i += 1) {
-      await sleep(120);
-      clock += 120;
-      incumbent.socket.send(JSON.stringify({ type: "pair_status_query" }));
-      await incumbent.messages.next();
-    }
-    const rejected = await Promise.race([
-      newcomer.messages.next(),
-      sleep(2_000).then(() => null as unknown as any),
-    ]);
-    expect(rejected).toMatchObject({ type: "error", code: "KICKED" });
-    await waitClosed(newcomer.socket);
-
+    // 现任（活跃心跳）期间新设备接入：立即接管，不排队不拒绝
     incumbent.socket.send(JSON.stringify({ type: "pair_status_query" }));
-    expect(await incumbent.messages.next()).toMatchObject({
-      type: "pair_status_ack",
+    await incumbent.messages.next();
+    const newcomer = await auth2("terminal", sid);
+    expect(await newcomer.messages.next()).toMatchObject({
+      type: "auth_ack",
       pair_status: "matched",
     });
-    device.socket.send(JSON.stringify({ type: "data", payload: { hello: 1 } }));
-    expect(await incumbent.messages.next()).toMatchObject({ type: "data", payload: { hello: 1 } });
-    device.socket.close();
-    incumbent.socket.close();
-    await waitClosed(device.socket);
-  });
-
-  it("沉默超窗：立即接管（官方替换语义）", async () => {
-    const sid = freshSid();
-    const incumbent = await auth2("terminal", sid);
-    await incumbent.messages.next();
-    clock += STALE_MS + 100;
-    const newcomer = await auth2("terminal", sid);
-    expect(await newcomer.messages.next()).toMatchObject({ type: "auth_ack" });
     expect(await incumbent.messages.next()).toMatchObject({ type: "error", code: "KICKED" });
     await waitClosed(incumbent.socket);
+    device.socket.close();
     newcomer.socket.close();
   });
 
-  it("现任主动关闭后新 terminal 直接成功", async () => {
-    const sid = freshSid();
-    const incumbent = await auth2("terminal", sid);
-    await incumbent.messages.next();
-    incumbent.socket.close();
-    await waitClosed(incumbent.socket);
-    await new Promise((resolve) => setImmediate(resolve));
-    const next = await auth2("terminal", sid);
-    expect(await next.messages.next()).toMatchObject({ type: "auth_ack" });
-    next.socket.close();
-  });
-
-  it("已删除 SID 返回 AUTH_FAILED，不排队（codex-review P3 回归）", async () => {
+  it("已删除 SID 返回 AUTH_FAILED（契约 §1.2）", async () => {
     const sid = freshSid();
     const holder = await auth2("terminal", sid);
     await holder.messages.next(); // waiting auth_ack

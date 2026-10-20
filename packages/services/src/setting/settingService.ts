@@ -217,7 +217,7 @@ export function createSettingService(): ISettingService {
 /**
  * 设置文件路径唯一解析点：{home}/{segment}/v2/setting.json。远控设备身份等 AppSettings
  * 存于此文件，kcode 镜像根下自成一套；desktop bootstrap 与 main 的 settingsFile 都从这里取，
- * 不允许再出现第二处 join(home, ".zcode", "v2", ...)。
+ * 不允许再出现第二处手拼设置文件路径。
  */
 export function resolveSettingsFilePath(): string {
   return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "v2", "setting.json");

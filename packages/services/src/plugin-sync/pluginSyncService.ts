@@ -20,6 +20,7 @@ import type {
   PluginSyncImportResult,
   PluginSyncRemoteStatus,
 } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { IPluginSyncService } from "./pluginSync.js";
 import {
   createPluginSyncArchive,
@@ -217,11 +218,11 @@ function resolveUserHomeDir(): string {
 }
 
 function getUserZcodeConfigPath(): string {
-  return join(resolveUserHomeDir(), ".zcode", "cli", "config.json");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
 }
 
 function getUserZcodePluginRoot(): string {
-  return join(resolveUserHomeDir(), ".zcode", "plugins");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "plugins");
 }
 
 async function collectLocalUserPluginCandidates(): Promise<PluginSyncCandidate[]> {

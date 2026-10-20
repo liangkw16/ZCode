@@ -132,7 +132,9 @@ export {
   createSettingServiceWithMigrations,
   resolveSettingsFilePath,
 } from "./setting/settingService.js";
-export { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
+
+export { ZCODE_DATA_DIR_SEGMENT };
 export { createCredentialService } from "./credential/credentialService.js";
 export { createBroadcastService } from "./broadcast/broadcastService.js";
 export { createZCodeAgentService } from "./zcode-agent/zcodeAgentService.js";
@@ -1135,7 +1137,7 @@ export { isOfficialCuaPluginEnabledForWorkspace };
 
 export function hasGlobalCliZCodeCuaServer(env: NodeJS.ProcessEnv = process.env): boolean {
   const home = env.HOME?.trim() || homedir();
-  const configPath = join(home, ".zcode", "cli", "config.json");
+  const configPath = join(home, ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configPath, "utf8"));

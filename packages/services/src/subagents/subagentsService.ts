@@ -24,6 +24,7 @@ import {
   type SubAgentConfig,
   type SubagentsListMode,
   type ZCodeProvider,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 import { normalizeSubagentModelSelection } from "./subagentModelSelection.js";
 import { serializeSubagentMarkdown, parseSubagentMarkdown } from "./subagentMarkdown.js";
@@ -407,7 +408,7 @@ async function discoverPluginAgents(params: {
 
 async function readPluginConfig(options?: SubagentStorageOptions): Promise<PluginConfigSummary> {
   try {
-    const configPath = join(resolveUserHomeDir(options), ".zcode", "cli", "config.json");
+    const configPath = join(resolveUserHomeDir(options), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
     const raw = await readFile(configPath, "utf-8");
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed)) return { enabledPlugins: {}, suppressedBuiltins: [] };

@@ -6,7 +6,10 @@ import { join, resolve } from "node:path";
 import type { RootsResolverPort } from "../app/ports.js";
 import type { StorageRootSpec } from "@zcode/shared";
 
-export const ZCODE_DATA_DIR_NAME = ".zcode";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
+
+/** kcode 镜像根随编译期 segment；导出名保留，两个 join 消费点不变。 */
+export const ZCODE_DATA_DIR_NAME = ZCODE_DATA_DIR_SEGMENT;
 
 export function resolveStorageRoots(params: {
   homeDir: string;

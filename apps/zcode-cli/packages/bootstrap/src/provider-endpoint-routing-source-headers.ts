@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts";
 import { arch as readOsArch, homedir, release as readOsRelease } from "node:os";
 import { join } from "node:path";
 import {
@@ -47,7 +48,7 @@ function resolveClientTimezone(): string {
 
 function resolveTelemetryStateFile(env: NodeJS.ProcessEnv): string {
   const dataBaseDir = env[ZCODE_DATA_BASE_DIR_ENV_KEY]?.trim() || homedir();
-  return join(dataBaseDir, ".zcode", "v2", "telemetry-state.json");
+  return join(dataBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2", "telemetry-state.json");
 }
 
 async function readExistingDeviceMid(

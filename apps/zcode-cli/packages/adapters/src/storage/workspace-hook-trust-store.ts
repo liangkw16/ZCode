@@ -1,4 +1,5 @@
 import { chmod, mkdir, open, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts";
 import type { FileHandle } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -132,7 +133,7 @@ export async function resolveWorkspaceHookTrustStorePath(
 ): Promise<string> {
   const home = resolve(options.homeDir ?? homedir());
   const userConfigPath = resolve(
-    options.userConfigPath ?? join(home, ".zcode", "cli", "config.json"),
+    options.userConfigPath ?? join(home, ZCODE_DATA_DIR_SEGMENT, "cli", "config.json"),
   );
   const config = await readUserConfig(userConfigPath);
   const storage = isRecord(config.storage) ? config.storage : {};

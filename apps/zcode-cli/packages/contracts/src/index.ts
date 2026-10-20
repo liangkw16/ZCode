@@ -4,6 +4,7 @@
 
 // Interfaces
 export * from "./interfaces/shared.js";
+export * from "./dataDirSegment.js";
 export * from "./interfaces/execution.port.js";
 export * from "./interfaces/browser-control.port.js";
 export * from "./interfaces/file-system.port.js";

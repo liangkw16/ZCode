@@ -10,9 +10,9 @@ describe("CLI 数据目录 segment", () => {
 
   it("define 注入 .kcode 时透出；未注入回落 .zcode", async () => {
     vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", ".kcode");
-    expect((await importFresh("../src/dataDirSegment.js")).ZCODE_DATA_DIR_SEGMENT).toBe(".kcode");
+    expect((await importFresh("../src/path/index.js")).ZCODE_DATA_DIR_SEGMENT).toBe(".kcode");
     vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", undefined);
-    expect((await importFresh("../src/dataDirSegment.js")).ZCODE_DATA_DIR_SEGMENT).toBe(".zcode");
+    expect((await importFresh("../src/path/index.js")).ZCODE_DATA_DIR_SEGMENT).toBe(".zcode");
   });
 
   it("saved-workflow 全局目录前缀跟随 segment", async () => {

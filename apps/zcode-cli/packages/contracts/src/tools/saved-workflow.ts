@@ -8,7 +8,7 @@
 // 各自演化，症状是「刚保存的 workflow 列不出来」，而那是最难被单侧测试抓住的一类分叉。
 
 import { z } from "zod";
-import { ZCODE_DATA_DIR_SEGMENT } from "../dataDirSegment.js";
+import { ZCODE_DATA_DIR_SEGMENT } from "../path/index.js";
 
 /**
  * 保存文件的扩展名。`.dwf.ts` 而不是 `.ts`：编辑器按 TypeScript 高亮（frontmatter 是块注释，

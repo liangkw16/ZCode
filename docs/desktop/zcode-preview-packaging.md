@@ -386,3 +386,15 @@ MR !2636 合入后 bug scanner 报出两项，均成立，本轮修正：
 - 依赖收集器：仓库根同时存在 `pnpm-lock.yaml` 与 `package-lock.json`，electron-builder 锁文件探测歧义后回落环境探测。直接 `node cli.js` 调用会被识别为 npm collector，在 pnpm hoisted 布局下解析不到依赖树（node-pty 等进不了 asar，afterPack 重打包断言失败）。本地打包必须带 `npm_config_user_agent=pnpm/<version>`（或经 `pnpm exec` 调用）走 pnpm collector。
 - 版本号：electron-builder 在应用 `extraMetadata.version` 前校验 `packages/desktop/package.json` 的 `version`，缺失直接失败；本分支已补 `3.16.1`（与根版本一致）。
 - DMG：`electronDownload.mirror` 默认 npmmirror，其 CDN 缺少 `dmgbuild-bundle-arm64` 二进制（404），本地构建用 `--mac zip` 产出 zip 后解压安装，效果等同。
+
+## 追记 2026-10-20（二）：KCode 数据层镜像隔离（完全独立）
+
+### 落地内容
+
+详见 `docs/superpowers/specs/2026-10-20-kcode-full-isolation-design.md` 与实施计划。kcode flavor 的全部全局数据（设置/远控身份/凭据/会话/插件/skills/agent db/storage 根）落 `~/.kcode` 镜像根；默认构建（production/preview）路径仍为 `~/.zcode`，上游零变化。真实 HOME 不动（Bash/git/ssh 照旧）。工作区相对 `.zcode`（项目级配置）保持共享语义。
+
+### 本机验收（ZKCODE-007）
+
+- `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` 构建安装后：`~/.kcode/{v2,cli,workspace,backup,plugin-workspace}` 全套生成；KCode 运行时写入（tasks-index.sqlite、agent 日志、logs）全部落 `~/.kcode`；`~/.zcode` 同期新写经 session id 归属甄别均为 ZCode 自身。
+- 远控身份随 `~/.kcode/v2/setting.json` 隔离（双端同开远控不再互踢）；登录发起时 kcode 重新接管 `zcode://` handler（`ensureDeepLinkHandlerForLogin`）。
+- 手动待验：A2 KCode 独立登录、A3 双端远控同时在线、A4 KCode 内 Bash `echo $HOME`/git/ssh、A6 ZCode 回归。

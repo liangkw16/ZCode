@@ -8,6 +8,7 @@ import { runCommand } from "./spawn-command.mjs";
 process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + " " : ""}--max-old-space-size=8192`;
 import { stageDevCuaPluginRuntime } from "./stage-dev-cua-plugin-runtime.mjs";
 import { resolveBuiltinProviderBuildEnvironment } from "./builtin-provider-config.mjs";
+import { resolveDesktopDataDirSegment } from "../packages/desktop/scripts/desktop-product-identity.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const useTurboBuild = process.env.ZCODE_DESKTOP_AGENT_BUILD_MODE === "turbo";
@@ -15,6 +16,9 @@ const useBootstrapWithRemoteBuild = process.env.ZCODE_BOOTSTRAP_WITH_REMOTE === 
 const pnpmRunEnv = {
   ...process.env,
   ZCODE_ENV: await resolveBuiltinProviderBuildEnvironment({ root: repoRoot }),
+  // agent bundle 的数据目录 segment 必须与 desktop main/host 同源同值，否则 agent 与
+  // host 写两套根（spec §9 一致性风险）。
+  ZCODE_DATA_DIR_SEGMENT: resolveDesktopDataDirSegment(process.env),
   // pnpm 11 的 verify-deps-before-run 会在 apps/zcode-cli 子 workspace
   // 执行每个 run 前触发 pnpm install；子 workspace 运行时依赖根仓库 @zcode/shared，
   // 自动 install 无法解析根 workspace 包，导致 dev:desktop:test 和 E2E onPrepare 失败。

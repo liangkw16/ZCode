@@ -19,6 +19,8 @@ const PRODUCTION_IDENTITY = Object.freeze({
   linuxExecutableName: "zcode",
   linuxPackageName: "zcode",
   cuaHelperInstallVariant: null,
+  macIconPath: "build/icon.icns",
+  resourceIconPath: "build/icon.png",
 });
 
 const PREVIEW_IDENTITY = Object.freeze({
@@ -28,6 +30,8 @@ const PREVIEW_IDENTITY = Object.freeze({
   linuxExecutableName: "zcode-preview",
   linuxPackageName: "zcode-preview",
   cuaHelperInstallVariant: "preview",
+  macIconPath: "build/icon.icns",
+  resourceIconPath: "build/icon.png",
 });
 
 const KCODE_IDENTITY = Object.freeze({
@@ -37,6 +41,10 @@ const KCODE_IDENTITY = Object.freeze({
   linuxExecutableName: "kcode",
   linuxPackageName: "kcode",
   cuaHelperInstallVariant: "kcode",
+  // KCode 用专属图标（靛蓝渐变 + 白色 K），与并排安装的 ZCode 在 Dock/启动台一眼区分；
+  // production/preview 继续共用默认 ZCode 图标，上游构建零变化。路径相对 desktop 包根。
+  macIconPath: "build/kcode/icon.icns",
+  resourceIconPath: "build/kcode/icon.png",
 });
 
 export const desktopProductIdentities = Object.freeze({

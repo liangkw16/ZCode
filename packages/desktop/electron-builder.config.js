@@ -735,8 +735,9 @@ export default {
       to: "config/provider/zcode-builtin.json",
     },
     {
-      // 应用图标：打包后放入 resources 目录，主进程通过 process.resourcesPath 加载
-      from: "build/icon.png",
+      // 应用图标：打包后放入 resources 目录，主进程通过 process.resourcesPath 加载。
+      // KCode 档换用专属图标资源，避免并排安装时与 ZCode 共用同一张图。
+      from: desktopProductIdentity.resourceIconPath,
       to: "icon.png",
     },
     ...(targetPlatform.os === "linux"
@@ -818,6 +819,9 @@ export default {
     target: ["dmg", "zip"],
     category: "public.app-category.developer-tools",
     artifactName: buildDesktopArtifactName("mac"),
+    // 图标随身份走：KCode 用 build/kcode/icon.icns，production/preview 显式指回默认值（与
+    // electron-builder 的默认解析结果一致），保证非 kcode 构建产物零变化。
+    icon: desktopProductIdentity.macIconPath,
     extendInfo: {
       NSAppleEventsUsageDescription: `${desktopProductIdentity.productName} needs Apple Events access to coordinate local automation workflows with user-approved desktop apps.`,
       // 缺失该 key 时 macOS 会静默拒绝 CoreBluetooth 枚举，内置浏览器 Web Bluetooth

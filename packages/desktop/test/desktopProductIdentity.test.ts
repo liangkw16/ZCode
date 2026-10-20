@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
@@ -31,6 +31,8 @@ describe("desktop product identity", () => {
       linuxExecutableName: "zcode-preview",
       linuxPackageName: "zcode-preview",
       cuaHelperInstallVariant: "preview",
+      macIconPath: "build/icon.icns",
+      resourceIconPath: "build/icon.png",
     });
   });
 
@@ -78,6 +80,8 @@ describe("desktop product identity", () => {
       linuxExecutableName: "kcode",
       linuxPackageName: "kcode",
       cuaHelperInstallVariant: "kcode",
+      macIconPath: "build/kcode/icon.icns",
+      resourceIconPath: "build/kcode/icon.png",
     });
     expect(resolveDesktopProductIdentity(env)).toBe(desktopProductIdentities.kcode);
     expect(resolveDesktopProductFlavor({ ZCODE_ENV: "production" })).toBe("production");
@@ -130,6 +134,8 @@ describe("desktop product identity", () => {
       linuxExecutableName: "zcode",
       linuxPackageName: "zcode",
       cuaHelperInstallVariant: null,
+      macIconPath: "build/icon.icns",
+      resourceIconPath: "build/icon.png",
     });
   });
 
@@ -174,5 +180,23 @@ describe("desktop product identity", () => {
     ).toBe(".zcode");
     expect(resolveDesktopDataDirSegment({ ZCODE_ENV: "test" })).toBe(".zcode");
     expect(resolveDesktopDataDirSegment({})).toBe(".zcode");
+  });
+
+  it("KCode 使用专属图标资产且文件真实存在；production/preview 保持默认 ZCode 图标", () => {
+    // KCode 与 ZCode 并排安装，若图标回退成 ZCode 的黑底 Z 会在 Dock/启动台失去辨识度。
+    // 这里同时断言路径指向专属目录与磁盘文件存在，防止资产被误删后打出错图标的包。
+    const kcode = desktopProductIdentities.kcode;
+    const shared = desktopProductIdentities.production;
+    expect(kcode.macIconPath).toBe("build/kcode/icon.icns");
+    expect(kcode.resourceIconPath).toBe("build/kcode/icon.png");
+    expect(desktopProductIdentities.preview.macIconPath).toBe(shared.macIconPath);
+    expect(desktopProductIdentities.preview.resourceIconPath).toBe(shared.resourceIconPath);
+    expect(kcode.macIconPath).not.toBe(shared.macIconPath);
+    expect(kcode.resourceIconPath).not.toBe(shared.resourceIconPath);
+    for (const flavor of [kcode, shared]) {
+      for (const iconPath of [flavor.macIconPath, flavor.resourceIconPath]) {
+        expect(existsSync(resolve(import.meta.dirname, "..", iconPath))).toBe(true);
+      }
+    }
   });
 });

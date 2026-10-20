@@ -398,3 +398,23 @@ MR !2636 合入后 bug scanner 报出两项，均成立，本轮修正：
 - `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` 构建安装后：`~/.kcode/{v2,cli,workspace,backup,plugin-workspace}` 全套生成；KCode 运行时写入（tasks-index.sqlite、agent 日志、logs）全部落 `~/.kcode`；`~/.zcode` 同期新写经 session id 归属甄别均为 ZCode 自身。
 - 远控身份随 `~/.kcode/v2/setting.json` 隔离（双端同开远控不再互踢）；登录发起时 kcode 重新接管 `zcode://` handler（`ensureDeepLinkHandlerForLogin`）。
 - 手动待验：A2 KCode 独立登录、A3 双端远控同时在线、A4 KCode 内 Bash `echo $HOME`/git/ssh、A6 ZCode 回归。
+
+## 追记 2026-10-20（三）：KCode 专属应用图标
+
+### 背景与决策
+
+KCode 与 ZCode 并排安装后共用同一个黑底白 "Z" 图标，Dock/启动台无法区分。决策：kcode flavor 换用专属图标——与 ZCode 同族（圆角方 + 白色前倾粗几何字）但底色改为靛蓝渐变（`#6E56F8 → #4338CA`，上→下）、字母为 "K"（前倾 12°，对角笔画厚 106、字干 120，光学均衡）。production/preview 继续用默认 `build/icon.icns`/`build/icon.png`，上游构建产物零变化。
+
+### 资产与接线（单一事实源）
+
+- 资产：`packages/desktop/build/kcode/{icon.svg, icon.png, icon.icns}`。`icon.svg` 是源（几何坐标即最终值），PNG/icns 由 `rsvg-convert`（各尺寸）+ `iconutil -c icns` 派生，不在仓库保留派生脚本。
+- 接线：`desktop-product-identity.mjs` 身份表新增 `macIconPath`/`resourceIconPath` 字段（kcode → `build/kcode/*`，其余 → `build/*`）；`electron-builder.config.js` 的 `mac.icon` 与 extraResources `icon.png` 均按身份取用。
+- 覆盖范围：macOS `.app` 图标（`mac.icon`）与随包 `resources/icon.png`（About/托盘/CUA 权限浮窗等主进程读取处）。Windows/Linux 专属资产（`icon_windows.png`、tray ico、hicolor 目录、安装器图标）KCode 暂不构建，维持共用。
+
+### 验收（ZKCODE-008）
+
+| # | 场景 | 预期 | 验证 |
+| --- | --- | --- | --- |
+| ZKCODE-008-1 | 身份表图标断言 | kcode 指向 `build/kcode/*` 且文件存在；production/preview 保持默认并相等 | `desktopProductIdentity.test.ts`（新增专项用例） |
+| ZKCODE-008-2 | kcode 构建 | `.app/Contents/Resources/` 内 icns 字节 ≠ `build/icon.icns`；`resources/icon.png` 为靛蓝 K；Info.plist icon 生效 | manual build smoke |
+| ZKCODE-008-3 | 默认构建回归 | `mac.icon` 显式指回 `build/icon.icns`，与 electron-builder 默认解析一致，产物无变化 | config 审查（未重打全量包） |

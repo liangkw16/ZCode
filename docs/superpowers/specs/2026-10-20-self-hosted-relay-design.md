@@ -40,7 +40,7 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 
 ```text
 手机（免登录）                自建 ECS（单 origin，默认 http://IP:8787）         KCode 桌面
-  扫码/书签打开 ── GET /remote/v4（self-host 构建，stub auth=密钥）
+  扫码/书签打开 ── GET /remote/v4（self-host 构建；密钥经书签 URL `#k=` 首次注入 localStorage）
                           │ self-host-relay（Node, systemd：静态页 + relay + 限流，单进程）
                           │◄── POST /device（Bearer=真实 OAuth JWT，任意 bearer 即可）  注册 sid
                           │◄── POST /token(device) + ws2 + auth_init(sid, meta)
@@ -130,21 +130,29 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
   （`/remote/v4` 前缀 → 手机页构建产物，含路径穿越防护与 `index.html` 回退），与
   HTTP/WS 同 origin 同端口（默认 `0.0.0.0:8787`，http）。手机 URL 即
   `http://<ECS-IP>:8787/remote/v4`。
-- 进程：tsup 单文件 bundle + `self-host-relay.service`（systemd，`EnvironmentFile` 注入
-  `SELF_HOST_RELAY_SECRET` 等配置；密钥 `openssl rand -hex 32` 生成，只存 ECS，不入库不入日志）。
+- 进程：tsup 单文件 bundle（`noExternal` 打入 `ws` 与 `@zcode/shared`，ECS 零
+  node_modules）+ `self-host-relay.service`（systemd，`EnvironmentFile` 注入
+  `SELF_HOST_RELAY_SECRET` 等配置；密钥 `openssl rand -hex 32` 生成，只存 ECS env 文件与
+  手机 localStorage，不入库、不入日志、不进任何公开资源）。部署产出书签 URL
+  `http://<origin>/remote/v4#k=<secret>` 供手机首次打开。
 - 升级 TLS（域名 + certbot 或 cloudflared tunnel）时在前面引入 nginx 做终止/静态/反代，
   relay 退回 `127.0.0.1` 监听：仅改部署配置与 KCode setting 的 origin，代码与 bundle 不动。
 
 ### 2. 手机页 self-host 模式（packages/web）
 
-- 构建期注入 `VITE_ZCODE_REMOTE_SELF_HOST_SECRET`（存在即启用）；根 `package.json` 新增
-  `build:web-remote-control:selfhost`（`vite build --base=/remote/v4/` + 透传该 env）。
-  未注入时产物与现状字节等价，官方部署不受影响。
+- 构建期注入 `VITE_ZCODE_REMOTE_SELF_HOSTED=1`（存在即启用）；根 `package.json` 新增
+  `build:web-remote-control:selfhost`（`vite build --base=/remote/v4/`）。**构建产物不携带
+  任何密钥**——密钥经部署产出的书签 URL `http://<origin>/remote/v4#k=<secret>` 首次分发：
+  页面解析 `#k=` 后写入同源 localStorage（`zcode-self-host-key`）并用 `replaceState` 摘除
+  fragment（fragment 不发送到服务端）。未注入 env 时产物与现状等价，官方部署不受影响。
 - `packages/web/src/web-remote-control/adapters/` 新增 `selfHostAuth.ts`：实现与
-  `WebAuthService` 相同的 auth 端口——`getZCodeJwtToken() → 密钥`、`getActiveAccount() →
-  {displayName: "Self-host"}`、`startLogin()/logout()` 渲染 reason 为
-  `relay-unavailable` 的失败页（密钥错误的 401 落到这里，给出服务不可用失败而不是回到
-  OAuth 登录）。
+  `WebAuthService` 相同的 auth 端口——`getZCodeJwtToken() → localStorage 密钥（缺失为
+  null）`、`getActiveAccount() → {displayName: "Self-host"}`、
+  `startLogin()/logout()` 渲染 reason 为 `relay-unavailable` 的失败页。
+- 登录页在该模式不可达：`main.tsx` 的 `onView` 拦截 `kind: "login"`，未携带/失效密钥、
+  relay 401（`switchAccount` 的 `logout` + 登录视图）一律渲染 `relay-unavailable` 失败页。
+  手机首次使用需打开一次带 `#k=` 的书签 URL；此后 QR 直连（无 fragment）凭 localStorage
+  密钥工作，私密模式丢存储则重开书签。
 - `main.tsx` 构造 `WebRemoteControlEntry` 时按 env 选择 stub 或既有 `webAuthService`；
   登录页、OAuth 回调（`isWebRemoteControlOAuthCallback` 需要 `code/state`，扫码链接不带）、
   切换账号弹窗在该模式下不可达。
@@ -180,10 +188,13 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 - 能力最小化：`GET /device`（泄露 SID）与 `POST /token role=terminal`（可连桌面）是仅有的
   两个敏感能力，均要求密钥；注册与 device token 接受任意 bearer——攻击者最多注册垃圾设备，
   拿不到你的 SID（不可猜测、列表有密钥），无法以 terminal 身份连你的桌面。
-- 手机 bundle 内嵌密钥：自用单用户可接受；SID 构成二次能力凭据。
-- http 起步的风险明示：密钥与业务消息（会话内容含代码）明文过公网，可被链路窃听/篡改；
-  自用接受此风险，TLS 升级路径保留（见 1.4）。relay 不落任何业务数据（透传 + 内存连接表），
-  符合「外部 relay 不保存任务队列/快照」的仓库边界。
+- **密钥不进入任何公开资源**：构建产物零密钥；密钥只存 ECS env 文件与手机 localStorage，
+  经书签 URL fragment 一次性分发（fragment 不发往服务端）。匿名访问者只能得到一个连不上的
+  页面（登录视图被拦截为失败页）。SID 构成二次能力凭据。
+- http 起步的风险明示：明文 http 下页面完整性可被链路篡改（注入脚本可窃取 localStorage
+  密钥），业务消息（会话内容含代码）同样明文；自用接受此风险并保留 TLS 升级路径（见 1.4，
+  域名 + certbot 或 cloudflared tunnel，只改部署配置与 origin）。relay 不落任何业务数据
+  （透传 + 内存连接表），符合「外部 relay 不保存任务队列/快照」的仓库边界。
 - 日志：relay 仅记录连接生命周期与错误码，不记录 token/密钥/消息内容（遵守 AGENTS.md 凭据规则）。
 
 ## 事件顺序与 owner
@@ -208,8 +219,9 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
   参数校验与 3001/3005、密钥端点 401、一次性 token 签发/过期/重复消费、ws2 无 token 401、
   auth_init 各分支（未知 SID/离线/在线）、KICKED 替换与旧 close、断开通知方向性、
   data 透传与未认证拒绝、重启后设备表恢复。
-- 手机页单测：self-host 模式 stub auth（注入接缝复用 `webRemoteControlEntry.test.ts`
-  既有模式）——无登录视图、密钥 bearer、401 落失败页。
+- 手机页单测：self-host 模式（注入接缝复用 `webRemoteControlEntry.test.ts`
+  既有模式）——`#k=` 解析/持久化/摘除、无密钥与 401 均落失败页且登录视图不可达、
+  token 请求携带密钥 bearer、构建产物不含密钥。
 - 桌面单测：`resolveWebRemoteControlEndpointOverrideUrls`——kcode+setting 覆盖、
   kcode 无 setting 默认、非 kcode+setting 不覆盖、env 覆盖优先。
 - 构建验收：`build:web-remote-control:selfhost` 产物由本地 relay 进程静态托管冒烟可打开。

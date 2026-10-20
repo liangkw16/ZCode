@@ -4,7 +4,7 @@
 
 **Goal:** 在用户 ECS 上自托管单用户 Relay V2 服务与免登录手机远控页，KCode 桌面经 kcode 门控 setting 指向自建 relay，官方 ZCode 链路零变化。
 
-**Architecture:** 新增 `apps/self-host-relay`（Node 单进程：HTTP 契约端点 + ws2 网关 + 内置静态托管 + 每 IP 限流，设备表 JSON 防抖落盘）；手机页以构建期 `VITE_ZCODE_REMOTE_SELF_HOST_SECRET` 切换 stub auth 免登录；桌面在受管模块 `desktop-web-remote-relay` 内新增 kcode 门控的远控端点覆盖（仅 `getEndpointUrls` 路径）。
+**Architecture:** 新增 `apps/self-host-relay`（Node 单进程：HTTP 契约端点 + ws2 网关 + 内置静态托管 + 每 IP 限流，设备表 JSON 防抖落盘，tsup noExternal 单文件部署）；手机页以构建期 `VITE_ZCODE_REMOTE_SELF_HOSTED` 标记启用免登录，密钥经书签 URL `#k=` fragment 分发到 localStorage（构建产物零密钥）；桌面在受管模块 `desktop-web-remote-relay` 内新增 kcode 门控的远控端点覆盖（仅 `getEndpointUrls` 路径）。
 
 **Tech Stack:** Node 22（本地 mise、ECS 官方 tarball）、ws 8.20.0、`@zcode/shared/web-remote-relay` 契约解析、tsup ^8.5.0、vitest ^4.1.5、systemd。
 
@@ -15,7 +15,7 @@
 - 行为与协议以 spec 与 `docs/web-remote-control/relay-v2-pairing.md` 为准；wire 校验复用 `@zcode/shared/web-remote-relay` 导出，不复制 schema。
 - 依赖版本固定：`ws 8.20.0`、`@types/ws 8.18.1`、`tsup ^8.5.0`、`typescript ^6.0.2`、`vitest ^4.1.5`、`@types/node ^24`。
 - 不记录 JWT、一次性 token、密钥、消息内容到日志或提交；ECS IP、密钥等不写入任何已提交文件（执行期从 `~/.ssh/config` 与运行环境解析）。
-- 官方 flavor（production/preview）行为不变：web 构建未注入 selfhost env 时产物与现状等价；desktop 非 kcode flavor 时新 helper 返回 null。
+- **selfhost 手机页构建产物不携带任何密钥**：密钥只存 ECS env 文件与手机 localStorage，经书签 URL `#k=` fragment 分发（fragment 不发往服务端）；官方 flavor（production/preview）行为不变：web 构建未注入 `VITE_ZCODE_REMOTE_SELF_HOSTED` 时产物与现状等价；desktop 非 kcode flavor 时新 helper 返回 null。
 - 每个 bugfix 用中文注释说明原因与修复依据；新代码遵守 oxlint 与 `pnpm typecheck`。
 - 每任务收尾必须真实运行其测试命令并报告结果；`pnpm typecheck`、`pnpm lint`、`pnpm architecture:check --changed` 在 Task 10 全量执行。
 - 本地 Node 版本以 `mise.toml` 为准（`mise exec -- node scripts/mise-run.mjs <cmd>` 模式跑仓库脚本）；ECS 用 Node 22 官方 tarball（npmmirror 镜像下载）。
@@ -32,7 +32,7 @@
 4. **密钥端点未持密钥**（空 bearer 调注册、错误密钥调 list/terminal token）：注册与 device token 接受任意非空 bearer，list 与 terminal token 必须密钥，空 bearer 一律 401 → Task 3 鉴权矩阵测试。
 5. **relay 重启后设备表丢失导致桌面反复重注册**：devices.json 防抖落盘 + 启动恢复，重启后旧 SID 仍可 auth_init → Task 6 持久化 roundtrip 测试。
 
-（补充：手机 stub 在密钥失效 401 时不得落回 OAuth 登录页 → Task 7 `startLogin/logout render failure` 测试。）
+（补充：手机端未携带/失效密钥与 relay 401 都不得落回 OAuth 登录页（login 视图拦截为失败页）→ Task 7 `login view intercepted` 测试。）
 
 ---
 
@@ -42,6 +42,7 @@
 - Create: `apps/self-host-relay/package.json`
 - Create: `apps/self-host-relay/tsconfig.json`
 - Create: `apps/self-host-relay/vitest.config.ts`
+- Create: `apps/self-host-relay/tsup.config.ts`
 - Create: `apps/self-host-relay/src/contract.ts`
 - Create: `apps/self-host-relay/src/contract.example.ts`
 - Create: `apps/self-host-relay/src/contract.test.ts`
@@ -67,7 +68,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsup src/main.ts --format esm --target node22 --clean --outDir dist",
+    "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -93,6 +94,9 @@
   "compilerOptions": {
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
     "noEmit": true,
     "types": ["node"],
     "lib": ["ES2022"]
@@ -102,7 +106,26 @@
 }
 ```
 
+（base 带 `composite: true`，与 `noEmit` 互斥，故显式关掉 composite/declaration；`lib` 覆盖为 ES2022 以匹配 Node 22 运行时。）
+
 注意：tsconfig `include` 覆盖 `test/`（本包自跑 vitest，不经根 vitest——根 vitest 只收 `packages/*/test/**`）。tsup 输出 `dist/`（已被根 `.gitignore` 的 `dist/` 覆盖）。
+
+`apps/self-host-relay/tsup.config.ts`（`noExternal` 把 `ws` 与 `@zcode/shared` 一并打进单文件，ECS 零 node_modules）：
+
+```ts
+import { defineConfig } from "tsup";
+
+export default defineConfig({
+  entry: ["src/main.ts"],
+  format: "esm",
+  target: "node22",
+  outDir: "dist",
+  clean: true,
+  platform: "node",
+  // 单文件部署：tsup 默认外置 dependencies（ws）与 workspace 包，ECS 上会缺模块无法启动。
+  noExternal: [/.+/],
+});
+```
 
 `apps/self-host-relay/vitest.config.ts`：
 
@@ -155,17 +178,17 @@ export interface SelfHostRelayRuntime {
 /** 设备/一次性 token/连接 owner 的唯一状态所有者；owner 以引用身份比对。 */
 export interface SelfHostRelayStore {
   registerDevice(deviceMid: string, nowMs: number): { deviceSid: string; createdAt: number };
-  hasDevice(deviceSid: string): boolean;
   listDevices(nowMs: number): WebRemoteControlRelayV2Device[];
   deleteDevice(deviceSid: string): "deleted" | "missing" | "device-online";
   issueToken(role: WebRemoteControlRelayV2Role, token: string, nowMs: number): void;
   consumeToken(token: string, nowMs: number): WebRemoteControlRelayV2Role | null;
+  /** 设备不存在返回 null；否则登记 owner 并返回被替换的旧 owner 引用。 */
   claimOwnership(
     deviceSid: string,
     role: WebRemoteControlRelayV2Role,
     meta: WebRemoteControlRelayV2Meta,
     owner: unknown,
-  ): { kicked: unknown | null };
+  ): { kicked: unknown | null } | null;
   /** 只在 owner 引用与当前 owner 一致时释放；返回是否真的释放。 */
   releaseOwnership(deviceSid: string, role: WebRemoteControlRelayV2Role, owner: unknown): boolean;
   getOwner(
@@ -178,6 +201,10 @@ export interface SelfHostRelayStore {
   setDevicesChangeListener(listener: () => void): void;
 }
 ```
+
+（契约方法数说明：本文件公开方法共 12 个（Store 11 + Runtime.close 1），等于 policy
+`max-public-methods` 上限 12（`countPublicMethods` 口径），不触发违规；若 adopt 后
+`architecture:check` 仍报超限，先合并 `getOwner` 与 `claimOwnership` 再继续，不得放宽 policy。）
 
 - [ ] **Step 3: 写 module.ts / CONTRACT.md / contract.example.ts / contract.test.ts**
 
@@ -329,14 +356,15 @@ describe("RelayStore", () => {
     expect(store.consumeToken("tok-2", 61_000)).toBeNull();
   });
 
-  it("claimOwnership 替换同角色 owner 并返回被踢引用", () => {
+  it("claimOwnership 替换同角色 owner 并返回被踢引用；未知设备返回 null", () => {
     const store = createStore();
     const { deviceSid } = store.registerDevice("mid-1", 0);
     const oldOwner = { id: "old" };
     const newOwner = { id: "new" };
-    expect(store.claimOwnership(deviceSid, "device", {}, oldOwner).kicked).toBeNull();
-    expect(store.claimOwnership(deviceSid, "device", {}, newOwner).kicked).toBe(oldOwner);
+    expect(store.claimOwnership(deviceSid, "device", {}, oldOwner)!.kicked).toBeNull();
+    expect(store.claimOwnership(deviceSid, "device", {}, newOwner)!.kicked).toBe(oldOwner);
     expect(store.getOwner(deviceSid, "device")!.owner).toBe(newOwner);
+    expect(store.claimOwnership("d_unknown", "device", {}, newOwner)).toBeNull();
   });
 
   it("releaseOwnership 按引用身份释放，迟到旧连接不误伤新 owner", () => {
@@ -355,9 +383,11 @@ describe("RelayStore", () => {
   it("deleteDevice：在线设备 3005 语义返回 device-online，缺失幂等 missing", () => {
     const store = createStore();
     const { deviceSid } = store.registerDevice("mid-1", 0);
-    store.claimOwnership(deviceSid, "device", {}, { id: "c" });
+    // Bugfix：owner 按引用身份释放，claim/release 必须复用同一个对象，否则测试必败。
+    const owner = { id: "c" };
+    store.claimOwnership(deviceSid, "device", {}, owner);
     expect(store.deleteDevice(deviceSid)).toBe("device-online");
-    store.releaseOwnership(deviceSid, "device", { id: "c" });
+    store.releaseOwnership(deviceSid, "device", owner);
     expect(store.deleteDevice(deviceSid)).toBe("deleted");
     expect(store.deleteDevice(deviceSid)).toBe("missing");
   });
@@ -453,10 +483,6 @@ export class RelayStore implements SelfHostRelayStore {
     return { deviceSid: record.deviceSid, createdAt: record.createdAt };
   }
 
-  hasDevice(deviceSid: string): boolean {
-    return this.devices.has(deviceSid);
-  }
-
   listDevices(nowMs: number): WebRemoteControlRelayV2Device[] {
     void nowMs;
     return [...this.devices.values()].map((record) => {
@@ -495,7 +521,8 @@ export class RelayStore implements SelfHostRelayStore {
     role: "device" | "terminal",
     meta: WebRemoteControlRelayV2Device["meta"],
     owner: unknown,
-  ): { kicked: unknown | null } {
+  ): { kicked: unknown | null } | null {
+    if (!this.devices.has(deviceSid)) return null;
     const roles = this.owners.get(deviceSid) ?? {};
     const kicked = roles[role]?.owner ?? null;
     roles[role] = { owner, meta: { ...meta } };
@@ -781,7 +808,13 @@ function createRateLimiter(now: () => number) {
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  try {
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  } catch {
+    // Bugfix：客户端中断请求体（ECONNRESET）会从流读取抛出；吞掉并按非法 body 处理，
+    // 否则未处理 rejection 会让整个 relay 进程退出（攻击者可反复打断服务）。
+    return null;
+  }
   if (!chunks.length) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString());
@@ -794,6 +827,24 @@ export function createSelfHostRelayHttpRouter(options: SelfHostRelayHttpRouterOp
   const now = options.now ?? Date.now;
   const allowRequest = createRateLimiter(now);
   return async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
+    // 客户端中途断开时 socket 两侧都可能抛错；吞掉并以 destroy 收尾，保证进程存活。
+    request.on("error", () => {});
+    response.on("error", () => {});
+    try {
+      return await route(request, response);
+    } catch {
+      if (!response.headersSent) {
+        try {
+          reply(response, 500);
+        } catch {
+          // 响应已不可写（socket 已销毁），无需处理。
+        }
+      }
+      response.destroy();
+      return true;
+    }
+  };
+  async function route(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (!url.pathname.startsWith(REMOTE_PREFIX)) return false;
     const ip = request.socket.remoteAddress ?? "unknown";
@@ -860,7 +911,7 @@ export function createSelfHostRelayHttpRouter(options: SelfHostRelayHttpRouterOp
 
     reply(response, 404);
     return true;
-  };
+  }
 }
 ```
 
@@ -885,8 +936,8 @@ git commit --no-verify -m "feat: self-host-relay HTTP 契约路由（密钥矩�
 - Test: `apps/self-host-relay/test/wsGateway.test.ts`
 
 **Interfaces:**
-- Consumes: `SelfHostRelayStore`、`parseWebRemoteControlRelayV2OutgoingMessage`、`WEB_REMOTE_CONTROL_RELAY_V2_WS_PATH`（shared）。
-- Produces: `attachSelfHostRelayWsGateway(server: Server, options: { store: SelfHostRelayStore; now?: () => number }): void`——接管 `server` 的 `upgrade` 事件。
+- Consumes: `SelfHostRelayStore`、`parseWebRemoteControlRelayV2OutgoingMessage`、`WEB_REMOTE_CONTROL_RELAY_V2_WS_PATH`（shared）、Task 3 `createSelfHostRelayHttpRouter`（仅测试挂载用）。
+- Produces: `attachSelfHostRelayWsGateway(server: Server, options: { store: SelfHostRelayStore; now?: () => number }): { close(): Promise<void> }`——接管 `server` 的 `upgrade` 事件；`close()` 终止全部 WS 连接并等待释放（`server.closeAllConnections()` 不覆盖已升级连接，优雅退出必须经它，Task 6 依赖此签名）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -898,6 +949,7 @@ import { get as httpGet, type IncomingMessage } from "node:http";
 import { once } from "node:events";
 import { WebSocket, type RawData } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createSelfHostRelayHttpRouter } from "../src/adapters/httpRouter.js";
 import { attachSelfHostRelayWsGateway } from "../src/adapters/wsGateway.js";
 import { RelayStore } from "../src/domain/relayStore.js";
 
@@ -911,9 +963,15 @@ let deviceSid: string;
 beforeAll(async () => {
   store = new RelayStore({ newSid: () => `d_${Math.random().toString(36).slice(2)}` });
   deviceSid = store.registerDevice("mid-gw", Date.now()).deviceSid;
-  server = createServer((_request, response) => {
-    response.writeHead(404);
-    response.end();
+  // 挂真实 HTTP 路由：mintToken 走真实 token 端点（服务端 404 会让所有建连用例假失败）。
+  const router = createSelfHostRelayHttpRouter({ store, secret: SECRET });
+  server = createServer((request, response) => {
+    void router(request, response).then((handled) => {
+      if (!handled) {
+        response.writeHead(404);
+        response.end();
+      }
+    });
   });
   attachSelfHostRelayWsGateway(server, { store });
   server.listen(0, "127.0.0.1");
@@ -1084,7 +1142,10 @@ interface RelayConnection {
   socket: WebSocket;
 }
 
-export function attachSelfHostRelayWsGateway(server: Server, options: SelfHostRelayWsGatewayOptions): void {
+export function attachSelfHostRelayWsGateway(
+  server: Server,
+  options: SelfHostRelayWsGatewayOptions,
+): { close(): Promise<void> } {
   const now = options.now ?? Date.now;
   const store = options.store;
   const wsServer = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
@@ -1141,18 +1202,18 @@ export function attachSelfHostRelayWsGateway(server: Server, options: SelfHostRe
             ws.close();
             return;
           }
-          if (!store.hasDevice(message.device_sid)) {
-            send(connection, { type: "error", code: "AUTH_FAILED" });
-            ws.close();
-            return;
-          }
-          const { kicked } = store.claimOwnership(
+          const claimed = store.claimOwnership(
             message.device_sid,
             connection.role,
             message.meta ?? {},
             connection.ownerRef,
           );
-          const kickedConnection = kicked ? connections.get(kicked) : undefined;
+          if (!claimed) {
+            send(connection, { type: "error", code: "AUTH_FAILED" });
+            ws.close();
+            return;
+          }
+          const kickedConnection = claimed.kicked ? connections.get(claimed.kicked) : undefined;
           if (kickedConnection) {
             send(kickedConnection, { type: "error", code: "KICKED" });
             kickedConnection.socket.close();
@@ -1207,6 +1268,14 @@ export function attachSelfHostRelayWsGateway(server: Server, options: SelfHostRe
       });
     });
   });
+  return {
+    // Bugfix：server.closeAllConnections() 不关闭已升级的 WS 连接；优雅退出必须先终止
+    // 全部 WS 并等待释放，否则 server.close() 在有在线连接时永远挂起，持久化冲刷执行不到。
+    close: async () => {
+      for (const connection of connections.values()) connection.socket.terminate();
+      await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+    },
+  };
 }
 ```
 
@@ -1251,9 +1320,11 @@ import { createSelfHostStaticHandler } from "../src/adapters/staticFiles.js";
 let server: Server;
 let baseUrl: string;
 let root: string;
+const dirs: string[] = [];
 
 beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), "relay-static-"));
+  dirs.push(root);
   writeFileSync(join(root, "index.html"), "<html>remote-v4</html>");
   mkdirSync(join(root, "assets"));
   writeFileSync(join(root, "assets", "app-abc123.js"), "console.log(1)");
@@ -1275,7 +1346,7 @@ beforeAll(async () => {
 afterAll(async () => {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  rmSync(root, { recursive: true, force: true });
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("静态托管", () => {
@@ -1316,6 +1387,29 @@ describe("静态托管", () => {
     expect((await fetch(`${baseUrl}/api/other`)).status).toBe(404);
     const post = await fetch(`${baseUrl}/remote/v4`, { method: "POST" });
     expect(post.status).toBe(404); // handler 返回 false，外层 404
+  });
+
+  it("目录存在但缺 index.html（或目录不存在）时根路径 404 且进程不崩", async () => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), "relay-static-empty-"));
+    dirs.push(emptyRoot);
+    const handler = createSelfHostStaticHandler({ rootDir: emptyRoot });
+    const isolated = createServer((request, response) => {
+      void handler(request, response).then((handled) => {
+        if (!handled) {
+          response.writeHead(404);
+          response.end();
+        }
+      });
+    });
+    isolated.listen(0, "127.0.0.1");
+    await once(isolated, "listening");
+    const url = `http://127.0.0.1:${(isolated.address() as { port: number }).port}/remote/v4`;
+    try {
+      expect((await fetch(url)).status).toBe(404); // 不再 200 + ENOENT 崩进程
+    } finally {
+      isolated.closeAllConnections();
+      await new Promise<void>((resolve) => isolated.close(() => resolve()));
+    }
   });
 });
 ```
@@ -1367,17 +1461,30 @@ async function existsFile(path: string): Promise<boolean> {
 export function createSelfHostStaticHandler(options: SelfHostStaticHandlerOptions) {
   const prefix = options.urlPrefix ?? "/remote/v4";
   const rootDir = resolvePath(options.rootDir);
+  // Bugfix：文件流错误（目录缺失/被删、EACCES）若不接管，createReadStream 的 ENOENT 会成为
+  // 未处理异常直接打死进程；统一先校验存在、再监听流错误降级 404。
+  const streamFile = (target: string, response: ServerResponse): boolean => {
+    const stream = createReadStream(target);
+    stream.on("error", () => {
+      if (!response.headersSent) response.writeHead(404);
+      response.destroy();
+    });
+    stream.pipe(response);
+    return true;
+  };
   return async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
     if (request.method !== "GET" && request.method !== "HEAD") return false;
+    response.on("error", () => {});
     const url = new URL(request.url ?? "/", "http://localhost");
     if (url.pathname === prefix || url.pathname === `${prefix}/`) {
+      const entry = join(rootDir, "index.html");
+      if (!(await existsFile(entry))) return response.writeHead(404).end(), true;
       response.writeHead(200, {
         "Content-Type": MIME_TYPES[".html"]!,
         "Cache-Control": "no-cache",
       });
       if (request.method === "HEAD") return response.end(), true;
-      createReadStream(join(rootDir, "index.html")).pipe(response);
-      return true;
+      return streamFile(entry, response);
     }
     if (!url.pathname.startsWith(`${prefix}/`)) return false;
     let decoded: string;
@@ -1401,8 +1508,7 @@ export function createSelfHostStaticHandler(options: SelfHostStaticHandlerOption
       "Cache-Control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
     });
     if (request.method === "HEAD") return response.end(), true;
-    createReadStream(target).pipe(response);
-    return true;
+    return streamFile(target, response);
   };
 }
 ```
@@ -1410,7 +1516,7 @@ export function createSelfHostStaticHandler(options: SelfHostStaticHandlerOption
 - [ ] **Step 4: 运行测试通过**
 
 Run: `pnpm --filter @zcode/self-host-relay exec vitest run test/staticFiles.test.ts`
-Expected: PASS（4 项）
+Expected: PASS（5 项）
 
 - [ ] **Step 5: 提交**
 
@@ -1534,6 +1640,39 @@ describe("startSelfHostRelay", () => {
       headers: { Authorization: `Bearer ${SECRET}` },
     }).then((r) => r.json() as Promise<{ data: { device_sid: string; online: boolean }[] }>);
     expect(list2.data.find((d) => d.device_sid === sid)!.online).toBe(false);
+
+    // 有在线 WS 连接时 close() 也必须在限时内完成（网关终止 + server.close 不挂起）。
+    const token3 = await fetch(`http://127.0.0.1:${reboot.port}/api/v1/remote/token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "device" }),
+    }).then((r) => r.json() as Promise<{ data: { token: string } }>);
+    const liveSocket = await new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${reboot.port}/api/v1/remote/ws2?token=${token3.data.token}`);
+      socket.once("open", () => resolve(socket));
+      socket.once("error", reject);
+    });
+    await expect(Promise.race([reboot.close(), new Promise((_, reject) => setTimeout(() => reject(new Error("close timeout")), 5_000))])).resolves.toBeUndefined();
+    liveSocket.close();
+  }, 20_000);
+
+  it("持久化写失败（devicesFile 是目录）不崩进程、不阻断后续请求", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "relay-module-eisdir-"));
+    dirs.push(dir);
+    const blockedFile = join(dir, "as-dir", "devices.json"); // 父级是目录 → writeFile EISDIR/ENOENT
+    const runtime = await startSelfHostRelay({ host: "127.0.0.1", port: 0, secret: SECRET, devicesFile: blockedFile });
+    runtimes.push(runtime);
+    const registered = await fetch(`http://127.0.0.1:${runtime.port}/api/v1/remote/device`, {
+      method: "POST",
+      headers: { Authorization: "Bearer any", "Content-Type": "application/json" },
+      body: JSON.stringify({ device_mid: "mid-persist-fail" }),
+    });
+    expect(registered.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 1_600)); // 越过防抖窗口，触发失败写盘
+    const after = await fetch(`http://127.0.0.1:${runtime.port}/api/v1/remote/device`, {
+      headers: { Authorization: `Bearer ${SECRET}` },
+    });
+    expect(after.status).toBe(200); // 进程仍存活且可服务
   }, 20_000);
 });
 ```
@@ -1574,13 +1713,19 @@ export function loadSelfHostRelayConfig(env: Record<string, string | undefined>)
   };
 }
 
-/** 设备表防抖落盘：注册/删除后 1s 合并写盘，close 时强制冲刷。 */
+/** 设备表防抖落盘：注册/删除后 1s 合并写盘，close 时强制冲刷；写失败只记日志不抛出。 */
 function createDevicePersister(store: RelayStore, devicesFile: string) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pending: Promise<void> = Promise.resolve();
   const flush = async () => {
-    await pending;
-    pending = writeFile(devicesFile, `${JSON.stringify(store.serializeDevices(), null, 2)}\n`, "utf-8");
+    // Bugfix：失败 Promise 残留在链上会让后续每次 flush 都在同一处 rejection 上炸掉；
+    // 链上所有写错误就地捕获记录，保持串行且永远可继续。
+    await pending.catch(() => undefined);
+    pending = writeFile(devicesFile, `${JSON.stringify(store.serializeDevices(), null, 2)}\n`, "utf-8").catch(
+      (error: unknown) => {
+        console.error("[self-host-relay] devices persist failed", error);
+      },
+    );
     await pending;
   };
   store.setDevicesChangeListener(() => {
@@ -1601,7 +1746,7 @@ function createDevicePersister(store: RelayStore, devicesFile: string) {
     async close(): Promise<void> {
       if (timer) clearTimeout(timer);
       timer = undefined;
-      await flush().catch(() => undefined);
+      await flush();
     },
   };
 }
@@ -1613,22 +1758,24 @@ export async function startSelfHostRelay(config: SelfHostRelayConfig): Promise<S
   const router = createSelfHostRelayHttpRouter({ store, secret: config.secret });
   const staticHandler = config.staticRoot ? createSelfHostStaticHandler({ rootDir: config.staticRoot }) : undefined;
   const server: Server = createServer((request, response) => {
-    void router(request, response).then((handled) => {
-      if (handled) return;
-      if (staticHandler) {
-        void staticHandler(request, response).then((staticHandled) => {
-          if (!staticHandled) {
-            response.writeHead(404);
-            response.end();
-          }
-        });
-        return;
-      }
-      response.writeHead(404);
-      response.end();
-    });
+    void router(request, response)
+      .then((handled) => {
+        if (handled) return;
+        if (staticHandler) {
+          void staticHandler(request, response).then((staticHandled) => {
+            if (!staticHandled) {
+              response.writeHead(404);
+              response.end();
+            }
+          });
+          return;
+        }
+        response.writeHead(404);
+        response.end();
+      })
+      .catch(() => response.destroy());
   });
-  attachSelfHostRelayWsGateway(server, { store });
+  const gateway = attachSelfHostRelayWsGateway(server, { store });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.port, config.host, () => resolve());
@@ -1639,6 +1786,9 @@ export async function startSelfHostRelay(config: SelfHostRelayConfig): Promise<S
   return {
     port: address.port,
     close: async () => {
+      // Bugfix：closeAllConnections 不覆盖已升级的 WS 连接，必须先经网关终止全部 WS，
+      // 否则有在线连接时 server.close() 永久挂起，后面的持久化冲刷执行不到。
+      await gateway.close();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await persister?.close();
@@ -1670,13 +1820,25 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 ```
 
-- [ ] **Step 4: 运行测试与 bundle 构建通过**
+- [ ] **Step 4: 运行测试与 bundle 隔离冒烟**
 
 Run: `pnpm --filter @zcode/self-host-relay exec vitest run`
-Expected: 全部通过（含 Task 1 contract、2/3/4/5 既有测试）
+Expected: 全部通过（含 Task 1 contract、2/3/4/5 既有测试与新增的 close/持久化失败用例）
 
 Run: `pnpm --filter @zcode/self-host-relay build && ls apps/self-host-relay/dist`
 Expected: `main.js` 生成
+
+Run（bundle 隔离冒烟——验证 noExternal 生效、ECS 零 node_modules 可跑）:
+
+```bash
+SMOKE=$(mktemp -d) && cp apps/self-host-relay/dist/main.js "$SMOKE/" && \
+(cd "$SMOKE" && SELF_HOST_RELAY_SECRET=smoke SELF_HOST_RELAY_HOST=127.0.0.1 SELF_HOST_RELAY_PORT=18787 node main.js) & SMOKE_PID=$!
+sleep 1
+curl -s -o /dev/null -w 'smoke-http=%{http_code}\n' -X POST http://127.0.0.1:18787/api/v1/remote/token -H 'Content-Type: application/json' -d '{"role":"device"}'  # 期望 401
+kill $SMOKE_PID 2>/dev/null; wait $SMOKE_PID 2>/dev/null; rm -rf "$SMOKE"
+```
+
+Expected: 后台进程输出 `[self-host-relay] listening on 127.0.0.1:18787`，curl 得 `smoke-http=401`；若进程报 `Cannot find module 'ws'` 则 noExternal 未生效，回查 tsup.config.ts。
 
 - [ ] **Step 5: 提交**
 
@@ -1687,20 +1849,21 @@ git commit --no-verify -m "feat: self-host-relay 装配/配置/持久化与进�
 
 ---
 
-### Task 7: 手机页 self-host 免登录模式
+### Task 7: 手机页 self-host 免登录模式（fragment 密钥，构建零密钥）
 
 **Files:**
 - Modify: `packages/web/src/env.d.ts`（`ImportMetaEnv` 加一个字段）
 - Create: `packages/web/src/web-remote-control/adapters/selfHostAuth.ts`
-- Modify: `packages/web/src/main.tsx:407-446`（remoteEntry 的 `auth` 注入点）
+- Modify: `packages/web/src/main.tsx:402-446`（remoteEntry 的 `auth` 注入与 `onView` 登录拦截）
 - Modify: `package.json`（scripts 加 `build:web-remote-control:selfhost`）
 - Test: `packages/web/test/selfHostAuth.test.ts`
 
 **Interfaces:**
-- Consumes: `WebAuthService` 的四方法 Pick 端口（`packages/web/src/web-remote-control/contract.ts:50`）、`ZAI_PROVIDER_ID`（`@zcode/shared`）、`WebRemoteControlFailure`。
+- Consumes: `WebAuthService` 的四方法 Pick 端口（`packages/web/src/web-remote-control/contract.ts:50`）、`ZAI_PROVIDER_ID`（`@zcode/shared`）、`WebRemoteControlFailure`、`WebRemoteControlEntry`（`#src/web-remote-control/index.js`）。
 - Produces:
-  - `isSelfHostRemoteBuild(env: { VITE_ZCODE_REMOTE_SELF_HOST_SECRET?: string }): boolean`
-  - `createSelfHostAuth(secret: string, onFailure: (failure: WebRemoteControlFailure) => void): Pick<WebAuthService, "getZCodeJwtToken" | "getActiveAccount" | "startLogin" | "logout">`
+  - `isSelfHostRemoteBuild(env: { VITE_ZCODE_REMOTE_SELF_HOSTED?: string }): boolean`
+  - `readSelfHostKey(input: { hash: string; storage: Pick<Storage, "getItem" | "setItem"> }): string | null`（解析 URL `#k=` → 持久化 localStorage 键 `zcode-self-host-key`；缺省回落 storage；全无则 null）
+  - `createSelfHostAuth(key: string | null, onFailure: (failure: WebRemoteControlFailure) => void): WebRemoteControlAuthPort`
   - `type WebRemoteControlAuthPort = Pick<WebAuthService, "getZCodeJwtToken" | "getActiveAccount" | "startLogin" | "logout">`
 
 - [ ] **Step 1: 写失败测试**
@@ -1709,30 +1872,108 @@ git commit --no-verify -m "feat: self-host-relay 装配/配置/持久化与进�
 
 ```ts
 import { describe, expect, it, vi } from "vitest";
-import { createSelfHostAuth, isSelfHostRemoteBuild } from "../src/web-remote-control/adapters/selfHostAuth.js";
+import {
+  createSelfHostAuth,
+  isSelfHostRemoteBuild,
+  readSelfHostKey,
+} from "../src/web-remote-control/adapters/selfHostAuth.js";
+import { WebRemoteControlEntry } from "#src/web-remote-control/index.js";
+
+function memoryStorage(initial: Record<string, string> = {}) {
+  const data = new Map(Object.entries(initial));
+  return {
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      data.set(key, value);
+    },
+  };
+}
 
 describe("isSelfHostRemoteBuild", () => {
-  it("注入非空 secret 时为 true，缺省/空白为 false", () => {
-    expect(isSelfHostRemoteBuild({ VITE_ZCODE_REMOTE_SELF_HOST_SECRET: "s" })).toBe(true);
+  it("注入任意非空值即启用；缺省/空白为 false", () => {
+    expect(isSelfHostRemoteBuild({ VITE_ZCODE_REMOTE_SELF_HOSTED: "1" })).toBe(true);
     expect(isSelfHostRemoteBuild({})).toBe(false);
-    expect(isSelfHostRemoteBuild({ VITE_ZCODE_REMOTE_SELF_HOST_SECRET: "  " })).toBe(false);
+    expect(isSelfHostRemoteBuild({ VITE_ZCODE_REMOTE_SELF_HOSTED: "  " })).toBe(false);
+  });
+});
+
+describe("readSelfHostKey", () => {
+  it("从 #k= 解析并持久化；缺省回落 storage；全无则 null", () => {
+    const storage = memoryStorage();
+    expect(readSelfHostKey({ hash: "#k=abc123", storage })).toBe("abc123");
+    expect(storage.getItem("zcode-self-host-key")).toBe("abc123");
+    expect(readSelfHostKey({ hash: "#sid=x&k=def456", storage })).toBe("def456");
+    expect(
+      readSelfHostKey({ hash: "", storage: memoryStorage({ "zcode-self-host-key": "saved" }) }),
+    ).toBe("saved");
+    expect(readSelfHostKey({ hash: "", storage: memoryStorage() })).toBeNull();
+    expect(readSelfHostKey({ hash: "#other=1", storage: memoryStorage() })).toBeNull();
   });
 });
 
 describe("createSelfHostAuth", () => {
-  it("JWT 恒为密钥，账号行返回固定资料", () => {
-    const auth = createSelfHostAuth("secret-1", () => {});
-    expect(auth.getZCodeJwtToken()).toBe("secret-1");
+  it("有密钥：JWT 即密钥并显示固定账号", () => {
+    const auth = createSelfHostAuth("key-1", () => {});
+    expect(auth.getZCodeJwtToken()).toBe("key-1");
     expect(auth.getActiveAccount()).toEqual({ displayName: "Self-host", provider: "zai" });
   });
 
-  it("startLogin/logout 落 failure（密钥失效 401 时不回 OAuth 登录页）", () => {
+  it("无密钥：JWT 为 null（entry 落 login 视图，由 main.tsx 拦截为失败页）", () => {
+    const auth = createSelfHostAuth(null, () => {});
+    expect(auth.getZCodeJwtToken()).toBeNull();
+    expect(auth.getActiveAccount()).toBeNull();
+  });
+
+  it("startLogin/logout 落 failure，不引导 OAuth", () => {
     const onFailure = vi.fn();
-    const auth = createSelfHostAuth("secret-1", onFailure);
+    const auth = createSelfHostAuth("key-1", onFailure);
     auth.startLogin({ appReturnTo: "https://x/remote/v4" });
     expect(onFailure).toHaveBeenCalledWith({ reason: "relay-unavailable" });
     void auth.logout();
     expect(onFailure).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("entry 集成", () => {
+  it("无密钥时入口产出 login 视图 kind（自托管模式下 main.tsx 将其拦截为失败页）", async () => {
+    const views: string[] = [];
+    const entry = new WebRemoteControlEntry({
+      auth: createSelfHostAuth(null, () => {}),
+      token: async () => "t",
+      connect: () => {},
+      onView: (view) => views.push(view.kind),
+      getHref: () => "https://ecs.example.com/remote/v4?app_version=3.16.1&sid=s&mid=m",
+      devices: async () => [],
+      replaceHref: () => {},
+      storage: memoryStorage(),
+      locale: "en-US",
+      subscribeVisible: () => () => {},
+    });
+    await entry.start();
+    expect(views).toEqual(["login"]);
+  });
+
+  it("有密钥且有 sid 时入口直接进入连接（token 收到密钥作为 jwt）", async () => {
+    const views: string[] = [];
+    let tokenJwt = "";
+    const entry = new WebRemoteControlEntry({
+      auth: createSelfHostAuth("key-1", () => {}),
+      token: async (jwt) => {
+        tokenJwt = jwt;
+        throw new Error("stop-here");
+      },
+      connect: () => {},
+      onView: (view) => views.push(view.kind),
+      getHref: () => "https://ecs.example.com/remote/v4?app_version=3.16.1&sid=s&mid=m",
+      devices: async () => [],
+      replaceHref: () => {},
+      storage: memoryStorage(),
+      locale: "en-US",
+      subscribeVisible: () => () => {},
+    });
+    entry.start(); // connect 回调内 getToken 被调用
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(tokenJwt).toBe("key-1");
   });
 });
 ```
@@ -1755,25 +1996,54 @@ export type WebRemoteControlAuthPort = Pick<
   "getZCodeJwtToken" | "getActiveAccount" | "startLogin" | "logout"
 >;
 
-export interface SelfHostAuthEnv {
-  readonly VITE_ZCODE_REMOTE_SELF_HOST_SECRET?: string;
+export interface SelfHostBuildEnv {
+  readonly VITE_ZCODE_REMOTE_SELF_HOSTED?: string;
 }
 
-export function isSelfHostRemoteBuild(env: SelfHostAuthEnv): boolean {
-  return !!env.VITE_ZCODE_REMOTE_SELF_HOST_SECRET?.trim();
+export const SELF_HOST_KEY_STORAGE_KEY = "zcode-self-host-key";
+
+export function isSelfHostRemoteBuild(env: SelfHostBuildEnv): boolean {
+  return !!env.VITE_ZCODE_REMOTE_SELF_HOSTED?.trim();
 }
 
 /**
- * 自托管免登录：auth 端口以固定密钥充当 JWT，登录页/OAuth 回调在该部署不可达；
- * 密钥失效（relay 401）只能落服务不可用失败页，不得引导用户去真实 OAuth。
+ * 密钥经书签 URL 的 `#k=` fragment 首次分发（fragment 不发往服务端），解析后持久化到
+ * 同源 localStorage 并摘除 fragment；之后 QR 直连（无 fragment）凭 storage 工作。
+ * 构建产物不携带密钥——公开静态资源不得包含任何授权凭据。
+ */
+export function readSelfHostKey(input: {
+  hash: string;
+  storage: Pick<Storage, "getItem" | "setItem">;
+}): string | null {
+  const params = new URLSearchParams(input.hash.replace(/^#/, ""));
+  const fromHash = params.get("k")?.trim();
+  if (fromHash) {
+    try {
+      input.storage.setItem(SELF_HOST_KEY_STORAGE_KEY, fromHash);
+    } catch {
+      // iOS 私密模式可能禁写存储：本次会话仍返回密钥，仅丢失持久化。
+    }
+    return fromHash;
+  }
+  try {
+    return input.storage.getItem(SELF_HOST_KEY_STORAGE_KEY)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 自托管免登录：auth 端口以手机本地密钥充当 JWT，登录页/OAuth 回调在该部署不可达；
+ * 密钥缺失或失效（relay 401）只能落服务不可用失败页，不得引导用户去真实 OAuth。
  */
 export function createSelfHostAuth(
-  secret: string,
+  key: string | null,
   onFailure: (failure: WebRemoteControlFailure) => void,
 ): WebRemoteControlAuthPort {
   return {
-    getZCodeJwtToken: () => secret,
-    getActiveAccount: () => ({ displayName: "Self-host", provider: ZAI_PROVIDER_ID }),
+    getZCodeJwtToken: () => key,
+    getActiveAccount: () =>
+      key ? { displayName: "Self-host", provider: ZAI_PROVIDER_ID } : null,
     startLogin: () => onFailure({ reason: "relay-unavailable" }),
     logout: () => {
       onFailure({ reason: "relay-unavailable" });
@@ -1786,46 +2056,65 @@ export function createSelfHostAuth(
 `packages/web/src/env.d.ts`：在 `VITE_ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL?: string;` 行后加：
 
 ```ts
-  // 自托管免登录构建注入的共享密钥；未注入（官方部署）时该模式完全不启用。
-  readonly VITE_ZCODE_REMOTE_SELF_HOST_SECRET?: string;
+  // 自托管免登录构建标记；密钥不进构建（经书签 URL #k= fragment 分发）。
+  readonly VITE_ZCODE_REMOTE_SELF_HOSTED?: string;
 ```
 
-`packages/web/src/main.tsx`（在 `const remoteEntry = new WebRemoteControlEntry({` 之前加选择逻辑，`auth: webAuthService` 改为 `auth: remoteControlAuth`）：
+`packages/web/src/main.tsx` 接线（`webRemoteControlStorage` 常量之后、`const remoteEntry = ...` 之前）：
 
 ```ts
-import { createSelfHostAuth, isSelfHostRemoteBuild } from "#src/web-remote-control/adapters/selfHostAuth.js";
+import {
+  createSelfHostAuth,
+  isSelfHostRemoteBuild,
+  readSelfHostKey,
+} from "#src/web-remote-control/adapters/selfHostAuth.js";
 
 // ...（既有 import 区不动，新增上面的 import）
 
-const selfHostSecret = import.meta.env.VITE_ZCODE_REMOTE_SELF_HOST_SECRET?.trim();
-const remoteControlAuth = selfHostSecret
-  ? createSelfHostAuth(selfHostSecret, (failure) => renderWebRemoteControlFailure(failure))
+const selfHostBuild = isSelfHostRemoteBuild(import.meta.env);
+const selfHostKey = selfHostBuild
+  ? readSelfHostKey({ hash: window.location.hash, storage: webRemoteControlStorage })
+  : null;
+if (selfHostBuild && window.location.hash) {
+  // 摘除 #k=：密钥不留在地址栏/历史记录，保留 query（sid/mid/app_version）。
+  window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+}
+const remoteControlAuth = selfHostBuild
+  ? createSelfHostAuth(selfHostKey, (failure) => renderWebRemoteControlFailure(failure))
   : webAuthService;
 ```
 
-`remoteEntry` 构造中：`auth: remoteControlAuth,`（其余选项不动）。
+`remoteEntry` 构造改为 `auth: remoteControlAuth,`（其余选项不动）；其 `onView` 中的登录分支替换为：
+
+```ts
+    else if (view.kind === "login") {
+      // 自托管模式登录页不可达：无密钥/密钥失效一律落失败页，不得引导真实 OAuth。
+      if (selfHostBuild) renderWebRemoteControlFailure({ reason: "relay-unavailable" });
+      else renderWebLoginPage();
+    }
+```
 
 `package.json` scripts（`build:web-remote-control:test` 行后加）：
 
 ```json
-    "build:web-remote-control:selfhost": "test -n \"$VITE_ZCODE_REMOTE_SELF_HOST_SECRET\" || (echo 'VITE_ZCODE_REMOTE_SELF_HOST_SECRET is required' >&2; exit 1); VITE_ZCODE_REMOTE_SELF_HOST_SECRET=\"$VITE_ZCODE_REMOTE_SELF_HOST_SECRET\" pnpm --filter @zcode/web exec vite build --base=/remote/v4/",
+    "build:web-remote-control:selfhost": "VITE_ZCODE_REMOTE_SELF_HOSTED=1 pnpm --filter @zcode/web exec vite build --base=/remote/v4/",
 ```
 
 - [ ] **Step 4: 运行测试与构建冒烟**
 
 Run: `pnpm exec vitest run packages/web/test/selfHostAuth.test.ts packages/web/test/webRemoteControlEntry.test.ts`
-Expected: PASS（新文件 3 项 + 既有入口回归不回归）
+Expected: PASS（新文件 8 项 + 既有入口回归）
 
-Run: `VITE_ZCODE_REMOTE_SELF_HOST_SECRET=smoke-secret pnpm build:web-remote-control:selfhost && grep -c "smoke-secret" packages/web/dist/assets/*.js | head -1`
-Expected: 构建成功且密钥被内嵌（grep 命中 ≥1）；同时确认 `packages/web/dist/index.html` 引用 `/remote/v4/assets/` 前缀资源。
+Run: `pnpm build:web-remote-control:selfhost && grep -o '/remote/v4/assets/' packages/web/dist/index.html | head -1`
+Expected: 构建成功，index.html 引用 `/remote/v4/assets/` 前缀资源；构建全程不涉及任何密钥（产物与官方构建一样可公开分发）。
 
-构建后删除冒烟产物避免密钥残留：`rm -rf packages/web/dist`（dist 已 gitignore，仍执行防止后续误打包）。
+构建冒烟后清理：`rm -rf packages/web/dist`。
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add packages/web/src/web-remote-control/adapters/selfHostAuth.ts packages/web/src/env.d.ts packages/web/src/main.tsx packages/web/test/selfHostAuth.test.ts package.json
-git commit --no-verify -m "feat: 手机远控页自托管免登录模式（构建期密钥门控）"
+git commit --no-verify -m "feat: 手机远控页自托管免登录模式（fragment 密钥分发）"
 ```
 
 ---
@@ -1950,7 +2239,7 @@ export function resolveWebRemoteControlEndpointOverrideUrls(
 }
 ```
 
-`packages/desktop/src/main/index.ts` 修改（imports 区从 `@zcode/shared` 的既有导入中补 `ZCODE_PRODUCT_FLAVOR`；新增本地导入）：
+`packages/desktop/src/main/index.ts` 修改（`ZCODE_PRODUCT_FLAVOR` 已在该文件 `@zcode/shared` 的既有导入块中（约 80 行），无需重复引入；只需新增本地导入）：
 
 ```ts
 import { resolveWebRemoteControlEndpointOverrideUrls } from "./web-remote-relay/webRemoteControlEndpointOverride.js";
@@ -2042,7 +2331,8 @@ WantedBy=multi-user.target
    `SELF_HOST_RELAY_SECRET=<secret>`、`SELF_HOST_RELAY_HOST=0.0.0.0`、`SELF_HOST_RELAY_PORT=8787`、
    `SELF_HOST_RELAY_DEVICES_FILE=/var/lib/self-host-relay/devices.json`、
    `SELF_HOST_RELAY_STATIC_ROOT=/opt/self-host-relay/web`。
-   同一密钥用于手机页构建：`VITE_ZCODE_REMOTE_SELF_HOST_SECRET=<secret> pnpm build:web-remote-control:selfhost`。
+   手机页构建零密钥（`pnpm build:web-remote-control:selfhost`，产物可公开分发）；
+   密钥经书签 URL `http://<origin>/remote/v4#k=<secret>` 在手机首次打开时分发到 localStorage。
 3. 上传：`dist/main.js` → `/opt/self-host-relay/main.js`；`packages/web/dist/` → `/opt/self-host-relay/web/`。
 4. systemd：unit 中 `__NODE_BIN__` 替换为 `/opt/node/bin/node`，`systemctl enable --now self-host-relay`。
 5. 云厂商安全组放行 8787/TCP（控制台操作）。
@@ -2077,7 +2367,7 @@ SECRET=$(openssl rand -hex 32)
 echo "SELF_HOST_RELAY_SECRET=$SECRET" > /tmp/self-host-relay-deploy.env && chmod 600 /tmp/self-host-relay-deploy.env
 
 pnpm --filter @zcode/self-host-relay build
-VITE_ZCODE_REMOTE_SELF_HOST_SECRET="$SECRET" pnpm build:web-remote-control:selfhost
+pnpm build:web-remote-control:selfhost   # 构建零密钥，产物可公开分发
 
 ssh alecs 'mkdir -p /opt/self-host-relay/web /var/lib/self-host-relay'
 scp apps/self-host-relay/dist/main.js alecs:/opt/self-host-relay/main.js
@@ -2098,6 +2388,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST "http://$ECS_IP:8787/api/v1/rem
 SECRET=$(grep -o 'SELF_HOST_RELAY_SECRET=.*' /tmp/self-host-relay-deploy.env | cut -d= -f2)
 curl -s -X POST "http://$ECS_IP:8787/api/v1/remote/token" -H "Authorization: Bearer $SECRET" \
   -H 'Content-Type: application/json' -d '{"role":"terminal"}'                                   # 期望 {"code":0,...,"data":{"token":...}}
+echo "手机书签 URL（在手机浏览器打开一次并收藏，之后扫码直连）：http://$ECS_IP:8787/remote/v4#k=$SECRET"
 rm /tmp/self-host-relay-deploy.env
 ```
 
@@ -2134,7 +2425,7 @@ pnpm --filter @zcode/self-host-relay test
 pnpm exec vitest run packages/web/test/selfHostAuth.test.ts packages/web/test/webRemoteControlEntry.test.ts packages/desktop/test/webRemoteControlEndpointOverride.test.ts
 # verify:pre-push 等价门禁（hook 本身因需 origin/staging 不可用）：
 # 基准取 spec 提交的父提交（本特性分支代码改动起点；其间只有 docs 提交）
-ZCODE_AFFECTED_TEST_BASE=$(git rev-parse 0cabc468^) pnpm run test:unit:affected --scope push
+pnpm run test:unit:affected --scope push --base $(git rev-parse 0cabc468^)
 ```
 
 说明：affected 选择规则与输出合同见 `docs/testing/pre-push-hook.md`；选中整包时按该文档声明并跳过。新包 `apps/self-host-relay` 不在根 vitest 收集范围（`packages/*/test/**`），其测试由上面的 `--filter` 单独真实执行。已知基线失败：`packages/desktop/test/desktopRuntimeEnv.test.ts` 本地免签 CUA ×3（前序工作已用 stash 基线验证为既有失败）。全部结果如实记录。
@@ -2165,7 +2456,7 @@ Expected: 构建含 kcode flavor（tsup/vite 日志出现 `.kcode` 或 `KCODE_ID
 - [ ] **Step 3: 真机验收清单（用户执行，结果记录到执行记录）**
 
 1. KCode 打开远控弹窗 → 开启 → 出现二维码（URL 应为 `http://<ECS_IP>:8787/remote/v4?...`）。
-2. 手机扫码 → **不出现登录页**，直接进入连接/设备列表 → 连接成功进入任务首页。
+2. 手机先打开一次部署产出的书签 URL（`http://<ECS_IP>:8787/remote/v4#k=<secret>`）并收藏；再扫 KCode 二维码 → **不出现登录页**，直接进入连接/设备列表 → 连接成功进入任务首页。
 3. 手机锁屏/切后台 30 秒后回前台 → 会话恢复（replayable snapshot/gap）。
 4. `ssh alecs 'systemctl restart self-host-relay'` → 双端在数十秒内自动恢复（桌面旧 SID 复用设备表）。
 5. ZCode 官方 App 同时开启远控 → 两端同时在线互不干扰（A3 根治验证）。
@@ -2183,7 +2474,20 @@ Expected: 推送成功；工作区干净（`git status` 确认无密钥/IP 残�
 
 ## Self-Review 记录
 
-- **Spec 覆盖**：spec §1.1→Task 2/3；§1.2→Task 2/4；§1.3→Task 2/6；§1.4→Task 9；§2→Task 7；§3→Task 8；§4 安全模型→Task 3 鉴权矩阵 + Task 5 穿越 + Task 9 密钥规程；测试验收→各任务 + Task 10。无遗漏。
+- **Spec 覆盖**：spec §1.1→Task 2/3；§1.2→Task 2/4；§1.3→Task 2/6；§1.4→Task 9；§2→Task 7；§3→Task 8；§4 安全模型→Task 3 鉴权矩阵 + Task 5 穿越 + Task 7 fragment 密钥 + Task 9 密钥规程；测试验收→各任务 + Task 10。无遗漏。
 - **占位符**：无 TBD/TODO；所有代码块完整可落盘。
-- **类型一致性**：`SelfHostRelayStore` 方法签名在 Task 1 定义、Task 2 实现一致（`claimOwnership` 返回 `{kicked}`、`releaseOwnership` 布尔）；路由 handler 签名 `(req,res)=>Promise<boolean>` 在 Task 3/5/6 一致；`WebRemoteControlAuthPort` 与 entry 契约（contract.ts:50 Pick 四方法）一致。
-- **Review Focus**：五项均有归属测试（穿越→T5、token 重放→T4、迟到 close→T2+T4、密钥矩阵→T3、重启持久化→T6；stub 401→T7）。
+- **类型一致性**：`SelfHostRelayStore` 方法签名在 Task 1 定义、Task 2 实现一致（`claimOwnership` 返回 `{kicked} | null`、`releaseOwnership` 布尔）；路由 handler 签名 `(req,res)=>Promise<boolean>` 在 Task 3/5/6 一致；网关 `attachSelfHostRelayWsGateway` 返回 `{close()}` 在 Task 4 定义、Task 6 消费一致；`WebRemoteControlAuthPort` 与 entry 契约（contract.ts:50 Pick 四方法）一致。
+- **Review Focus**：五项均有归属测试（穿越→T5、token 重放→T4、迟到 close→T2+T4、密钥矩阵→T3、重启持久化→T6；登录视图拦截→T7）。
+
+## Codex 审查修订记录（2026-10-20，gpt-6.1-sol xhigh，10 条全采纳）
+
+1. P1 客户端中断请求体致进程退出 → T3 `readBody` 吞流错误 + 路由整体 try/catch + 两侧 error 吞掉。
+2. P2 关闭遗漏 WS 致 `server.close()` 挂起 → T4 网关返回 `close()` 终止全部 WS，T6 关闭顺序网关优先，T6 增在线连接限时关闭测试。
+3. P2 持久化失败未处理 rejection 且毒化串行链 → T6 flush 链上捕获记录、永远可继续，T6 增写失败存活测试。
+4. P2 契约 13 个公开方法超 `max-public-methods`(12) → 收敛 `hasDevice` 入 `claimOwnership`（未知设备返回 null），契约 12 个。
+5. P2 WS 测试服务器 404 致 mintToken 假失败 → T4 测试挂载真实 T3 路由。
+6. P2 删除设备测试 claim/release 用了两个同形对象（按引用释放必败）→ T2/T3 测试复用同一 owner 引用。
+7. **P1（spec）公开 bundle 内嵌密钥 = 向匿名访问者发放「连桌面」能力，TLS 不能修复** → 改为 fragment 分发：构建零密钥（`VITE_ZCODE_REMOTE_SELF_HOSTED` 仅作模式标记），密钥经书签 URL `#k=` 进 localStorage 并摘除 fragment；未携带密钥/401 一律失败页（T7 重写，spec §2/§4 同步修订）。
+8. P1 tsup 默认外置 dependencies，单文件在 ECS 缺模块 → T1 `tsup.config.ts` `noExternal: [/.+/]`，T6 增无 node_modules 的 bundle 隔离冒烟。
+9. P2 401 最终仍渲染登录页（`switchAccount` 在 logout 后发 login 视图）→ T7 `onView` 登录分支拦截为失败页 + entry 集成测试。
+10. P2 静态根路径先 200 后 ENOENT 崩进程 → T5 先校验 index.html 存在、文件流错误降级 404，T5 增空目录用例。

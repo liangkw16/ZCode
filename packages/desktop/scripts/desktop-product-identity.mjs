@@ -5,6 +5,13 @@
  */
 export const ZCODE_PREVIEW_IDENTITY_ENV = "ZCODE_PREVIEW_IDENTITY";
 
+/**
+ * 构建期开关：为真时安装包使用 KCode 自用身份（个人 fork 的并排安装档）。
+ * 典型用法是 `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1`，得到一个连接生产后端、
+ * 复用 Preview 全套隔离机制（appId/userData/Helper variant）但命名为 `KCode` 的安装包。
+ */
+export const ZCODE_KCODE_IDENTITY_ENV = "ZCODE_KCODE_IDENTITY";
+
 const PRODUCTION_IDENTITY = Object.freeze({
   flavor: "production",
   appId: "dev.zcode.app",
@@ -23,9 +30,19 @@ const PREVIEW_IDENTITY = Object.freeze({
   cuaHelperInstallVariant: "preview",
 });
 
+const KCODE_IDENTITY = Object.freeze({
+  flavor: "kcode",
+  appId: "dev.zcode.app.kcode",
+  productName: "KCode",
+  linuxExecutableName: "kcode",
+  linuxPackageName: "kcode",
+  cuaHelperInstallVariant: "kcode",
+});
+
 export const desktopProductIdentities = Object.freeze({
   production: PRODUCTION_IDENTITY,
   preview: PREVIEW_IDENTITY,
+  kcode: KCODE_IDENTITY,
 });
 
 function normalizeDesktopZCodeEnv(env) {
@@ -51,12 +68,33 @@ export function isPreviewIdentityRequested(env = process.env) {
 }
 
 /**
+ * 与 Preview 开关同一套严格 1/0 语义：KCode 是自用并排安装档，误拼写必须在构建期失败，
+ * 避免半套身份（例如只改了 appId 却没改 productName）打进产物。
+ */
+export function isKcodeIdentityRequested(env = process.env) {
+  const value = env[ZCODE_KCODE_IDENTITY_ENV]?.trim() ?? "";
+  if (value === "1") {
+    return true;
+  }
+  if (value === "" || value === "0") {
+    return false;
+  }
+  throw new Error(
+    `invalid ${ZCODE_KCODE_IDENTITY_ENV}=${env[ZCODE_KCODE_IDENTITY_ENV]}; expected 1 or 0`,
+  );
+}
+
+/**
  * 产品身份（flavor）与后端环境（`ZCODE_ENV`）是两个轴：
  * - `ZCODE_ENV=test` 一律是 Preview，测试后端不能顶着正式 `ZCode` 身份覆盖用户的正式安装；
- * - `ZCODE_ENV=production` 默认是正式身份，显式 `ZCODE_PREVIEW_IDENTITY=1` 时改用 Preview 身份。
+ * - `ZCODE_ENV=production` 默认是正式身份，显式 `ZCODE_PREVIEW_IDENTITY=1` 时改用 Preview 身份；
+ * - `ZCODE_KCODE_IDENTITY=1` 优先级最高，得到自用 KCode 身份（与 Preview 同构的隔离档）。
  * 未知 `ZCODE_ENV` 继续按 test 处理，和共享层 normalizeZCodeEnv 的 fail-safe 默认值一致。
  */
 export function resolveDesktopProductFlavor(env = process.env) {
+  if (isKcodeIdentityRequested(env)) {
+    return "kcode";
+  }
   if (isPreviewIdentityRequested(env)) {
     return "preview";
   }
@@ -86,7 +124,8 @@ export function resolveWindowsAppUserModelIdForFlavor(flavor, runtime = { isPack
   if (runtime.isPackaged === false) {
     return "cn.aminer.zcode";
   }
-  return desktopProductIdentities[flavor === "preview" ? "preview" : "production"].appId;
+  const normalizedFlavor = flavor === "production" ? "production" : flavor === "kcode" ? "kcode" : "preview";
+  return desktopProductIdentities[normalizedFlavor].appId;
 }
 
 export function resolveWindowsAppUserModelId(env = process.env, runtime = { isPackaged: true }) {

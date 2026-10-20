@@ -49,6 +49,17 @@ describe("shared runtime env", () => {
     expect(env.ZCODE_PRODUCT_FLAVOR).toBe("preview");
   });
 
+  it("显式注入 kcode 身份时保留自用并排安装档", async () => {
+    vi.stubGlobal("__ZCODE_ENV__", "production");
+    vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "kcode");
+
+    const env = await importFreshEnvModule();
+
+    expect(env.ZCODE_PRODUCT_FLAVOR).toBe("kcode");
+    expect(env.normalizeZCodeProductFlavor("kcode", "test")).toBe("kcode");
+    expect(env.normalizeZCodeProductFlavor("KCode", "production")).toBe("kcode");
+  });
+
   it("mapZCodeEnvToArmsRumEnv 将非本地 production 映射为 prod", async () => {
     vi.stubGlobal("__ZCODE_ENV__", "production");
 

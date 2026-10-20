@@ -65,11 +65,55 @@ describe("desktop product identity", () => {
     );
   });
 
-  it("产物后缀只标记后端环境，生产后端的 Preview 包靠 productName 区分", () => {
+  it("ZCODE_KCODE_IDENTITY=1 得到自用 KCode 身份，优先级高于 Preview 开关", () => {
+    // KCode 是与 Preview 同构的并排安装档：独立 appId/productName/userData/Helper variant，
+    // 但必须显式选择，普通构建（含生产后端）不受影响。
+    const env = { ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: "1" };
+    expect(resolveDesktopProductFlavor(env)).toBe("kcode");
+    expect(resolveDesktopProductIdentity(env)).toEqual({
+      flavor: "kcode",
+      appId: "dev.zcode.app.kcode",
+      productName: "KCode",
+      linuxExecutableName: "kcode",
+      linuxPackageName: "kcode",
+      cuaHelperInstallVariant: "kcode",
+    });
+    expect(resolveDesktopProductIdentity(env)).toBe(desktopProductIdentities.kcode);
+    expect(resolveDesktopProductFlavor({ ZCODE_ENV: "production" })).toBe("production");
+    expect(
+      resolveDesktopProductFlavor({
+        ZCODE_ENV: "production",
+        ZCODE_PREVIEW_IDENTITY: "1",
+        ZCODE_KCODE_IDENTITY: "1",
+      }),
+    ).toBe("kcode");
+    // 身份与后端环境分轴：测试后端 + KCode 开关仍是 KCode 身份。
+    expect(resolveDesktopProductFlavor({ ZCODE_ENV: "test", ZCODE_KCODE_IDENTITY: "1" })).toBe(
+      "kcode",
+    );
+  });
+
+  it("KCode 开关与 Preview 开关共用严格 1/0 语义，误拼写必须构建期失败", () => {
+    for (const flag of ["true", "yes", "on", "false", "no", "off", "2"]) {
+      expect(() =>
+        resolveDesktopProductFlavor({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: flag }),
+      ).toThrow(/expected 1 or 0/);
+    }
+    for (const flag of ["", "0"]) {
+      expect(
+        resolveDesktopProductFlavor({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: flag }),
+      ).toBe("production");
+    }
+  });
+
+  it("产物后缀只标记后端环境，生产后端的 KCode 包靠 productName 区分", () => {
     expect(resolveDesktopArtifactSuffix({ ZCODE_ENV: "test" })).toBe("_TEST");
     expect(resolveDesktopArtifactSuffix({ ZCODE_ENV: "production" })).toBe("");
     expect(
       resolveDesktopArtifactSuffix({ ZCODE_ENV: "production", ZCODE_PREVIEW_IDENTITY: "1" }),
+    ).toBe("");
+    expect(
+      resolveDesktopArtifactSuffix({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: "1" }),
     ).toBe("");
     expect(resolveDesktopArtifactSuffix({})).toBe("_TEST");
   });
@@ -109,6 +153,9 @@ describe("desktop product identity", () => {
     );
     expect(resolveWindowsAppUserModelIdForFlavor("production")).toBe(
       desktopProductIdentities.production.appId,
+    );
+    expect(resolveWindowsAppUserModelIdForFlavor("kcode")).toBe(
+      desktopProductIdentities.kcode.appId,
     );
   });
 

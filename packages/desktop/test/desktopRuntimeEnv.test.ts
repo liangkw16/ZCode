@@ -912,6 +912,7 @@ describe("desktopRuntimeEnv runtime identity", () => {
   beforeEach(() => {
     vi.resetModules();
     appMock.isPackaged = false;
+    productFlavorMock.value = "preview";
     appMock.getPath.mockClear();
     appMock.getPath.mockImplementation((name: string) => `/mock/${name}`);
     delete process.env["ZCODE_DESKTOP_APPLICATION_NAME"];
@@ -987,6 +988,38 @@ describe("desktopRuntimeEnv runtime identity", () => {
     // 所以用同样的 join 表达；在 POSIX 上是恒等变换。
     expect(runtimeUserDataPath).toBe(join("/mock/appData", "ZCode Preview"));
     expect(runtimeSessionDataPath).toBe(join("/mock/appData", "ZCode Preview", "session"));
+  });
+
+  it("打包 kcode 使用 KCode 应用名、独立数据目录与 Helper variant，不借用 Preview 灰度", async () => {
+    appMock.isPackaged = true;
+    productFlavorMock.value = "kcode";
+    Object.defineProperty(process, "resourcesPath", {
+      value: "/mock/resources",
+      configurable: true,
+    });
+    process.env["ZCODE_DYNAMIC_WORKFLOW_MODE"] = "disabled";
+
+    const {
+      buildHostProcessEnv,
+      isKcodePackagedRuntime,
+      isPreviewPackagedRuntime,
+      runtimeApplicationName,
+      runtimeSessionDataPath,
+      runtimeUserDataPath,
+    } = await import("../src/main/desktopRuntimeEnv.js");
+
+    expect(isKcodePackagedRuntime).toBe(true);
+    expect(isPreviewPackagedRuntime).toBe(false);
+    expect(runtimeApplicationName).toBe("KCode");
+    // KCode 与正式版/Preview 并排安装：Electron userData（单实例锁所在）必须独占目录。
+    expect(runtimeUserDataPath).toBe(join("/mock/appData", "KCode"));
+    expect(runtimeSessionDataPath).toBe(join("/mock/appData", "KCode", "session"));
+
+    const env = buildHostProcessEnv({});
+    // Helper 与 preview 同构隔离，避免不同版本互相覆盖或触发降级保护。
+    expect(env.ZCODE_CUA_HELPER_INSTALL_VARIANT).toBe("kcode");
+    // 业务语义跟随 production：Dynamic Workflow 不强制 alwaysOn，继承值被删除。
+    expect(env.ZCODE_DYNAMIC_WORKFLOW_MODE).toBeUndefined();
   });
 
   it("e2e 可保留 Chromedriver 注入的 Electron userData 目录", async () => {

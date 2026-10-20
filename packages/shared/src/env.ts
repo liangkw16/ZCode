@@ -1,8 +1,12 @@
 import type { ZCodeRuntimeEnv } from "./runtimeEnv.js";
 
 export type ZCodeEnv = "test" | "production";
-/** 安装包身份：决定应用名、app id、Electron 数据目录与更新策略；与后端环境 `ZCodeEnv` 是两个轴。 */
-export type ZCodeProductFlavor = "production" | "preview";
+/**
+ * 安装包身份：决定应用名、app id、Electron 数据目录与更新策略；与后端环境 `ZCodeEnv` 是两个轴。
+ * `kcode` 是个人自用并排安装档：与 `preview` 同构的身份隔离（独立 appId/userData/Helper variant），
+ * 但功能语义走 production 分支（不强开 Preview 灰度、不启用自动更新）。
+ */
+export type ZCodeProductFlavor = "production" | "preview" | "kcode";
 export type ArmsRumEnv = "local" | "prod";
 
 // 非构建环境（如 e2e 测试的 mocha）下 define 不存在，用 typeof 检查 + fallback 避免 ReferenceError
@@ -30,7 +34,7 @@ export function normalizeZCodeProductFlavor(
   zcodeEnv: ZCodeEnv,
 ): ZCodeProductFlavor {
   const normalized = value?.trim().toLowerCase();
-  if (normalized === "production" || normalized === "preview") {
+  if (normalized === "production" || normalized === "preview" || normalized === "kcode") {
     return normalized;
   }
   return zcodeEnv === "production" ? "production" : "preview";

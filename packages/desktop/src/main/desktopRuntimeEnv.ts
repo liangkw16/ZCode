@@ -49,6 +49,10 @@ export const desktopRuntimeEnv: ZCodeRuntimeEnv = isLocalDevelopmentRuntime
 // 需要独立的应用名、Electron 数据目录和 Helper 安装子目录才能与正式版并排运行。
 export const isPreviewPackagedRuntime =
   !isLocalDevelopmentRuntime && ZCODE_PRODUCT_FLAVOR === "preview";
+// KCode 是与 Preview 同构的自用并排安装档：独立应用名 / Electron 数据目录 / Helper variant，
+// 但业务语义（Dynamic Workflow 灰度等）跟随 production，不借用 Preview 的强制开关。
+export const isKcodePackagedRuntime =
+  !isLocalDevelopmentRuntime && ZCODE_PRODUCT_FLAVOR === "kcode";
 
 function readRuntimeEnvOverride(name: string): string | undefined {
   return process.env[name]?.trim() || undefined;
@@ -64,7 +68,13 @@ function isTruthyRuntimeEnvOverride(name: string): boolean {
 // 这里允许测试显式隔离运行时身份，正常桌面/远控路径保持原来的默认值。
 export const runtimeApplicationName =
   readRuntimeEnvOverride("ZCODE_DESKTOP_APPLICATION_NAME") ??
-  (isLocalDevelopmentRuntime ? "ZCode Dev" : isPreviewPackagedRuntime ? "ZCode Preview" : "ZCode");
+  (isLocalDevelopmentRuntime
+    ? "ZCode Dev"
+    : isPreviewPackagedRuntime
+      ? "ZCode Preview"
+      : isKcodePackagedRuntime
+        ? "KCode"
+        : "ZCode");
 // Electron 的 app.getPath("home") 不一定跟随测试进程里的 HOME 覆盖。
 // e2e 默认工作区依赖 home 路径，因此提供显式覆盖，避免测试写到开发者真实 ~/ZCodeProject。
 export const runtimeHomePath = readRuntimeEnvOverride("ZCODE_DESKTOP_HOME_DIR");
@@ -575,7 +585,9 @@ export function buildHostProcessEnv(hostProcessLocalEnv: Record<string, string>)
     ZCODE_ENV,
     // Preview 与生产版共享任务、配置和凭据，但不同版本的 Helper 不能互相覆盖或触发降级保护。
     // 只隔离 computer-use 下的运行组件，不改写 ZCODE_HOME / ZCODE_DATA_BASE_DIR 业务数据根。
+    // KCode 同理：与正式版/Preview 共享业务数据，仅用独立 variant 隔离 Helper 安装目录。
     ...(isPreviewPackagedRuntime ? { ZCODE_CUA_HELPER_INSTALL_VARIANT: "preview" } : {}),
+    ...(isKcodePackagedRuntime ? { ZCODE_CUA_HELPER_INSTALL_VARIANT: "kcode" } : {}),
     // Dynamic Workflow 灰度的本地覆盖：Main 决策后写入，production 包为空对象（继承值已在上面删除）。
     ...dynamicWorkflowModeHostEnv,
     // 模型请求默认 header 由 agent 进程构造，过去只继承 shell env 导致桌面启动时拿不到 app 版本。

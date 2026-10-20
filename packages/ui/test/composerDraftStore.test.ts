@@ -81,6 +81,27 @@ describe("Composer Draft 持久选择", () => {
     expect(readPendingTaskDraft(scope)?.draftId).toBe(b.draftId);
     expect(readV4ComposerDraft("/task-a", undefined, V4_DRAFT_SCOPE_ROOT, scope)).toBeNull();
   });
+  it("PD12 明文 HTTP（非安全上下文）没有 crypto.randomUUID 时仍能创建待发送草稿", () => {
+    // 修复回归：自托管远控页面经 http:// 访问时 crypto.randomUUID 不存在，
+    // 旧实现直接调用会让手机端"新建任务"点击后被静默吞掉。
+    const original = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
+    Object.defineProperty(crypto, "randomUUID", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      const scope = { clientNamespace: "mobile:device-a", hostId: "local", projectId: null };
+      const draft = ensurePendingTaskDraft(scope);
+      // readPendingTaskDraft 只认 UUID 形状的 draftId，退化实现必须产出同格式。
+      expect(draft.draftId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      );
+      expect(readPendingTaskDraft(scope)?.draftId).toBe(draft.draftId);
+    } finally {
+      if (original) Object.defineProperty(crypto, "randomUUID", original);
+      else delete (crypto as { randomUUID?: unknown }).randomUUID;
+    }
+  });
   it("PD03 同目录项目草稿独立，项目更换主要目录仍能恢复", () => {
     const p = { clientNamespace: "desktop", hostId: "local", projectId: "p" };
     const q = { ...p, projectId: "q" };

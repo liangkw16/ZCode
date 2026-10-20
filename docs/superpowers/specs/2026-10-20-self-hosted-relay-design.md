@@ -289,3 +289,23 @@ QR / 复制链接成为主密钥载体——与原书签 URL **同一暴露面�
 - 不引入 nginx（单进程自用，无必要）。
 
 验收矩阵：仅 br / 仅 gzip / 不同 q / `br;q=0` / 无头 / 空头 / 通配符 / 禁 identity→406 / sidecar 缺失回退原文 / `.br` 直访 404 / HEAD / 真实 hash 文件 immutable 头 / Node 原生 HTTP 取原始响应解压后与原文件逐字节一致。
+
+## 追记 2026-10-20（四）：远控页"新建任务/自动化/插件市场"失效修复
+
+### 4.1 根因一：明文 HTTP 非安全上下文缺少 `crypto.randomUUID`（新建任务失效）
+
+现象：手机端点击侧栏「新建任务」无任何反应；官方 `https://zcode.z.ai` 远控页同操作正常。
+
+根因链（IAB 实测 + 诊断构建逐门禁打点定位）：`ProjectSidebarNavigation.新建任务` → Root `startNewTaskFromActiveWorkspace` → replayable 分支 `openMobileProjectDraft` → `ensurePendingTaskDraft`（`composerDraftStore.ts`）直接调用 `crypto.randomUUID()`。自托管页经 `http://IP:8787` 访问属**非安全上下文**，`crypto.randomUUID` 不存在 → 抛 `TypeError` → 被"准备新任务"catch 静默吞掉（生产构建 UI logger no-op，无任何可见反馈）。官方页走 HTTPS（安全上下文）故不复现；本地 dev 页走 `localhost`（同为安全上下文）也不复现——这正是"官方好的、自托管坏的"的唯一差异。
+
+修复：`composerDraftStore.ensurePendingTaskDraft` 及其余 4 处无守卫的裸 `crypto.randomUUID()`（`hooksStore`×2、`pluginUiHostController` 默认 callId、`agentConversationTransport` TTFT 标定 id、`userActionTelemetry` actionId）统一改用 `@zcode/shared` 的 `createUuid`（安全上下文行为不变，非安全上下文退回 `getRandomValues` 生成同格式 UUID；与其既有"移动端 WebView 无 randomUUID"fallback 设计一致）。其余调用点（`webElementContext`、`useCodeCommentContexts`、`attachmentUploadTransaction`、quota/pptx/auth 等）已有守卫，不动。`localTtftObserver` 的裸调用保持原样：observer 仅在桌面 renderer 注入（远控页恒为 undefined，`start()`/标定在该页不可达），且该文件晚于 unmanaged 截止日入库，改动会触发架构门禁。
+
+回归：`composerDraftStore.test.ts` PD12——临时以 `Object.defineProperty` 隐藏 `crypto.randomUUID`，断言 `ensurePendingTaskDraft` 仍产出合法 UUID 形状并持久化。
+
+### 4.2 根因二：远控 shell 显式禁用「自动化」「插件市场」主视图（上游门槛）
+
+现象：两个入口点击后 `workspaceMainView` 置位又被立即复位，主区始终停留聊天页。上游（至 3.16.2 与最新 sync 3c5b2276）在 `WorkspaceShellLayout` 两处以 `&& !isWebRemoteControlShell` 排除这两个主视图，并有强制回落 chat 的 effect（注释："远控不承载 Automations"）。但 `PluginStorePage` 本身已内建 `isWebRemoteControl` 支持（`client_kind: "mobile"`），官方线上远控页也承载这两个入口。
+
+决策（对齐官方行为）：删除远控页两处 `!isWebRemoteControlShell` 门槛（mobile shell `chatContent` 与 `wideContent` 各两处）及回落 effect；视图经既有 bridge RPC（projectService/settingService/pluginManagement）渲染，`onCreateTask` 复用 `handleCreateTaskInChat`（新建任务修复后即可用）。桌面端行为不变（门槛本就只在远控 shell 生效）。
+
+验收：IAB 明文 HTTP 打开远控页——「新建任务」创建 draft workspace 并进入新会话；「自动化」/「插件市场」渲染主视图且可在视图内创建任务；手机复测同链路。

@@ -1201,16 +1201,8 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
   const primaryNavigationBack =
     workspaceMainView === "plugin-store" ? showChatMainView : handleTaskNavBack;
   const canPrimaryNavigationBack = workspaceMainView === "plugin-store" || canTaskNavBack;
-  useEffect(() => {
-    if (
-      isWebRemoteControlShell &&
-      (workspaceMainView === "automations" || workspaceMainView === "plugin-store")
-    ) {
-      // 修复原因：手机远控复用桌面 shell 时可能保留上一次主视图状态；
-      // 远控不承载 Automations，必须立即回落到 continuous/replayable 边界之外的聊天页。
-      onWorkspaceMainViewChange("chat");
-    }
-  }, [isWebRemoteControlShell, onWorkspaceMainViewChange, workspaceMainView]);
+  // 修订说明（2026-10-20）：远控 shell 现已承载「自动化」「插件市场」主视图（与官方远控一致），
+  // 原先"远控不承载 Automations，立即回落聊天页"的强制重置 effect 随门槛一并删除。
   const handleCreateTaskInChat = useCallback(
     (request?: Parameters<typeof onCreateTask>[0]) => {
       // workspaceReadOnlyReason 判定的是活动 workspace；当 request 显式带 targetWorkspace 时
@@ -2088,7 +2080,10 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
         }
         chatOverlay={workspaceMainView === "chat" ? renderChatFindDialog() : undefined}
         chatContent={
-          workspaceMainView === "automations" && !isWebRemoteControlShell ? (
+          // 修订说明（2026-10-20）：与官方远控对齐，远控页承载「自动化」「插件市场」主视图
+          // （PluginStorePage 已内建 isWebRemoteControl 的 mobile client_kind）；
+          // 此前 `!isWebRemoteControlShell` 让这两个入口点击无反应。
+          workspaceMainView === "automations" ? (
             <main
               id={AUTOMATIONS_TOAST_ANCHOR_ID}
               className="flex h-full min-h-0 flex-1 flex-col bg-background"
@@ -2135,7 +2130,7 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
                 </div>
               </AutomationsMainBreadcrumbFrame>
             </main>
-          ) : workspaceMainView === "plugin-store" && !isWebRemoteControlShell ? (
+          ) : workspaceMainView === "plugin-store" ? (
             <main className="flex h-full min-h-0 flex-1 flex-col bg-background">
               <AutomationsMainBreadcrumbFrame
                 isDesktop={Boolean(isDesktop)}
@@ -2525,7 +2520,7 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
                         </Button>
                       ) : null}
                       <div className="min-h-0 flex-1 overflow-hidden">
-                        {workspaceMainView === "automations" && !isWebRemoteControlShell ? (
+                        {workspaceMainView === "automations" ? (
                           <main
                             id={AUTOMATIONS_TOAST_ANCHOR_ID}
                             className="flex h-full min-h-0 flex-1 flex-col bg-background"
@@ -2580,7 +2575,7 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
                               </div>
                             </AutomationsMainBreadcrumbFrame>
                           </main>
-                        ) : workspaceMainView === "plugin-store" && !isWebRemoteControlShell ? (
+                        ) : workspaceMainView === "plugin-store" ? (
                           <main className="flex h-full min-h-0 flex-1 flex-col bg-background">
                             <AutomationsMainBreadcrumbFrame
                               isDesktop={Boolean(isDesktop)}

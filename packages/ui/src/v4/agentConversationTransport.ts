@@ -1,6 +1,6 @@
 import { sendWithConversationDelayE2E } from "@/v4/conversationTransportDelayE2E.js";
 import { getLocalTtftObserver } from "@/v4/telemetry/localTtftObserver.js";
-import { calibrateLocalTtftClock, localTtftNow } from "@zcode/shared";
+import { calibrateLocalTtftClock, createUuid, localTtftNow } from "@zcode/shared";
 /* oxlint-disable eslint(max-lines) -- transport 将上传、分块读取和 runtime 生命周期保持在同一 host 边界。 */
 // ConversationTransport 的 desktop/host 实现：桥到 IZCodeAgentService 的 v4 转发面
 // （依赖注入原则——数据层不感知 host 细节，
@@ -108,7 +108,9 @@ export function createAgentConversationTransport(
     calibrationFlight = agentService
       .queryConversationCommandsV4({
         ...workspace,
-        commands: [{ sessionId: null, commandId: `ttft-clock-${crypto.randomUUID()}` }],
+        // 修复原因：明文 HTTP（非安全上下文）下 crypto.randomUUID 不存在，标定请求会抛错；
+        // 走带 fallback 的 createUuid，安全上下文行为不变。
+        commands: [{ sessionId: null, commandId: `ttft-clock-${createUuid()}` }],
         clock: true,
       })
       .then((result) => {

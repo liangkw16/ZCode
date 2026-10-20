@@ -10,6 +10,7 @@
 // 与「v4 composer 不做附件草稿持久化」的裁决一致）。
 import { logger } from "@/logger.js";
 import {
+  createUuid,
   modelSelectionSchema,
   remoteHostIdFromWorkspaceIdentity,
   type ModelSelection,
@@ -84,7 +85,10 @@ function writePendingTaskDraft(scope: ComposerScope, value: PendingTaskDraft | n
 export function ensurePendingTaskDraft(scope: ComposerScope): PendingTaskDraft {
   const current = readPendingTaskDraft(scope);
   if (current) return current;
-  const next = { draftId: crypto.randomUUID() };
+  // 修复原因：自托管远控页面经明文 HTTP（非安全上下文）访问时 crypto.randomUUID 不存在，
+  // 这里直接调用会抛 TypeError，被"新建任务"入口捕获后静默吞掉，手机端点击毫无反应。
+  // 改用 createUuid：安全上下文行为不变，非安全上下文退回 getRandomValues 生成同格式 UUID。
+  const next = { draftId: createUuid() };
   writePendingTaskDraft(scope, next);
   return next;
 }

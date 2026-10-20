@@ -8,6 +8,7 @@ import type {
 import {
   RENDERER_ACTION_TRACE_MAX_BATCH_BYTES,
   RENDERER_ACTION_TRACE_MAX_BATCH_SPANS,
+  createUuid,
 } from "@zcode/shared";
 import {
   resolveUserActionCatalogEntry,
@@ -129,7 +130,9 @@ export class RendererUserActionTelemetry implements UserActionTelemetry {
     }
 
     const active: ActiveAction = {
-      actionId: crypto.randomUUID(),
+      // 修复原因：明文 HTTP（非安全上下文）下 crypto.randomUUID 不存在，采样命中即抛错；
+      // 走带 fallback 的 createUuid，安全上下文行为不变。
+      actionId: createUuid(),
       entry,
       input,
       spanId: this.randomHex(8),

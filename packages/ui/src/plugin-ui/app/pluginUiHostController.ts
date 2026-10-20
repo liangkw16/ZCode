@@ -1,3 +1,4 @@
+import { createUuid } from "@zcode/shared";
 import { createPluginUiSampling } from "./pluginUiSampling.js";
 import type { CallToolResult, Transport } from "@modelcontextprotocol/client";
 import type { McpUiHostContext } from "@modelcontextprotocol/ext-apps/app-bridge";
@@ -54,7 +55,9 @@ export function createPluginUiHostController(
   // 进行中的页面工具调用 id，dispose 时逐个取消到 agent。
   const activeCalls = new Set<string>();
   let unregisterNotifications: (() => void) | null = null;
-  const createCallId = deps.createCallId ?? (() => crypto.randomUUID());
+  // 修复原因：明文 HTTP（非安全上下文）下 crypto.randomUUID 不存在，插件 UI 调用会直接抛错；
+  // 统一走带 fallback 的 createUuid，安全上下文行为不变。
+  const createCallId = deps.createCallId ?? createUuid;
   const setTimer =
     deps.setTimer ??
     ((callback: () => void, ms: number) => {

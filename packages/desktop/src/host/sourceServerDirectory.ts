@@ -16,6 +16,7 @@ import {
   type RemoteWorkspaceSessionEntry,
   type RemoteTarget,
   type SourceServerDeclaredWorkspaceWire,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 import type {
   ICredentialService,
@@ -167,7 +168,7 @@ export class SourceServerDirectory {
       options.migrateControllerIdentity ??
       (async (input) =>
         await migrateControllerRemoteWorkspaceIdentity({
-          dbPath: join(getDataBaseDir(), ".zcode", "v2", "tasks-index.sqlite"),
+          dbPath: join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT, "v2", "tasks-index.sqlite"),
           ...input,
         }));
   }

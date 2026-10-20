@@ -1,6 +1,7 @@
 // Config Port - Scoped configuration with change notification
 
 import type { CollaborationMode } from "../interfaces/session.port.js";
+import { ZCODE_DATA_DIR_SEGMENT } from "../path/index.js";
 import type { McpServerConfig } from "../interfaces/mcp.port.js";
 import type { HooksRuntimeConfig, HooksRuntimeConfigPatch } from "../hooks/index.js";
 import type { PluginConfig, PluginOptionValues } from "../plugins/index.js";
@@ -306,8 +307,10 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     allowMediumRiskInAuto: false,
   },
   storage: {
-    dir: "~/.zcode",
-    sessionDbPath: "~/.zcode/cli/db/db.sqlite",
+    // 运行时默认根随编译期 segment（kcode 镜像根）；缺失该默认会让 agent 继续打开
+    // ~/.zcode 的会话库与配置（终审 P1）。
+    dir: `~/${ZCODE_DATA_DIR_SEGMENT}`,
+    sessionDbPath: `~/${ZCODE_DATA_DIR_SEGMENT}/cli/db/db.sqlite`,
   },
   network: {
     timeout: 180000,

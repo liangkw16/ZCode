@@ -20,6 +20,7 @@ const SWEEP_TARGETS: readonly string[] = [
   "src/zcode-agent/zcodeAgentService.ts",
   "src/zcode-agent/zcodeTaskServiceAdapter.ts",
   "src/storage/adapters/rootsResolver.ts",
+  "src/mcp-sync/mcpSyncService.ts",
   "src/paths.ts",
   "src/setting/settingService.ts",
 ];
@@ -30,7 +31,8 @@ const REMAINING_LITERAL_COUNT: Record<string, number> = {
   "src/settings-sync/settingsSyncService.ts": 4, // 工作区 skills/commands/plugins/config.json 分支
   "src/skills/skillsService.ts": 1, // :74 join(workspacePath, ".zcode", "skills")
   "src/subagents/subagentStorage.ts": 1, // :24 join(workspacePath, ".zcode", "agents")
-  "src/commands/commandsService.ts": 1, // :56 workspaceDirectorySegments（:55 userDirectorySegments 已改）
+  "src/commands/commandsService.ts": 1, // :56 workspaceDirectorySegments
+  "src/mcp-sync/mcpSyncService.ts": 1, // workspaceConfigDirSegments（userConfigDirSegments 已改）
 };
 
 describe("data dir segment sweep 守护", () => {

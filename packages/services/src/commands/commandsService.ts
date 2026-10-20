@@ -206,7 +206,7 @@ function readStorageDirFromConfig(config: Record<string, unknown>): string {
   const storage = isRecord(config.storage) ? config.storage : {};
   return typeof storage.dir === "string" && storage.dir.trim().length > 0
     ? storage.dir
-    : "~/.zcode";
+    : `~/${ZCODE_DATA_DIR_SEGMENT}`;
 }
 
 function readPluginConfigFromConfig(config: Record<string, unknown>): PluginConfigSummary {

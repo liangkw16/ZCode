@@ -3,6 +3,7 @@
 // ============================================================
 
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { LogContext, LogEntry, Logger, LoggerFactory, LogRedactor } from "@zcode/contracts";
@@ -220,7 +221,7 @@ export function createNodeLoggerFactory(options: NodeLoggerFactoryOptions = {}):
 }
 
 export function getDefaultLogDir(): string {
-  return join(homedir(), ".zcode", "cli", "log");
+  return join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", "log");
 }
 
 function getDefaultMinLevel(env: NodeJS.ProcessEnv | undefined): LogLevel {

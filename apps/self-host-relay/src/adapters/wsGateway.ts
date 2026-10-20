@@ -12,6 +12,11 @@ import type { SelfHostRelayStore } from "../contract.js";
 export interface SelfHostRelayWsGatewayOptions {
   store: SelfHostRelayStore;
   now?: () => number;
+  /**
+   * 现任 terminal 活跃窗口（默认 12s，须短于客户端 15s 握手超时）：窗口内新 terminal
+   * 排队等待接管而非立即拒绝；现任沉默超过窗口才允许按官方语义替换。
+   */
+  terminalOwnerStaleMs?: number;
 }
 
 interface RelayConnection {
@@ -25,7 +30,7 @@ interface RelayConnection {
 }
 
 /** 现任 terminal 沉默超过该窗口才允许新 terminal 接管（spec 追记三 §3.1，与官方"新替旧"的有意分叉）。 */
-const TERMINAL_OWNER_STALE_MS = 15_000;
+const DEFAULT_TERMINAL_OWNER_STALE_MS = 12_000;
 
 export function attachSelfHostRelayWsGateway(
   server: Server,
@@ -33,6 +38,7 @@ export function attachSelfHostRelayWsGateway(
 ): { close(): Promise<void> } {
   const now = options.now ?? Date.now;
   const store = options.store;
+  const terminalOwnerStaleMs = options.terminalOwnerStaleMs ?? DEFAULT_TERMINAL_OWNER_STALE_MS;
   const wsServer = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
   const connections = new Map<unknown, RelayConnection>();
 
@@ -99,49 +105,76 @@ export function attachSelfHostRelayWsGateway(
             ws.close();
             return;
           }
-          // 现任优先独占（spec 追记三 §3.1）：terminal 接入时若现任 terminal 活跃（15s 内有
-          // 消息），拒绝新连接（回 KICKED——客户端 60s 内第二次 KICKED 会进会话冲突终态页停止
-          // 重试，双页互踢战争终止）；现任沉默 >=15s（半开/锁屏/关页）才按官方语义替换接管。
-          // 检查与 claim 在同一同步回调内完成，并发 auth_init 不会同时通过。device 角色不受
-          // 影响：桌面重启必须无条件收回 device 位。
-          if (connection.role === "terminal") {
-            const incumbentOwner = store.getOwner(message.device_sid, "terminal");
-            const incumbent = incumbentOwner ? connections.get(incumbentOwner.owner) : undefined;
-            if (incumbent && now() - incumbent.lastSeenAt < TERMINAL_OWNER_STALE_MS) {
-              send(connection, { type: "error", code: "KICKED" });
+          // 认证完成块：claim（设备不存在 → AUTH_FAILED）+ 踢旧 + 配对推送 + auth_ack。
+          const deviceSidToClaim = message.device_sid;
+          const metaToClaim = message.meta ?? {};
+          const completeAuthInit = () => {
+            const claimed = store.claimOwnership(
+              deviceSidToClaim,
+              connection.role,
+              metaToClaim,
+              connection.ownerRef,
+            );
+            if (!claimed) {
+              send(connection, { type: "error", code: "AUTH_FAILED" });
               ws.close();
               return;
             }
+            const kickedConnection = claimed.kicked ? connections.get(claimed.kicked) : undefined;
+            if (kickedConnection) {
+              send(kickedConnection, { type: "error", code: "KICKED" });
+              kickedConnection.socket.close();
+            }
+            connection.deviceSid = deviceSidToClaim;
+            const peer = peerOf(connection);
+            const pairStatus = peer ? "matched" : "waiting";
+            if (peer) {
+              // 契约：认证即配对时，对端收 pair_status_ack(matched)；terminal_sid 推送 ACK 为空。
+              send(peer, { type: "pair_status_ack", pair_status: "matched", terminal_sid: "" });
+            }
+            send(connection, {
+              type: "auth_ack",
+              device_sid: deviceSidToClaim,
+              terminal_sid: connection.terminalSid,
+              pair_status: pairStatus,
+            });
+          };
+          // 现任优先独占（spec 追记三 §3.1）：terminal 接入且现任 terminal 活跃时**排队等待**
+          // 而非立即拒绝——半开连接的合法重连（网络切换）在窗口内静默等待，现任沉默到期后
+          // 原子复核并接管，全程不产生 KICKED，不会被客户端冲突终态误杀（codex-review P1）。
+          // 等满窗口现任仍活跃（确为并存页面）才回 KICKED：客户端 60s 内第二次 KICKED 进
+          // 会话冲突终态页停止重试，互踢战争终止。被删除的 SID 不参与排队，保持 AUTH_FAILED
+          // 契约（codex-review P3）。device 角色不受影响：桌面重启必须无条件收回 device 位。
+          if (
+            connection.role === "terminal" &&
+            // 契约方法数受架构上限约束：设备存在性经 listDevices 组合判断（单用户表极小）。
+            store.listDevices(now()).some((d) => d.device_sid === message.device_sid)
+          ) {
+            const incumbentOwner = store.getOwner(message.device_sid, "terminal");
+            const incumbent = incumbentOwner ? connections.get(incumbentOwner.owner) : undefined;
+            const silentMs = incumbent ? now() - incumbent.lastSeenAt : Infinity;
+            if (silentMs < terminalOwnerStaleMs) {
+              const takeoverTimer = setTimeout(
+                () => {
+                  if (connection.deviceSid || ws.readyState !== WebSocket.OPEN) return;
+                  const ownerNow = store.getOwner(message.device_sid, "terminal");
+                  const incumbentNow = ownerNow ? connections.get(ownerNow.owner) : undefined;
+                  const silentNow = incumbentNow ? now() - incumbentNow.lastSeenAt : Infinity;
+                  if (silentNow < terminalOwnerStaleMs) {
+                    send(connection, { type: "error", code: "KICKED" });
+                    ws.close();
+                    return;
+                  }
+                  completeAuthInit();
+                },
+                terminalOwnerStaleMs - silentMs + 50,
+              );
+              // 排队定时器不得阻止进程优雅退出（SIGTERM 最长等待即窗口时长）。
+              takeoverTimer.unref?.();
+              return;
+            }
           }
-          const claimed = store.claimOwnership(
-            message.device_sid,
-            connection.role,
-            message.meta ?? {},
-            connection.ownerRef,
-          );
-          if (!claimed) {
-            send(connection, { type: "error", code: "AUTH_FAILED" });
-            ws.close();
-            return;
-          }
-          const kickedConnection = claimed.kicked ? connections.get(claimed.kicked) : undefined;
-          if (kickedConnection) {
-            send(kickedConnection, { type: "error", code: "KICKED" });
-            kickedConnection.socket.close();
-          }
-          connection.deviceSid = message.device_sid;
-          const peer = peerOf(connection);
-          const pairStatus = peer ? "matched" : "waiting";
-          if (peer) {
-            // 契约：认证即配对时，对端收 pair_status_ack(matched)；terminal_sid 推送 ACK 为空。
-            send(peer, { type: "pair_status_ack", pair_status: "matched", terminal_sid: "" });
-          }
-          send(connection, {
-            type: "auth_ack",
-            device_sid: message.device_sid,
-            terminal_sid: connection.terminalSid,
-            pair_status: pairStatus,
-          });
+          completeAuthInit();
           return;
         }
         if (!connection.deviceSid) {

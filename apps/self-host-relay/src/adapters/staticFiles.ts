@@ -199,9 +199,13 @@ export function createSelfHostStaticHandler(options: SelfHostStaticHandlerOption
       return response.writeHead(404).end(), true;
     }
     const contentType = MIME_TYPES[extname(target.path).toLowerCase()] ?? "application/octet-stream";
-    // Vite hash 资源形如 index-B_ib1VwN.js（连字符 + base62/下划线 hash）；
-    // 点分隔（xxx.abc12345.js）一并兼容。旧正则仅匹配 hex，漏掉真实 Vite 命名（Bugfix）。
-    const immutable = /[-.][0-9A-Za-z_-]{8,}\.(js|mjs|css|woff2|png|svg)$/i.test(target.path);
+    // Vite hash 资源形如 index-B_ib1VwN.js（连字符 + base62/下划线 hash）且全部位于构建
+    // assets 目录；限定目录 + 字符集双条件，避免 material-icons/folder-components.svg 这类
+    // 固定名根级文件被误判成 hash 资源缓存一年（codex-review P3）。点分隔一并兼容。
+    // 旧正则仅匹配 hex，曾漏掉真实 Vite 命名（Bugfix）。
+    const immutable =
+      target.path.startsWith(rootDir + sep + "assets" + sep) &&
+      /[-.][0-9A-Za-z_-]{8,}\.(js|mjs|css|woff2|png|svg)$/i.test(target.path);
     return negotiateAndServe(
       request,
       response,

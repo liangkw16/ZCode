@@ -270,15 +270,16 @@ QR / 复制链接成为主密钥载体——与原书签 URL **同一暴露面�
 
 背景：官方 relay 语义是"新 terminal 无条件替换旧 terminal"（relay-v2-pairing.md）。两个活的手机页（书签页 + 扫码页并存等）会无限互踢成战争，双方均不可用（2026-10-20 实测：模拟终端配对 2.6s 后被 KICKED，桌面日志 paired↔waiting 每 10-25s 抖动）。
 
-决策：
+决策（codex-review 修订：排队等接管，而非直接拒绝）：
 
-- terminal `auth_init` 时，若该 device 的**现任 terminal 连接活跃**（网关侧 `lastSeenAt` 距今 < 15s；正常心跳 4-6s 一次 pair_status_query 持续刷新）→ 向**新连接**回 `KICKED` 并关闭，**不改变所有权**；现任沉默 ≥15s（半开连接/锁屏/关页）→ 保持官方替换语义，新接管旧。
-- 客户端零改动依据：transport 收到 KICKED 后 60s 内第二次进入 session-conflict 终态页停止重试——入侵页重试一次后退出，战争终止。
-- 原子性：检查（`store.getOwner` + 网关连接表 lastSeen）与 `claimOwnership` 在同一同步消息回调内完成，Node 单线程事件循环内不可分割，两个并发 auth_init 不会都通过检查。
-- 边界：现任连接对象缺失（进程重启后的孤儿 owner 记录）视为沉默，允许接管；device 角色替换语义**完全不变**（桌面重启必须收回 device 位）；迟到 close 按 ownerRef 释放（既有机制）不影响新 owner。
+- terminal `auth_init` 时，若该 device 的**现任 terminal 连接活跃**（网关侧 `lastSeenAt` 距今 < 活跃窗口；正常心跳 4-6s 一次 pair_status_query 持续刷新）→ 新连接**排队等待**（`unref` 定时器，不产生任何错误消息）；到期原子复核：现任已沉默/消失 → 按官方替换语义接管并回 `auth_ack`；现任仍活跃（确为并存页面）→ 回 `KICKED` 并关闭。
+- **为什么排队而不是直接拒绝**：客户端收到两次 KICKED（60s 窗口内）会进入 session-conflict 终态页停止重试——若活跃现任直接拒绝，网络切换后的合法重连（旧连接半开、relay 未收到 close）会被永久锁死在冲突页，比互踢更糟。排队让合法恢复在窗口内静默等到接管，全程零 KICKED。
+- 活跃窗口 **12s**（须短于客户端 15s 握手超时，保证排队等待能在客户端放弃前完成）；心跳间隔 4-6s 保证 2 次心跳裕量。窗口可经 `terminalOwnerStaleMs` 注入（测试用）。
+- 客户端零改动依据：入侵页等满窗口收 KICKED → 重试一次再排队再 KICKED → session-conflict 终态页停止重试，互踢战争终止且现任全程不受影响。
+- 边界：**被删除的 SID 不参与排队**（`hasDevice` 前置校验，保持未知 SID → `AUTH_FAILED` 契约）；现任连接对象缺失（孤儿 owner 记录）视为沉默立即接管；排队期间新连接再收消息不影响（未认证连接只认 auth_init，重复发即 WRONG_PARAM）；device 角色替换语义**完全不变**（桌面重启必须收回 device 位）；迟到 close 按 ownerRef 释放（既有机制）。
 - 声明：这是与官方 V2 文档"新替旧"方向的行为分叉，仅自托管 relay 生效，不宣称完全保持官方语义。
 
-验收：活跃现任时新接入被拒（KICKED + 关闭）且现任数据转发不中断；沉默 14999ms 拒 / 15000ms 接管；现任主动关闭后新接入直接成功；现任心跳刷新后新接入仍被拒；device 行为回归不变。
+验收：活跃现任时新接入排队到期收 KICKED 且现任数据转发不中断；半开恢复场景（现任沉默 + 新连接排队）到期接管、全程无 KICKED 打给新连接；沉默超窗立即接管；现任主动关闭后新接入直接成功；已删除 SID 返回 AUTH_FAILED；device 行为回归不变。
 
 ### 3.2 静态预压缩与编码协商
 
@@ -290,7 +291,7 @@ QR / 复制链接成为主密钥载体——与原书签 URL **同一暴露面�
 - 协商：按 RFC 9110 解析 `Accept-Encoding`（token / q 权重 / 通配符 / identity / 大小写），可用表示按权重选择、同权重优先 br；identity 被禁（q=0）且无可用压缩表示 → 406；无头/空头保守回退原文。
 - 响应头：`Content-Type`/`Cache-Control` 按原资源路径计算；`Content-Encoding` 按所选表示（原文不设）；`Content-Length` 用压缩文件长度；所有**可协商**资源（含原文回退）带 `Vary: Accept-Encoding`；HEAD 同选择、无正文（既有行为）。
 - 安全：`.br`/`.gz` sidecar 直接请求一律 404（先校验原文件合法存在，再派生 sidecar 路径）；沿用既有 `%2e%2e` 穿越防护、流错误降级、下载中断销毁源流。
-- immutable 修复：hash 字符集改为 `[0-9A-Za-z_-]{8,}`，以真实构建文件名（`index-B_ib1VwN.js`）做回归测试。
+- immutable 修复：限定构建 `assets/` 目录 + hash 字符集 `[0-9A-Za-z_-]{8,}` 双条件（避免 `material-icons/folder-components.svg` 等固定名根级文件被误判缓存一年），以真实构建文件名（`index-B_ib1VwN.js`）做回归测试。
 - 部署一致性：原文件与 sidecar 同批生成上传；资产先就绪、index.html 最后替换。
 - 不引入 nginx（单进程自用，无必要）。
 

@@ -13,7 +13,10 @@ export interface SelfHostRelayHttpRouterOptions {
 }
 
 const REMOTE_PREFIX = "/api/v1/remote";
-const RATE_LIMIT_PER_MINUTE = 1200;
+// spec §1.1：每 IP 限流 20 req/s，超出返回 429。
+const RATE_LIMIT_PER_SECOND = 20;
+// 请求体上限：契约 body 都是几十字节的 JSON；超限说明不是合法客户端。
+const MAX_BODY_BYTES = 64 * 1024;
 
 function bearerOf(authorization: string | undefined): string | null {
   return authorization?.match(/^Bearer (.+)$/i)?.[1] ?? null;
@@ -39,19 +42,31 @@ function createRateLimiter(now: () => number) {
     }
     const bucket = buckets.get(ip);
     if (!bucket || bucket.resetAt <= nowMs) {
-      buckets.set(ip, { count: 1, resetAt: nowMs + 60_000 });
+      buckets.set(ip, { count: 1, resetAt: nowMs + 1_000 });
       return true;
     }
     bucket.count += 1;
-    return bucket.count <= RATE_LIMIT_PER_MINUTE;
+    return bucket.count <= RATE_LIMIT_PER_SECOND;
   };
 }
 
+/** 请求体超限标记：区别于客户端断开/非法 JSON（400/静默），需要 413 并终止读取。 */
+class BodyTooLarge extends Error {}
+
 async function readBody(request: IncomingMessage): Promise<unknown> {
+  // Bugfix：请求体无上限缓冲时，单个持续上传请求即可耗尽内存（按次数限流拦不住字节数）。
+  const declared = Number(request.headers["content-length"] ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new BodyTooLarge();
   const chunks: Buffer[] = [];
+  let received = 0;
   try {
-    for await (const chunk of request) chunks.push(Buffer.from(chunk));
-  } catch {
+    for await (const chunk of request) {
+      received += chunk.length;
+      if (received > MAX_BODY_BYTES) throw new BodyTooLarge();
+      chunks.push(Buffer.from(chunk));
+    }
+  } catch (error) {
+    if (error instanceof BodyTooLarge) throw error;
     // Bugfix：客户端中断请求体（ECONNRESET）会从流读取抛出；吞掉并按非法 body 处理，
     // 否则未处理 rejection 会让整个 relay 进程退出（攻击者可反复打断服务）。
     return null;
@@ -100,7 +115,17 @@ export function createSelfHostRelayHttpRouter(options: SelfHostRelayHttpRouterOp
     }
     const isSecret = bearer === options.secret;
     const method = request.method ?? "GET";
-    const body = await readBody(request);
+    let body: unknown;
+    try {
+      body = await readBody(request);
+    } catch (error) {
+      if (error instanceof BodyTooLarge) {
+        reply(response, 413);
+        request.destroy();
+        return true;
+      }
+      throw error;
+    }
 
     if (url.pathname === WEB_REMOTE_CONTROL_RELAY_V2_HTTP.token.path && method === "POST") {
       response.setHeader("Cache-Control", "no-store");

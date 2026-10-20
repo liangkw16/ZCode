@@ -1,3 +1,4 @@
+import { connect as tcpConnect, type Socket } from "node:net";
 import { createServer, type Server } from "node:http";
 import { get as httpGet, type IncomingMessage } from "node:http";
 import { once } from "node:events";
@@ -174,5 +175,42 @@ describe("ws2 网关", () => {
     const wrong = await invalid.messages.next();
     expect(wrong).toMatchObject({ type: "error", code: "WRONG_PARAM" });
     await once(invalid.socket, "close");
+  });
+});
+
+describe("畸形输入硬化", () => {
+  it("畸形升级 URL 不崩进程：连接被关闭且后续可用", async () => {
+    const closed = new Promise<void>((resolve) => {
+      const socket: Socket = tcpConnect((server.address() as { port: number }).port, "127.0.0.1");
+      socket.on("connect", () => {
+        socket.write("GET //[ HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+      });
+      socket.on("close", () => resolve());
+      socket.on("error", () => resolve());
+    });
+    await closed;
+    // 进程仍存活：正常 HTTP 仍可用。
+    const probe = await fetch(`${baseUrl}/api/v1/remote/token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "device" }),
+    });
+    expect(probe.status).toBe(200);
+  });
+
+  it("深层嵌套 JSON 只断当前连接，不崩进程", async () => {
+    const evil = await openSocket(await mintToken("device"));
+    const deep = "[".repeat(5000) + "]".repeat(5000);
+    evil.socket.send(JSON.stringify({ type: "data", payload: JSON.parse(deep) }));
+    // 序列化后的深嵌套 payload：服务端 zod 校验递归爆栈应被捕获为 WRONG_PARAM 关闭。
+    const error = await evil.messages.next();
+    expect(error).toMatchObject({ type: "error", code: "WRONG_PARAM" });
+    await once(evil.socket, "close");
+    const probe = await fetch(`${baseUrl}/api/v1/remote/token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "device" }),
+    });
+    expect(probe.status).toBe(200);
   });
 });

@@ -39,6 +39,11 @@ export function createSelfHostStaticHandler(options: SelfHostStaticHandlerOption
   // 未处理异常直接打死进程；统一先校验存在、再监听流错误降级 404。
   const streamFile = (target: string, response: ServerResponse): boolean => {
     const stream = createReadStream(target);
+    // Bugfix：客户端中断下载时 pipe 不会关源流（fd 泄漏，反复中断可耗尽句柄）；
+    // 响应关闭即销毁源流，流自身错误也降级销毁。
+    response.on("close", () => stream.destroy());
+    // 立即刷出响应头：文件流在首块前不发送任何字节，否则客户端要等到首个 chunk 才见到 200。
+    response.flushHeaders();
     stream.on("error", () => {
       if (!response.headersSent) response.writeHead(404);
       response.destroy();

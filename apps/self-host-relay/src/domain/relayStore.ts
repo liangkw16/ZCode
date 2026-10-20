@@ -68,6 +68,11 @@ export class RelayStore implements SelfHostRelayStore {
   }
 
   issueToken(role: "device" | "terminal", token: string, nowMs: number): void {
+    // Bugfix：未消费的过期 token 只有 consumeToken 会删；公开 device token 端点可被
+    // 任意 bearer 持续签发，导致表永久增长。每次签发顺带回收过期项（项数受限流约束）。
+    for (const [key, entry] of this.tokens) {
+      if (entry.expiresAt <= nowMs) this.tokens.delete(key);
+    }
     this.tokens.set(token, { role, expiresAt: nowMs + TOKEN_TTL_MS });
   }
 

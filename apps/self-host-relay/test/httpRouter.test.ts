@@ -111,16 +111,58 @@ describe("self-host relay HTTP 契约", () => {
     expect(missing.status).toBe(200);
   });
 
-  it("每 IP 限流：超过 1200 次/分钟返回 429", async () => {
-    let limited = false;
-    for (let i = 0; i < 1210 && !limited; i += 1) {
-      const response = await call("/api/v1/remote/token", {
+});
+
+describe("请求体与限流硬化", () => {
+  it("超过 64KiB 的请求体返回 413，且服务存活", async () => {
+    const big = JSON.stringify({ role: "device" }) + " ".repeat(65 * 1024);
+    const response = await call("/api/v1/remote/token", {
+      method: "POST",
+      headers: { Authorization: "Bearer x", "Content-Type": "application/json" },
+      body: big,
+    });
+    expect(response.status).toBe(413);
+    const after = await call("/api/v1/remote/device", {
+      headers: { Authorization: `Bearer ${SECRET}` },
+    });
+    expect(after.status).toBe(200);
+  });
+
+  it("限流为 20 req/s：同秒第 21 次 429，跨窗口恢复", async () => {
+    let clock = 1_000_000;
+    const store2 = new RelayStore({ newSid: () => "d_rl" });
+    const router2 = createSelfHostRelayHttpRouter({
+      store: store2,
+      secret: SECRET,
+      now: () => clock,
+    });
+    const server2 = createServer((request, response) => {
+      void router2(request, response).then((handled) => {
+        if (!handled) {
+          response.writeHead(404);
+          response.end();
+        }
+      });
+    });
+    server2.listen(0, "127.0.0.1");
+    await once(server2, "listening");
+    const base2 = `http://127.0.0.1:${(server2.address() as { port: number }).port}`;
+    const hit = () =>
+      fetch(`${base2}/api/v1/remote/token`, {
         method: "POST",
         headers: { Authorization: "Bearer x", "Content-Type": "application/json" },
         body: JSON.stringify({ role: "device" }),
-      });
-      if (response.status === 429) limited = true;
+      }).then((r) => r.status);
+    try {
+      const statuses: number[] = [];
+      for (let i = 0; i < 21; i += 1) statuses.push(await hit());
+      expect(statuses.filter((s) => s === 200)).toHaveLength(20);
+      expect(statuses[20]).toBe(429);
+      clock += 1_001;
+      expect(await hit()).toBe(200);
+    } finally {
+      server2.closeAllConnections();
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
     }
-    expect(limited).toBe(true);
-  }, 30_000);
+  });
 });

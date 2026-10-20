@@ -95,3 +95,14 @@ describe("RelayStore", () => {
     expect(changes).toBe(2);
   });
 });
+
+describe("token 回收", () => {
+  it("后续签发时清理过期 token（未消费项不永久驻留）", () => {
+    const store = createStore();
+    store.issueToken("terminal", "tok-old", 0);
+    store.issueToken("device", "tok-new", 61_000); // 触发过期清理
+    // 若旧项仍在，以其原过期窗口内的时间消费会成功；被清理后必须为 null。
+    expect(store.consumeToken("tok-old", 59_000)).toBeNull();
+    expect(store.consumeToken("tok-new", 62_000)).toBe("device");
+  });
+});

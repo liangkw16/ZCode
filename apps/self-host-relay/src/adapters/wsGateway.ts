@@ -45,7 +45,15 @@ export function attachSelfHostRelayWsGateway(
   };
 
   server.on("upgrade", (request, socket, head) => {
-    const url = new URL(request.url ?? "/", "http://localhost");
+    // Bugfix：畸形升级 URL（如 GET //[）会让 new URL 抛 ERR_INVALID_URL 并打死进程；
+    // 鉴权前任何解析失败都只关闭当前 socket。
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      socket.destroy();
+      return;
+    }
     const token = url.searchParams.get("token") ?? "";
     const role = store.consumeToken(token, now());
     if (url.pathname !== WEB_REMOTE_CONTROL_RELAY_V2_WS_PATH || !role) {
@@ -64,13 +72,15 @@ export function attachSelfHostRelayWsGateway(
       ws.on("error", () => ws.terminate());
       ws.on("message", (data, isBinary) => {
         if (ws.readyState !== WebSocket.OPEN) return;
-        let parsedValue: unknown;
+        let message: ReturnType<typeof parseWebRemoteControlRelayV2OutgoingMessage> = null;
+        // Bugfix：深嵌套 JSON（约 5000 层）会让 zod 递归校验爆栈抛 RangeError；
+        // 校验异常一律按非法消息处理，只关当前连接，不能打死进程。
         try {
-          parsedValue = JSON.parse(data.toString());
+          const parsedValue = JSON.parse(data.toString());
+          message = isBinary ? null : parseWebRemoteControlRelayV2OutgoingMessage(parsedValue);
         } catch {
-          parsedValue = null;
+          message = null;
         }
-        const message = isBinary ? null : parseWebRemoteControlRelayV2OutgoingMessage(parsedValue);
         if (!message) {
           send(connection, { type: "error", code: "WRONG_PARAM" });
           ws.close();

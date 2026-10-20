@@ -309,3 +309,13 @@ QR / 复制链接成为主密钥载体——与原书签 URL **同一暴露面�
 决策（对齐官方行为）：删除远控页两处 `!isWebRemoteControlShell` 门槛（mobile shell `chatContent` 与 `wideContent` 各两处）及回落 effect；视图经既有 bridge RPC（projectService/settingService/pluginManagement）渲染，`onCreateTask` 复用 `handleCreateTaskInChat`（新建任务修复后即可用）。桌面端行为不变（门槛本就只在远控 shell 生效）。
 
 验收：IAB 明文 HTTP 打开远控页——「新建任务」创建 draft workspace 并进入新会话；「自动化」/「插件市场」渲染主视图且可在视图内创建任务；手机复测同链路。
+
+## 追记 2026-10-21（五）：公网备链路定型——Cloudflare Tunnel（备案墙实测结论）
+
+**阿里云未备案拦截实测**：无备案域名经灰云直连或 CF 橙云回源均不可用——拦截按 **SNI、全端口**生效（80 返回 beian-block 403，443/8443 TLS 握手 RST；同端口 IP 无 SNI 访问不受影响，机器既有 IP 证书服务正常）。新域名入拦截名单有数十分钟延迟，首次测试恰好穿过窗口签出 LE 证书，属侥幸；LE 域名证书的 HTTP-01 续期因 80 被拦不可用。结论：大陆 ECS + 无备案域名，任何"客户端/CF 直连源站带域名 SNI"的方案都不可行。
+
+**定型方案**：Cloudflare Tunnel——ECS 侧 `cloudflared service install <token>`（systemd 常驻，出站 QUIC/H2 连 CF，已验证连通），公共主机名 `kcode.lkw16vip.win → http://localhost:8787`。链路：手机 → CF 边缘（真证书，浏览器直接信任）→ tunnel → 中继。特性：无需源站证书与续期、无需任何入站端口（安全组可保持仅 8787 或收紧）、桌面端 `wss` 连 CF 边缘走 Node 内置信任证书，自签证书导致的桌面端不可用问题不复存在。代价：免费版流量绕 CF 海外边缘，作为备链路可接受；主链路仍为 EasyTier 直连（20MB/s）。
+
+**换链路操作**（主↔备）：改 `~/.kcode/v2/setting.json` 的 `zcodeEndpointOrigin`（`http://10.126.126.7:8787` ↔ `https://kcode.lkw16vip.win`）→ 重启 KCode →（自动恢复未触发时点一次"移动端远程控制"面板）→ 手机重新扫码。注意每个中继各持一个设备 sid（Mac: 换链路后以桌面实际注册为准；ECS: d_3c845e55…），扫码以当前 QR 为准。已知问题：重启后远控自动恢复依赖 renderer 登录态通知时序，偶发不触发（三次重启一次未恢复，手动点面板即可恢复），待后续定位。
+
+**验收（2026-10-21）**：公网 HTTPS 页面 200、资产 gzip（cf-ray 生效）、`isSecureContext=true`（`crypto.randomUUID`/`navigator.clipboard` 原生可用）、桌面经 tunnel 附加成功、IAB 配对后"新建任务/自动化/插件市场"三入口全部可用；默认链路已切回 EasyTier 并复验配对。ECS 上 nginx 的 kcode 80/443/8443 块与 LE 域名证书暂留未用（tunnel 不经 nginx），后续可清理；安全组 8787 是否关闭由用户决定（公网入口已全部走 tunnel）。

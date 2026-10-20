@@ -1,7 +1,11 @@
 import { expect, it } from "vitest";
 import { type Model, type ModelToolContract } from "@zcode/contracts";
 import { createTestRuntimeModel } from "./test-runtime-model.js";
-import { buildToolExposure, buildToolSearchAnnouncement } from "../src/tool/search/exposure.js";
+import {
+  buildToolExposure,
+  buildToolSearchAnnouncement,
+} from "../src/tool/search/exposure.js";
+import { coerceToolSearchModeForModel } from "../src/runtime/methods/compact-active-helpers.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import { toolSearchToolEntry } from "../src/tool/handlers/tool-search.js";
 import { webFetchToolEntry } from "../src/tool/handlers/webfetch.js";
@@ -370,4 +374,26 @@ it("disables deferral when ToolSearch is outside the allowed scope and honors al
     entries: [],
   });
   expect(scoped.enabled).toBe(false);
+});
+
+it("coerces session toolSearch modes to the target model capability for auxiliary requests", () => {
+  const nativeCapable = model(true);
+  const nonAnthropic = {
+    ...createTestRuntimeModel({
+      generateText: async () => ({ text: "", finishReason: "stop", usage: {} }),
+    }),
+  } as Model;
+
+  // 摘要模型不支持 native 协议时降级为 auto（按能力解析，不抛错），支持时保持原样。
+  expect(coerceToolSearchModeForModel("native", nonAnthropic)).toBe("auto");
+  expect(coerceToolSearchModeForModel("native", nativeCapable)).toBe("native");
+  // 不支持工具调用的模型上 local 同样降级；off/未设置保持不变。
+  const noToolCall = {
+    ...nonAnthropic,
+    properties: { ...nonAnthropic.properties, supportsToolCall: false },
+  } as Model;
+  expect(coerceToolSearchModeForModel("local", noToolCall)).toBe("auto");
+  expect(coerceToolSearchModeForModel("local", nonAnthropic)).toBe("local");
+  expect(coerceToolSearchModeForModel("off", nonAnthropic)).toBe("off");
+  expect(coerceToolSearchModeForModel(undefined, nonAnthropic)).toBe("off");
 });

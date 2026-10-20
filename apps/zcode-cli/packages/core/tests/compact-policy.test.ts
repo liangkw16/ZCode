@@ -233,6 +233,56 @@ describe("auto compact policy", () => {
   });
 });
 
+describe("auto compact threshold ratio cap", () => {
+  it("compacts earlier when thresholdRatio tightens below the absolute formula", () => {
+    // 200K 窗口：绝对阈值 166K，0.8 比例帽 160K → 取小者 160K。
+    expect(getAutoCompactThreshold({ contextWindow: 200_000, thresholdRatio: 0.8 })).toBe(160_000);
+    // 1M 大窗口：绝对阈值 966K，0.5 比例帽 500K → 提前触发。
+    expect(
+      getAutoCompactThreshold({ contextWindow: 1_000_000, thresholdRatio: 0.5 }),
+    ).toBe(500_000);
+  });
+
+  it("falls back to the absolute threshold when the ratio does not tighten", () => {
+    // 0.99 × 200K = 198K > 166K，比例帽不收紧时保持现状阈值。
+    expect(getAutoCompactThreshold({ contextWindow: 200_000, thresholdRatio: 0.99 })).toBe(166_000);
+  });
+
+  it("ignores out-of-range ratios and keeps the unified absolute threshold", () => {
+    for (const thresholdRatio of [0, -0.1, 1, 1.5, Number.NaN]) {
+      expect(getAutoCompactThreshold({ contextWindow: 200_000, thresholdRatio })).toBe(166_000);
+    }
+  });
+
+  it("applies an explicit output reserve only as a downward cap", () => {
+    // 用户输出预留只在 21K 硬上限内下调：阈值 = 200K − 16K − 13K。
+    expect(
+      getAutoCompactThreshold({ contextWindow: 200_000, outputReserveTokens: 16_000 }),
+    ).toBe(171_000);
+    // 超过 21K 的预留请求被硬上限截住，保持统一阈值。
+    expect(
+      getAutoCompactThreshold({ contextWindow: 200_000, outputReserveTokens: 64_000 }),
+    ).toBe(166_000);
+  });
+
+  it("applies the ratio cap to the compaction decision", () => {
+    const config = { contextWindow: 200_000, thresholdRatio: 0.8 };
+    const below = shouldAutoCompact({
+      config,
+      messages: ENOUGH_MESSAGES,
+      tokenOverride: { source: "provider_usage", tokenCount: 160_000 },
+    });
+    expect(below).toMatchObject({ reason: "above_threshold", shouldCompact: true, threshold: 160_000 });
+
+    const above = shouldAutoCompact({
+      config,
+      messages: ENOUGH_MESSAGES,
+      tokenOverride: { source: "provider_usage", tokenCount: 159_999 },
+    });
+    expect(above).toMatchObject({ reason: "below_threshold", shouldCompact: false });
+  });
+});
+
 describe("normal request output target", () => {
   it.each([
     { caseId: "OTB01", expected: 32_000, modelLimit: undefined },

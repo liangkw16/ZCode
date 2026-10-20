@@ -57,6 +57,47 @@ export function parseEnvConfig(
       if (!config.toolConcurrency) config.toolConcurrency = {};
       config.toolConcurrency.maxConcurrency = normalizeNumber(value);
     }
+
+    // Compact config（上下文压缩策略）。数值解析失败时跳过而不是落 0：
+    // 0 对 thresholdRatio 是非法值、对 token 字段会改变压缩行为。
+    else if (configKey === "COMPACT_ENABLED") {
+      const enabled = normalizeBoolean(value);
+      if (enabled !== undefined) {
+        if (!config.compact) config.compact = {};
+        config.compact.enabled = enabled;
+      }
+    } else if (configKey === "COMPACT_CONTEXT_WINDOW_TOKENS") {
+      const tokens = normalizePositiveInteger(value);
+      if (tokens !== undefined) {
+        if (!config.compact) config.compact = {};
+        config.compact.contextWindowTokens = tokens;
+      }
+    } else if (configKey === "COMPACT_BUFFER_TOKENS") {
+      const tokens = normalizePositiveInteger(value);
+      if (tokens !== undefined) {
+        if (!config.compact) config.compact = {};
+        config.compact.bufferTokens = tokens;
+      }
+    } else if (configKey === "COMPACT_THRESHOLD_RATIO") {
+      const ratio = Number(value);
+      if (Number.isFinite(ratio) && ratio > 0 && ratio < 1) {
+        if (!config.compact) config.compact = {};
+        config.compact.thresholdRatio = ratio;
+      }
+    } else if (configKey === "COMPACT_KEEP_RECENT_TOKENS") {
+      const tokens = normalizePositiveInteger(value);
+      if (tokens !== undefined) {
+        if (!config.compact) config.compact = {};
+        config.compact.keepRecentTokens = tokens;
+      }
+    } else if (configKey === "MICROCOMPACT_ENABLED") {
+      const enabled = normalizeBoolean(value);
+      if (enabled !== undefined) {
+        if (!config.compact) config.compact = {};
+        if (!config.compact.microcompact) config.compact.microcompact = {};
+        config.compact.microcompact.enabled = enabled;
+      }
+    }
   }
 
   return config;
@@ -78,6 +119,19 @@ export function getToolConcurrencyConfig(): { maxConcurrency: number } {
 function normalizeNumber(value: string): number {
   const num = Number(value);
   return isNaN(num) ? 0 : num;
+}
+
+function normalizeBoolean(value: string): boolean | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  return undefined;
+}
+
+function normalizePositiveInteger(value: string): number | undefined {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return undefined;
+  return Math.floor(num);
 }
 
 function normalizeLogFormat(value: string): "text" | "json" {

@@ -21,6 +21,19 @@ export interface AutoCompactPolicyConfig {
   summaryReserveTokens?: number;
   bufferTokens?: number;
   thresholdPercentOverride?: number;
+  /** 比例帽 (0,1)：阈值额外受 min(原始窗口 × ratio) 约束，用于大窗口模型提前压缩。 */
+  thresholdRatio?: number;
+  /** 保留近期消息的 token 预算（Auto/Reactive），由 compact-selection 消费。 */
+  keepRecentTokens?: number;
+  /** 保留近期消息的最少轮组数（Auto/Reactive），默认 1。 */
+  keepRecentRounds?: number;
+  /** 摘要请求输出上限 token，默认 MAX_OUTPUT_TOKENS_FOR_SUMMARY。 */
+  summaryMaxOutputTokens?: number;
+  /** 用户显式输出预留：只在 21K 硬上限内下调阈值扣除量；maxOutputTokens 仍由模型预算推导。 */
+  outputReserveTokens?: number;
+  /** 独立摘要模型（与 summaryModel 成对）；未设置时用会话当前模型。 */
+  summaryProvider?: string;
+  summaryModel?: string;
   maxConsecutiveFailures?: number;
   microcompact?: LocalMicrocompactPolicyConfig;
 }
@@ -73,6 +86,12 @@ export function getEffectiveContextWindowSize(config: AutoCompactPolicyConfig = 
 }
 
 export function getAutoCompactOutputReserveTokens(config: AutoCompactPolicyConfig = {}): number {
+  const configuredReserve = positiveInt(config.outputReserveTokens);
+  if (configuredReserve !== undefined) {
+    // 用户显式输出预留只允许在 21K 硬上限内下调：放大预留会挤压输入阈值并绕过
+    // preflight 统一预算（legacy 值曾因此过早压缩，见 OTB 回归）。
+    return Math.min(configuredReserve, PREFLIGHT_AUTOCOMPACT_OUTPUT_RESERVE_TOKENS);
+  }
   const maxOutputTokens = positiveInt(config.maxOutputTokens);
   // 旧 legacy 分支为完整模型输出预留窗口，既过早压缩又要求远端选择；现在统一保留至多 21K。
   return Math.min(
@@ -84,7 +103,16 @@ export function getAutoCompactOutputReserveTokens(config: AutoCompactPolicyConfi
 export function getAutoCompactThreshold(config: AutoCompactPolicyConfig = {}): number {
   const effectiveContextWindow = getEffectiveContextWindowSize(config);
   const buffer = positiveInt(config.bufferTokens) ?? AUTOCOMPACT_BUFFER_TOKENS;
-  return Math.max(0, effectiveContextWindow - buffer);
+  const absoluteThreshold = Math.max(0, effectiveContextWindow - buffer);
+  const thresholdRatio = unitRatio(config.thresholdRatio);
+  if (thresholdRatio === undefined) {
+    return absoluteThreshold;
+  }
+  // 比例帽按原始窗口计算（对齐 DeepSeek Harness 的 min(W×ratio, W−O−B) 双帽公式）：
+  // 大窗口模型下不会等到接近满窗才压缩；比例帽不收紧时 min() 自动退回绝对阈值。
+  const contextWindow = positiveInt(config.contextWindow) ?? DEFAULT_COMPACT_CONTEXT_WINDOW;
+  const ratioThreshold = Math.max(0, Math.floor(contextWindow * thresholdRatio));
+  return Math.min(absoluteThreshold, ratioThreshold);
 }
 
 export function shouldAutoCompact(input: {
@@ -157,4 +185,9 @@ export function shouldAutoCompact(input: {
 function positiveInt(value: number | undefined): number | undefined {
   if (value === undefined || !Number.isFinite(value) || value < 0) return undefined;
   return Math.floor(value);
+}
+
+function unitRatio(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0 || value >= 1) return undefined;
+  return value;
 }

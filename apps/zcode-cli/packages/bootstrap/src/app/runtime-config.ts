@@ -2,9 +2,11 @@ import type { ConfigResult } from "@zcode/adapters/config";
 import { GEN_UI_OUTPUT_ROOT_ENV } from "@zcode/shared/node";
 import { resolveInitialModelSelection, type ModelSelectionOptions } from "@zcode/provider";
 import { resolveBashTimeoutPolicy, type AgentProfile, type AgentRuntimeConfig } from "@zcode/core";
+import type { AutoCompactPolicyConfig } from "@zcode/core";
 import { type BuiltInSubagentModelSelectionOverrides } from "@zcode/shared";
 import {
   type CollaborationMode,
+  type CompactRuntimeConfig,
   type HookConfigSource,
   type HookEventName,
   type HookMatcherConfig,
@@ -155,6 +157,11 @@ export function resolveAppRuntimeConfig(input: {
       ...configResult.config.modelAnomalyGuard,
       ...options.runtimeConfig?.modelAnomalyGuard,
     },
+    compact: resolveCompactPolicyConfig(
+      configResult.config.compact,
+      configResult.config.features.compact,
+      options.runtimeConfig?.compact,
+    ),
     mcp: {
       enabled: options.runtimeConfig?.mcp?.enabled ?? configResult.config.features.mcp,
       servers: autoConnectMcpServers,
@@ -210,6 +217,57 @@ function withHookConfigSource(
       ]),
     ) as HooksRuntimeConfig["events"],
   };
+}
+
+/**
+ * 把配置文件的 compact 段映射成 core 的 AutoCompactPolicyConfig。
+ *
+ * 两点关键约束：
+ * 1. 未设置的键必须从结果中剔除（而不是保留 undefined 键）：autoCompactIfNeeded 以
+ *    `{ contextWindow: 模型窗口, ...compact }` 构造策略，显式 undefined 键会覆盖模型
+ *    窗口并让阈值回退到 200K 兜底，改变既有压缩时机。
+ * 2. enabled 语义：显式 compact.enabled > features.compact 总开关（默认 true）；
+ *    嵌入方程序化传入的 compact 策略整体优先于配置文件。
+ */
+function resolveCompactPolicyConfig(
+  fileConfig: CompactRuntimeConfig | undefined,
+  featuresCompact: boolean,
+  runtimeOverride: AutoCompactPolicyConfig | undefined,
+): AutoCompactPolicyConfig {
+  const microcompact = fileConfig?.microcompact;
+  return omitUndefinedKeys({
+    ...(microcompact
+      ? {
+          microcompact: omitUndefinedKeys({
+            enabled: microcompact.enabled,
+            thresholdTokens: microcompact.thresholdTokens,
+            idleThresholdMinutes: microcompact.idleThresholdMinutes,
+            keepRecentToolResults: microcompact.keepRecentToolResults,
+            compactableToolNames: microcompact.compactableToolNames,
+            clearErrorResults: microcompact.clearErrorResults,
+            minTokenSavings: microcompact.minTokenSavings,
+          }),
+        }
+      : {}),
+    bufferTokens: fileConfig?.bufferTokens,
+    contextWindow: fileConfig?.contextWindowTokens,
+    keepRecentRounds: fileConfig?.keepRecentRounds,
+    keepRecentTokens: fileConfig?.keepRecentTokens,
+    maxConsecutiveFailures: fileConfig?.maxConsecutiveFailures,
+    outputReserveTokens: fileConfig?.outputReserveTokens,
+    summaryMaxOutputTokens: fileConfig?.summaryMaxOutputTokens,
+    summaryModel: fileConfig?.summaryModel,
+    summaryProvider: fileConfig?.summaryProvider,
+    thresholdRatio: fileConfig?.thresholdRatio,
+    enabled: fileConfig?.enabled ?? featuresCompact,
+    ...(runtimeOverride ?? {}),
+  });
+}
+
+function omitUndefinedKeys<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
+  ) as T;
 }
 
 function resolveInitialRegistrySelection(

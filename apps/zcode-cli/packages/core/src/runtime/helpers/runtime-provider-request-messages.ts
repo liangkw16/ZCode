@@ -1,5 +1,5 @@
 import { buildToolExposure } from "../../tool/search/exposure.js";
-import type { ModelToolContract } from "@zcode/contracts";
+import type { ModelToolContract, ToolSearchMode } from "@zcode/contracts";
 import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 import type { ToolRegistry } from "../../tool/registry.js";
 import type { Model } from "../deps.js";
@@ -29,11 +29,13 @@ export function prepareRuntimeProviderRequest(
     tools: readonly ModelToolContract[];
     registry?: Pick<ToolRegistry, "get">;
     prompt?: string;
+    /** 覆盖会话级 toolSearch mode；辅助请求路由到其他 provider 模型时必须按目标模型能力降级。 */
+    toolSearchMode?: ToolSearchMode;
   },
 ) {
   const exposure = buildToolExposure({
     model: input.model,
-    mode: runtime.config.toolSearch?.mode,
+    mode: input.toolSearchMode ?? runtime.config.toolSearch?.mode,
     tools: input.tools,
     registry: input.registry,
     entries: input.entries,

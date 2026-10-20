@@ -42,6 +42,7 @@ export function mergeConfigs(...configs: PrioritizedConfig[]): RuntimeConfigPatc
         : inputConfig;
     const previousHooks = result.hooks;
     const previousPlugins = result.plugins;
+    const previousCompact = result.compact;
     Object.assign(result, config);
 
     // Deep merge nested objects
@@ -144,6 +145,23 @@ export function mergeConfigs(...configs: PrioritizedConfig[]): RuntimeConfigPatc
     }
     if (config.hooks) {
       result.hooks = mergeHooksConfig(previousHooks, config.hooks);
+    }
+    if (config.compact) {
+      result.compact = {
+        // Object.assign 已把 result.compact 指向当前高优先级层；必须从 previousCompact
+        // 开始构造，否则低优先层只写 compact 顶层字段时会被整段覆盖丢失。
+        ...previousCompact,
+        ...config.compact,
+        // microcompact 是独立子对象，浅覆盖会让 User 层只写 enabled 时丢掉 Project 层的阈值调优。
+        ...((previousCompact?.microcompact || config.compact.microcompact)
+          ? {
+              microcompact: {
+                ...previousCompact?.microcompact,
+                ...config.compact.microcompact,
+              },
+            }
+          : {}),
+      };
     }
     if (config.ui) {
       result.ui = { ...result.ui, ...config.ui };

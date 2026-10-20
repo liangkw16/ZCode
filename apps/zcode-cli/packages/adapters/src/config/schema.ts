@@ -225,6 +225,47 @@ const modelAnomalyGuardSchema = z.object({
   maxBudgetWarningsPerTurn: z.number().int().nonnegative().optional(),
 });
 
+// Compact 配置采用 strict + superRefine 的 fail-fast 语义（对齐 DeepSeek Harness
+// 的加载即报错原则）：未知字段与非法组合在配置装载阶段直接拒绝，而不是静默忽略。
+const compactRatioSchema = z.number().finite().gt(0).lt(1);
+const compactMicrocompactSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    thresholdTokens: positiveIntegerSchema.optional(),
+    idleThresholdMinutes: positiveNumberSchema.optional(),
+    keepRecentToolResults: positiveIntegerSchema.optional(),
+    compactableToolNames: z.array(z.string().min(1)).optional(),
+    clearErrorResults: z.boolean().optional(),
+    minTokenSavings: positiveIntegerSchema.optional(),
+  })
+  .strict();
+const compactSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    contextWindowTokens: positiveIntegerSchema.optional(),
+    bufferTokens: positiveIntegerSchema.optional(),
+    outputReserveTokens: positiveIntegerSchema.optional(),
+    thresholdRatio: compactRatioSchema.optional(),
+    keepRecentTokens: positiveIntegerSchema.optional(),
+    keepRecentRounds: positiveIntegerSchema.optional(),
+    summaryMaxOutputTokens: positiveIntegerSchema.optional(),
+    summaryProvider: z.string().min(1).optional(),
+    summaryModel: z.string().min(1).optional(),
+    maxConsecutiveFailures: positiveIntegerSchema.optional(),
+    microcompact: compactMicrocompactSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    // 摘要模型 provider/model 必须成对出现：只写一半无法构造有效的 ModelSelection。
+    if ((value.summaryProvider === undefined) !== (value.summaryModel === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "compact.summaryProvider and compact.summaryModel must be set together",
+        path: value.summaryProvider === undefined ? ["summaryProvider"] : ["summaryModel"],
+      });
+    }
+  });
+
 // Hooks schema：
 // 理想态是 re-export shared/workspace-hook-config，但两个 pnpm workspace 解析出物理
 // 不同的 zod 实例（adapters 4.4.3 / shared 4.3.6）：shared schema 嵌入本包组合 schema
@@ -303,6 +344,7 @@ export const ZCodeConfigFileSchema = z
     toolConcurrency: toolConcurrencySchema.optional(),
     modelAnomalyGuard: modelAnomalyGuardSchema.optional(),
     hooks: hooksSchema.optional(),
+    compact: compactSchema.optional(),
   })
   .passthrough();
 
@@ -420,6 +462,7 @@ function parsedConfigFileToRuntimePatch(parsed: ZCodeConfigFile): RuntimeConfigP
   if (parsed.toolConcurrency) config.toolConcurrency = parsed.toolConcurrency;
   if (parsed.modelAnomalyGuard) config.modelAnomalyGuard = parsed.modelAnomalyGuard;
   if (parsed.hooks) config.hooks = parsed.hooks;
+  if (parsed.compact) config.compact = parsed.compact;
 
   return config;
 }

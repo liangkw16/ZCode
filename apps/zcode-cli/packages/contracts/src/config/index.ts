@@ -37,6 +37,9 @@ export const ConfigKey = {
   FeatureSkill: "features.skill",
   FeatureMcp: "features.mcp",
 
+  // Compact（上下文压缩策略；enabled 未设置时回落 features.compact）
+  Compact: "compact",
+
   // Memory
   MemoryUse: "memory.use",
 
@@ -140,11 +143,13 @@ export type ConfigValue<K extends ConfigKey> = K extends "modelStream.idleTimeou
                                         ? "text" | "json"
                                         : K extends "toolConcurrency.maxConcurrency"
                                           ? number
-                                          : K extends "modelAnomalyGuard"
-                                            ? ModelAnomalyGuardConfig
-                                            : K extends "hooks"
-                                              ? HooksRuntimeConfig
-                                              : K extends "ui.locale"
+                                            : K extends "modelAnomalyGuard"
+                                              ? ModelAnomalyGuardConfig
+                                              : K extends "hooks"
+                                                ? HooksRuntimeConfig
+                                                : K extends "compact"
+                                                  ? CompactRuntimeConfig
+                                                  : K extends "ui.locale"
                                                 ? UiLocale
                                                 : K extends "ui.theme"
                                                   ? UiThemePreference
@@ -251,6 +256,7 @@ export interface RuntimeConfig {
   toolConcurrency: ToolConcurrencyConfig;
   modelAnomalyGuard: ModelAnomalyGuardConfig;
   hooks: HooksRuntimeConfig;
+  compact: CompactRuntimeConfig;
   ui: {
     locale: UiLocale;
     theme: UiThemePreference;
@@ -273,6 +279,7 @@ export interface RuntimeConfigPatch {
   toolConcurrency?: Partial<RuntimeConfig["toolConcurrency"]>;
   modelAnomalyGuard?: Partial<RuntimeConfig["modelAnomalyGuard"]>;
   hooks?: HooksRuntimeConfigPatch;
+  compact?: CompactRuntimeConfig;
   ui?: Partial<RuntimeConfig["ui"]>;
 }
 
@@ -352,6 +359,8 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     maxOutputBytes: 32768,
     timeoutMs: 60000,
   },
+  // 全部字段留空 = 维持代码内默认策略（阈值跟随模型窗口、轮次制保留、microcompact 关闭）。
+  compact: {},
   ui: {
     locale: "en-US",
     theme: "auto",
@@ -364,6 +373,45 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
 
 export interface ToolConcurrencyConfig {
   maxConcurrency: number;
+}
+
+// ============================================================
+// Compact（上下文压缩策略）
+// ============================================================
+
+export interface CompactMicrocompactRuntimeConfig {
+  enabled?: boolean;
+  thresholdTokens?: number;
+  idleThresholdMinutes?: number;
+  keepRecentToolResults?: number;
+  compactableToolNames?: string[];
+  clearErrorResults?: boolean;
+  minTokenSavings?: number;
+}
+
+export interface CompactRuntimeConfig {
+  /** 自动（Auto/Reactive/Micro）压缩总开关；手动 /compact 不受影响。未设置时回落 features.compact。 */
+  enabled?: boolean;
+  /** 覆盖模型上下文窗口（token）。未设置时沿用模型解析结果，仅在模型缺失窗口信息时回退 200K 兜底常量。 */
+  contextWindowTokens?: number;
+  /** 触发缓冲 token；阈值 = min(contextWindowTokens × thresholdRatio, 窗口 − 输出预留 − bufferTokens)。 */
+  bufferTokens?: number;
+  /** 输出预留上限 token；阈值计算前先从窗口扣除，硬上限 21K。 */
+  outputReserveTokens?: number;
+  /** 比例帽，取值 (0,1)；设为如 0.8 可在大窗口模型上提前触发压缩。 */
+  thresholdRatio?: number;
+  /** 保留近期消息的 token 预算（Auto/Reactive）；设置后按 token 累积决定保留轮组数。 */
+  keepRecentTokens?: number;
+  /** 保留近期消息的最少轮组数（Auto/Reactive），默认 1。 */
+  keepRecentRounds?: number;
+  /** 摘要请求输出上限 token，默认 20K。 */
+  summaryMaxOutputTokens?: number;
+  /** 独立摘要模型（如更便宜的模型）；与 summaryModel 必须成对设置，未设置时用会话当前模型。 */
+  summaryProvider?: string;
+  summaryModel?: string;
+  /** 连续压缩失败熔断阈值，默认 3。 */
+  maxConsecutiveFailures?: number;
+  microcompact?: CompactMicrocompactRuntimeConfig;
 }
 
 export interface ModelAnomalyGuardConfig {

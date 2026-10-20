@@ -148,6 +148,7 @@ export type {
   ModelSelection,
   ModelStatusSink,
   ModelStreamRecoveryStatus,
+  ToolSearchMode,
   ModelStreamEvent,
   ModelStreamingPayload,
   ModelToolSideEffectScope,

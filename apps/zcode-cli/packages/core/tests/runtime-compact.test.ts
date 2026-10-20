@@ -56,7 +56,9 @@ import { createInMemoryHookRunner } from "../src/hooks/index.js";
 import {
   buildPostCompactReadStateReminderEntries,
   buildPostCompactRuntimeEntries,
+  estimateRuntimeEntryTokens,
   selectCompactEntries,
+  selectCompactEntriesForInitialPromptTooLong,
   toTokenUsageInfo,
 } from "../src/runtime/helpers/index.js";
 import { createToolRegistry } from "../src/tool/registry.js";
@@ -5879,3 +5881,125 @@ function createRecordingSessionStore(
     },
   };
 }
+
+describe("compact recent preservation policy", () => {
+  const entries: RuntimeMessageEntry[] = [
+    { message: { role: "system", content: "system prompt" } },
+    { message: { role: "user", content: "round1 request" } },
+    { message: { role: "assistant", content: "round1 response" } },
+    { message: { role: "user", content: "round2 request" } },
+    { message: { role: "assistant", content: "round2 response" } },
+    { message: { role: "user", content: "round3 request" } },
+    { message: { role: "assistant", content: "round3 response" } },
+  ];
+  const messageContents = (list: readonly RuntimeMessageEntry[]): string[] =>
+    list.flatMap((entry) => ("message" in entry ? [entry.message.content] : []));
+
+  it("defaults to preserving the most recent round for auto compact", () => {
+    const selection = selectCompactEntries({ entries, trigger: CompactTrigger.Auto });
+    expect(selection.groupsPreserved).toBe(1);
+    // 轮组以 assistant 为起点：最后一组只含最新的 assistant 消息。
+    expect(messageContents(selection.preservedEntries)).toEqual(["round3 response"]);
+  });
+
+  it("preserves keepRecentRounds groups when configured", () => {
+    const selection = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentRounds: 2 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(selection.groupsPreserved).toBe(2);
+    expect(messageContents(selection.preservedEntries)).toEqual([
+      "round2 response",
+      "round3 request",
+      "round3 response",
+    ]);
+  });
+
+  it("preserves groups until the keepRecentTokens budget is covered", () => {
+    // 预算小于最新一组：仍保底保留 1 组。
+    const tiny = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentTokens: 1 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(tiny.groupsPreserved).toBe(1);
+
+    // 超大预算覆盖全部轮组：保留段受摘要区可压缩条件封顶（4 组最多保留 2 组，
+    // 摘要区剩 [u1],[a1,u2] 两组且含 assistant），压缩不会退化成 no-op。
+    const huge = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentTokens: 1_000_000 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(huge.groupsPreserved).toBe(2);
+    expect(messageContents(huge.entriesForSummary)).toEqual([
+      "system prompt",
+      "round1 request",
+      "round1 response",
+      "round2 request",
+    ]);
+  });
+
+  it("ignores the preservation policy for manual compact", () => {
+    const selection = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentRounds: 2, keepRecentTokens: 1_000_000 },
+      trigger: CompactTrigger.Manual,
+    });
+    expect(selection.groupsPreserved).toBe(0);
+    expect(selection.preservedEntries).toEqual([]);
+  });
+
+  it("caps aggressive keepRecent so the summary region stays compactable", () => {
+    // 4 个轮组（[u1], [a1,u2], [a2,u3], [a3]）：keepRecentRounds=4 请求保留全部，
+    // 但摘要区必须保留 ≥2 组且含 assistant → 封顶 2，压缩不会退化成 no-op。
+    const selection = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentRounds: 4 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(selection.groupsPreserved).toBe(2);
+    expect(messageContents(selection.entriesForSummary)).toEqual([
+      "system prompt",
+      "round1 request",
+      "round1 response",
+      "round2 request",
+    ]);
+  });
+
+  it("keeps the configured preserve floor when reactive overflow reselects entries", () => {
+    // 6 个轮组：按最后一组实测 token 构造只差 1 组的 overflow gap，
+    // 无配置时重选保留 2 组；keepRecentRounds=3 应作为下限生效（bug：曾降回 2）。
+    const longEntries: RuntimeMessageEntry[] = [
+      { message: { role: "system", content: "system prompt" } },
+      { message: { role: "user", content: "round1 request" } },
+      { message: { role: "assistant", content: "round1 response" } },
+      { message: { role: "user", content: "round2 request" } },
+      { message: { role: "assistant", content: "round2 response" } },
+      { message: { role: "user", content: "round3 request" } },
+      { message: { role: "assistant", content: "round3 response" } },
+      { message: { role: "user", content: "round4 request" } },
+      { message: { role: "assistant", content: "round4 response" } },
+      { message: { role: "user", content: "round5 request" } },
+      { message: { role: "assistant", content: "round5 response" } },
+    ];
+    const lastGroupTokens = estimateRuntimeEntryTokens([longEntries[longEntries.length - 1]!]);
+    const promptTooLongCause = `${lastGroupTokens + 3} tokens > 1`;
+
+    const withoutPolicy = selectCompactEntriesForInitialPromptTooLong({
+      entries: longEntries,
+      promptTooLongCause,
+      trigger: CompactTrigger.Reactive,
+    });
+    expect(withoutPolicy?.groupsPreserved).toBe(2);
+
+    const withPolicy = selectCompactEntriesForInitialPromptTooLong({
+      entries: longEntries,
+      preserveRecent: { keepRecentRounds: 3 },
+      promptTooLongCause,
+      trigger: CompactTrigger.Reactive,
+    });
+    expect(withPolicy?.groupsPreserved).toBe(3);
+  });
+});

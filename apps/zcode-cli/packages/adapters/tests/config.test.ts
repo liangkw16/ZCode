@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createConfig, updateUiLocaleInFileConfig } from "../src/config/index.js";
+import { ConfigScope, ConfigScopePriority } from "@zcode/contracts";
+import { createConfig, mergeConfigs, updateUiLocaleInFileConfig } from "../src/config/index.js";
 import { parseEnvConfig } from "../src/config/env-config.adapter.js";
 import {
   addSuppressedBuiltinInFileConfig,
@@ -399,6 +400,143 @@ describe("config adapters", () => {
     });
 
     expect(config).toEqual({});
+  });
+
+  it("loads the compact policy section from file config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zcode-config-compact-"));
+    const path = join(dir, "config.json");
+
+    try {
+      await writeFile(
+        path,
+        JSON.stringify({
+          compact: {
+            bufferTokens: 8_000,
+            contextWindowTokens: 128_000,
+            keepRecentRounds: 2,
+            keepRecentTokens: 40_000,
+            maxConsecutiveFailures: 5,
+            outputReserveTokens: 16_000,
+            summaryMaxOutputTokens: 12_000,
+            summaryModel: "cheap-model",
+            summaryProvider: "test-provider",
+            thresholdRatio: 0.8,
+            microcompact: {
+              enabled: true,
+              keepRecentToolResults: 3,
+              minTokenSavings: 512,
+            },
+          },
+        }),
+      );
+
+      const loaded = loadFileConfig(path);
+
+      expect(loaded.loaded).toBe(true);
+      expect(loaded.config.compact).toEqual({
+        bufferTokens: 8_000,
+        contextWindowTokens: 128_000,
+        keepRecentRounds: 2,
+        keepRecentTokens: 40_000,
+        maxConsecutiveFailures: 5,
+        outputReserveTokens: 16_000,
+        summaryMaxOutputTokens: 12_000,
+        summaryModel: "cheap-model",
+        summaryProvider: "test-provider",
+        thresholdRatio: 0.8,
+        microcompact: {
+          enabled: true,
+          keepRecentToolResults: 3,
+          minTokenSavings: 512,
+        },
+      });
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects invalid compact config with a fail-fast diagnostic", async () => {
+    const cases: Array<Record<string, unknown>> = [
+      { compact: { unknownField: true } },
+      { compact: { thresholdRatio: 1.5 } },
+      { compact: { thresholdRatio: 0 } },
+      { compact: { bufferTokens: -1 } },
+      { compact: { keepRecentRounds: 0 } },
+      { compact: { summaryModel: "cheap-model" } },
+      { compact: { summaryProvider: "test-provider" } },
+      { compact: { microcompact: { unknownField: 1 } } },
+    ];
+    const dir = await mkdtemp(join(tmpdir(), "zcode-config-compact-invalid-"));
+
+    try {
+      for (const [index, fileConfig] of cases.entries()) {
+        const path = join(dir, `config-${index}.json`);
+        await writeFile(path, JSON.stringify(fileConfig));
+        const loaded = loadFileConfig(path);
+
+        // strict schema 在装载阶段拒绝整份文件，而不是静默丢字段。
+        expect(loaded.loaded).toBe(false);
+        expect(loaded.config).toEqual({});
+        expect(loaded.diagnostics[0]?.code).toBe("config_file_invalid");
+      }
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  it("parses compact environment overrides and skips invalid values", () => {
+    const config = parseEnvConfig({
+      ZCODE_COMPACT_ENABLED: "false",
+      ZCODE_COMPACT_CONTEXT_WINDOW_TOKENS: "128000",
+      ZCODE_COMPACT_BUFFER_TOKENS: "8000",
+      ZCODE_COMPACT_THRESHOLD_RATIO: "0.8",
+      ZCODE_COMPACT_KEEP_RECENT_TOKENS: "40000",
+      ZCODE_MICROCOMPACT_ENABLED: "true",
+    });
+
+    expect(config.compact).toEqual({
+      enabled: false,
+      contextWindowTokens: 128_000,
+      bufferTokens: 8_000,
+      thresholdRatio: 0.8,
+      keepRecentTokens: 40_000,
+      microcompact: { enabled: true },
+    });
+
+    // 非法值跳过而不是落 0：0 对 thresholdRatio 非法、对 token 字段会改变压缩行为。
+    const invalid = parseEnvConfig({
+      ZCODE_COMPACT_ENABLED: "yes",
+      ZCODE_COMPACT_THRESHOLD_RATIO: "1.5",
+      ZCODE_COMPACT_BUFFER_TOKENS: "-3",
+      ZCODE_COMPACT_CONTEXT_WINDOW_TOKENS: "abc",
+    });
+    expect(invalid.compact).toBeUndefined();
+  });
+
+  it("deep merges compact sections across config scopes", () => {
+    const merged = mergeConfigs(
+      {
+        config: {
+          compact: {
+            bufferTokens: 8_000,
+            microcompact: { enabled: true, keepRecentToolResults: 3 },
+          },
+        },
+        scope: ConfigScope.User,
+        priority: ConfigScopePriority[ConfigScope.User],
+      },
+      {
+        config: { compact: { microcompact: { minTokenSavings: 512 } } },
+        scope: ConfigScope.Project,
+        priority: ConfigScopePriority[ConfigScope.Project],
+      },
+    );
+
+    // Project 层只调 microcompact 阈值时不能丢掉 User 层的 enabled/keepRecentToolResults。
+    expect(merged.compact).toEqual({
+      bufferTokens: 8_000,
+      microcompact: { enabled: true, keepRecentToolResults: 3, minTokenSavings: 512 },
+    });
   });
 
   it("loads yolo mode from file config", async () => {

@@ -27,15 +27,38 @@ export interface CompactEntrySelection {
   totalGroups: number;
 }
 
+/** Auto/Reactive 压缩时保留近期消息的策略：轮组下限 + 可选 token 预算（对齐 Codex/pi 实践）。 */
+export interface CompactRecentPreservationPolicy {
+  keepRecentRounds?: number;
+  keepRecentTokens?: number;
+  useMidConversationSystem?: boolean;
+}
+
 export function selectCompactEntries(input: {
   entries: readonly RuntimeMessageEntry[];
   minimumGroupsToPreserve?: number;
+  preserveRecent?: CompactRecentPreservationPolicy;
   trigger: CompactTrigger;
 }): CompactEntrySelection {
   const split = splitRuntimeEntriesForCompactSelection(input.entries, input.trigger);
   const baseGroupsToPreserve = split.shouldPreserveRecent && split.groups.length > 1 ? 1 : 0;
+  const configuredGroupsToPreserve = split.shouldPreserveRecent
+    ? Math.min(
+        Math.max(
+          positiveInt(input.preserveRecent?.keepRecentRounds) ?? 0,
+          countRecentGroupsForTokenBudget(split.groups, input.preserveRecent?.keepRecentTokens, {
+            useMidConversationSystem: input.preserveRecent?.useMidConversationSystem,
+          }),
+        ),
+        // 激进保留必须让摘要区仍满足压缩条件（≥2 个轮组且含 assistant），
+        // 否则压缩退化成永久 no-op，超窗会话无法恢复。只钳制配置旋钮，
+        // 不影响 prompt-too-long 重选的 minimumGroupsToPreserve 增长。
+        maxConfiguredPreservableGroups(split.groups),
+      )
+    : 0;
   const requestedGroupsToPreserve = Math.max(
     baseGroupsToPreserve,
+    configuredGroupsToPreserve,
     positiveInt(input.minimumGroupsToPreserve) ?? 0,
   );
   const maxGroupsToPreserve = Math.max(0, split.groups.length - 1);
@@ -105,7 +128,8 @@ export function selectCompactEntriesForInitialPromptTooLong(input: {
   promptTooLongCause: unknown;
   trigger: CompactTrigger;
   useMidConversationSystem?: boolean;
-}): CompactEntrySelection | null {
+  preserveRecent?: CompactRecentPreservationPolicy;
+}) {
   const split = splitRuntimeEntriesForCompactSelection(input.entries, input.trigger);
   if (!split.shouldPreserveRecent || split.groups.length <= 3) {
     return null;
@@ -133,6 +157,8 @@ export function selectCompactEntriesForInitialPromptTooLong(input: {
   const nextSelection = selectCompactEntries({
     entries: input.entries,
     minimumGroupsToPreserve: 1 + additionalGroupsToPreserve,
+    // 重选按 token gap 增长保留段时仍要遵守配置的保留下限（selectCompactEntries 取 max）。
+    ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
     trigger: input.trigger,
   });
   return hasEnoughRuntimeEntriesToCompact(nextSelection.entriesForSummary) ? nextSelection : null;
@@ -274,6 +300,38 @@ function estimateCompactGroupTokens(
       useMidConversationSystem: options.useMidConversationSystem,
     }),
   );
+}
+
+/** 从最新轮组向前累积 token，返回覆盖 keepRecentTokens 预算所需的轮组数；未配置预算返回 0。 */
+function countRecentGroupsForTokenBudget(
+  groups: readonly RuntimeMessageEntry[][],
+  tokenBudget: number | undefined,
+  options: { useMidConversationSystem?: boolean } = {},
+): number {
+  const budget = positiveInt(tokenBudget);
+  if (budget === undefined || groups.length === 0) return 0;
+
+  let tokensCovered = 0;
+  let groupsCovered = 0;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    tokensCovered += estimateRuntimeEntryTokens(groups[index]!, options);
+    groupsCovered += 1;
+    if (tokensCovered >= budget) break;
+  }
+  return groupsCovered;
+}
+
+/**
+ * 配置旋钮（keepRecentRounds/keepRecentTokens）最多能保留的轮组数：
+ * 摘要区至少保留 2 个轮组且含 assistant 消息（hasEnoughRuntimeEntriesToCompact）。
+ * 历史太短无法同时满足时回退 1，维持既有"保留 1 组 → 压缩跳过"语义。
+ */
+function maxConfiguredPreservableGroups(groups: readonly RuntimeMessageEntry[][]): number {
+  const firstAssistantGroup = groups.findIndex((group) =>
+    group.some((entry) => runtimeEntryRole(entry) === "assistant"),
+  );
+  if (firstAssistantGroup === -1) return Math.max(0, groups.length - 1);
+  return Math.max(1, Math.min(groups.length - 2, groups.length - firstAssistantGroup - 1));
 }
 
 function truncateRuntimeEntriesForCompactRetry(

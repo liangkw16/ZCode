@@ -26,6 +26,7 @@ async function fixture(
   options: Partial<FakeRelayV2Options> = {},
   initialSettings: Partial<AppSettings> = {},
   deviceSaveError?: Error,
+  selfHostKey?: string | null,
 ) {
   const relay = await createFakeRelayV2({
     users: { jwt: "user", other: "other-user" },
@@ -65,6 +66,13 @@ async function fixture(
       ...buildZCodeEndpointUrls(endpoint, { appVersion: "3.13.0" }),
       relayWsUrl: endpoint.replace("http", "ws") + "/api/v1/remote/ws2",
     }),
+    // 仅显式传入时注入：门控按"将要嵌入的最终 URL"判断 origin（模拟 index 侧纯函数语义）。
+    ...(selfHostKey === undefined
+      ? {}
+      : {
+          getSelfHostQrKey: (mobileRemoteControlUrl: string) =>
+            new URL(mobileRemoteControlUrl).origin === relay.httpUrl ? selfHostKey : null,
+        }),
     getLogin: readLogin,
     deviceStorage,
     deviceMid: "desktop-mid",
@@ -427,6 +435,8 @@ describe("V2 manager public API with real relay", () => {
       mid: "desktop-mid",
       name: "Desktop name",
     });
+    // 未注入 getSelfHostQrKey：不追加 hash（官方构建现状守护）。
+    expect(url.hash).toBe("");
     expect(f.manager.getStatus(1)).toMatchObject({ status: "running", mobileConnected: false });
     const again = await f.start();
     expect(again.sessionId).toBe(result.sessionId);
@@ -434,6 +444,20 @@ describe("V2 manager public API with real relay", () => {
       1,
     );
   });
+  it("注入 getSelfHostQrKey 后二维码/复制链接携带 #k=，query 配对参数不变", async () => {
+    const f = await fixture({}, {}, undefined, "test-secret");
+    const result = await f.start();
+    const url = new URL(result.qrUrl);
+    expect(url.hash).toBe("#k=test-secret");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      app_version: "3.13.0",
+      sid: result.sessionId,
+      mid: "desktop-mid",
+      name: "Desktop name",
+    });
+    expect(f.manager.getStatus(1).connectUrl).toBe(result.qrUrl);
+  });
+
   it("无JWT明确失败，不注册不连接", async () => {
     const f = await fixture();
     f.setLogin(undefined);

@@ -156,6 +156,9 @@ interface WindowControlRuntime {
 
 interface WebRemoteControlManagerDependencies {
   getEndpointUrls?: () => Promise<ZCodeEndpointUrls> | ZCodeEndpointUrls;
+  // kcode 自托管：以"将要嵌入的最终手机页 URL"为参取回 relay 密钥（null/缺省 = 官方行为）。
+  // 入参传最终 URL，让门控在 index 侧校验 origin，避免 env 覆盖后密钥泄往其它域。
+  getSelfHostQrKey?: (mobileRemoteControlUrl: string) => string | null | Promise<string | null>;
   relayWsUrl: string;
   mobileRemoteControlUrl: string;
   deviceMid: string;
@@ -1463,13 +1466,18 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     }
   }
 
-  function createQrUrl(deviceSid: string, mobileRemoteControlUrl: string): string {
+  function createQrUrl(
+    deviceSid: string,
+    mobileRemoteControlUrl: string,
+    selfHostKey: string | null,
+  ): string {
     return buildWebRemoteControlExternalQrUrl({
       baseUrl: mobileRemoteControlUrl,
       deviceSid,
       deviceMid: dependencies.deviceMid,
       deviceName: dependencies.deviceName,
       appVersion: dependencies.appVersion,
+      selfHostKey,
     });
   }
 
@@ -1512,6 +1520,10 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         const relayWsUrl = endpointUrls?.relayWsUrl ?? dependencies.relayWsUrl;
         const mobileRemoteControlUrl =
           endpointUrls?.remoteUrl ?? dependencies.mobileRemoteControlUrl;
+        // 门控（最终 URL origin）在依赖侧完成后在此折叠成值：onStateChange 是同步回调，不能 await。
+        const selfHostQrKey = dependencies.getSelfHostQrKey
+          ? ((await dependencies.getSelfHostQrKey(mobileRemoteControlUrl)) ?? null)
+          : null;
         const endpointOrigin = new URL(endpointUrls?.origin ?? mobileRemoteControlUrl).origin;
         assertActive();
         if (!login?.jwt || !login.userId) {
@@ -1643,7 +1655,11 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
             onStateChange: (state) => {
               if (runtimes.get(windowId) !== runtime) return;
               if (state === "waiting_terminal" || state === "paired") {
-                runtime.qrUrl = runtime.connectUrl = createQrUrl(deviceSid, mobileRemoteControlUrl);
+                runtime.qrUrl = runtime.connectUrl = createQrUrl(
+                  deviceSid,
+                  mobileRemoteControlUrl,
+                  selfHostQrKey,
+                );
               }
               mapTransportState(runtime, state);
               if (state === "waiting_terminal" || state === "paired") {

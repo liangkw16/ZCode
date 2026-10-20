@@ -440,4 +440,9 @@ export interface AppSettings {
   };
   /** 设置页里的临时 endpoint override；正式/测试默认 base url 由 ZCODE_BASE_URL env 管理。 */
   zcodeEndpointOrigin?: string;
+  /**
+   * kcode 自托管 relay 密钥：非空且最终手机页 URL 指向自建 origin 时写入 QR/复制链接的
+   * `#k=` fragment，实现扫码直连。仅 kcode flavor 消费；非法值由 settings 校验整键丢弃。
+   */
+  zcodeRelaySelfHostKey?: string;
 }

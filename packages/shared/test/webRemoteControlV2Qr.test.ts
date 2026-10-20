@@ -42,6 +42,46 @@ it("accepts every V2 routing hint independently or none and rejects legacy crede
   }
 });
 
+it("selfHostKey 非空时密钥进入 #k= fragment，query 配对参数不受影响", () => {
+  const url = new URL(
+    buildWebRemoteControlExternalQrUrl({
+      baseUrl: "https://relay.example.com/remote/v4",
+      deviceSid: "d_1",
+      deviceMid: "mid-1",
+      deviceName: "Desk",
+      appVersion: "3.13.0",
+      selfHostKey: "abc123",
+    }),
+  );
+  expect(url.hash).toBe("#k=abc123");
+  expect([...url.searchParams.keys()]).toEqual(["sid", "mid", "name", "app_version"]);
+});
+
+it("selfHostKey 缺省/空串时不追加 hash，保持官方构建现状", () => {
+  for (const selfHostKey of [undefined, null, "  "] as const) {
+    const url = new URL(
+      buildWebRemoteControlExternalQrUrl({
+        baseUrl: "https://zcode.z.ai/remote/v4",
+        deviceSid: "d_1",
+        selfHostKey,
+      }),
+    );
+    expect(url.hash).toBe("");
+  }
+});
+
+it("selfHostKey 含需编码字符时按 encodeURIComponent 写入 fragment", () => {
+  const url = new URL(
+    buildWebRemoteControlExternalQrUrl({
+      baseUrl: "https://relay.example.com/remote/v4",
+      selfHostKey: "a b/c?d",
+    }),
+  );
+  expect(url.hash).toBe(`#k=${encodeURIComponent("a b/c?d")}`);
+  // 手机页 readSelfHostKey 的解析往返必须一致
+  expect(new URLSearchParams(url.hash.replace(/^#/, "")).get("k")).toBe("a b/c?d");
+});
+
 it("uses the V2 heartbeat bounds as the helper defaults", () => {
   expect(
     getWebRemoteControlHeartbeatDelayMs(

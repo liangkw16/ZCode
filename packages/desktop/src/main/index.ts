@@ -135,6 +135,7 @@ import { createWebRemoteControlManager } from "./webRemoteControlManager.js";
 import {
   createWebRemoteControlDeviceStorage,
   resolveWebRemoteControlEndpointOverrideUrls,
+  resolveWebRemoteControlSelfHostQrKey,
 } from "#src/main/web-remote-relay/index.js";
 import { createWebRemoteControlFeatureGate } from "./webRemoteControlFeatureGate.js";
 import { reconnectWebRemoteControlWorkspaceInRenderer } from "./webRemoteControlRendererReconnect.js";
@@ -946,6 +947,18 @@ const webRemoteControlManager = createWebRemoteControlManager({
       }),
       remoteUrl: webRemoteControlUrlEnvOverride || derived.remoteUrl,
     };
+  },
+  // kcode 自托管：QR/复制链接直连。门控在纯函数里校验"最终手机页 URL origin === 自建
+  // origin"，env 覆盖把手机页指到其它域时密钥一律不注入。
+  getSelfHostQrKey: async (mobileRemoteControlUrl) => {
+    const settings = await mainSettingService.get();
+    return resolveWebRemoteControlSelfHostQrKey({
+      flavor: ZCODE_PRODUCT_FLAVOR,
+      settingOrigin: settings.zcodeEndpointOrigin,
+      settingKey: settings.zcodeRelaySelfHostKey,
+      finalRemoteUrl: mobileRemoteControlUrl,
+      appVersion: webRemoteControlAppVersion,
+    });
   },
   relayWsUrl: resolveWebRemoteControlRelayWsUrl({
     endpointOrigin: DEFAULT_ZCODE_ENDPOINT_ORIGIN,

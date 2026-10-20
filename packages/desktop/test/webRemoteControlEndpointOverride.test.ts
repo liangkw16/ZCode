@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveWebRemoteControlEndpointOverrideUrls } from "../src/main/web-remote-relay/webRemoteControlEndpointOverride.js";
+import {
+  resolveWebRemoteControlEndpointOverrideUrls,
+  resolveWebRemoteControlSelfHostQrKey,
+} from "../src/main/web-remote-relay/webRemoteControlEndpointOverride.js";
 
 describe("resolveWebRemoteControlEndpointOverrideUrls", () => {
   it("kcode + 有效 setting：覆盖远控三端点，http origin 推导 ws", () => {
@@ -46,5 +49,45 @@ describe("resolveWebRemoteControlEndpointOverrideUrls", () => {
       appVersion: "3.3.0",
     });
     expect(result!.remoteUrl).toBe("https://ecs.example.com/remote/v3");
+  });
+});
+
+describe("resolveWebRemoteControlSelfHostQrKey", () => {
+  it("kcode + origin + key + 最终手机页同源：返回 trim 后密钥", () => {
+    expect(
+      resolveWebRemoteControlSelfHostQrKey({
+        flavor: "kcode",
+        settingOrigin: "http://ecs.example.com:8787",
+        settingKey: "  k1  ",
+        finalRemoteUrl: "http://ecs.example.com:8787/remote/v4?x=1",
+      }),
+    ).toBe("k1");
+  });
+
+  it("最终手机页指向其它域（env 覆盖组合，如官方域）时密钥不注入", () => {
+    expect(
+      resolveWebRemoteControlSelfHostQrKey({
+        flavor: "kcode",
+        settingOrigin: "http://ecs.example.com:8787",
+        settingKey: "k1",
+        finalRemoteUrl: "https://zcode.z.ai/remote/v4",
+      }),
+    ).toBeNull();
+  });
+
+  it("非 kcode / key 空白 / settingOrigin 非法 / 最终 URL 非法：一律 null", () => {
+    const base = {
+      settingOrigin: "http://ecs.example.com:8787",
+      settingKey: "k1",
+      finalRemoteUrl: "http://ecs.example.com:8787/remote/v4",
+    } as const;
+    expect(resolveWebRemoteControlSelfHostQrKey({ ...base, flavor: "production" })).toBeNull();
+    expect(resolveWebRemoteControlSelfHostQrKey({ ...base, flavor: "kcode", settingKey: "   " })).toBeNull();
+    expect(
+      resolveWebRemoteControlSelfHostQrKey({ ...base, flavor: "kcode", settingOrigin: "not-a-url" }),
+    ).toBeNull();
+    expect(
+      resolveWebRemoteControlSelfHostQrKey({ ...base, flavor: "kcode", finalRemoteUrl: "::bad::" }),
+    ).toBeNull();
   });
 });

@@ -6,7 +6,9 @@
    `SELF_HOST_RELAY_DEVICES_FILE=/var/lib/self-host-relay/devices.json`、
    `SELF_HOST_RELAY_STATIC_ROOT=/opt/self-host-relay/web`。
    手机页构建零密钥（`pnpm build:web-remote-control:selfhost`，产物可公开分发）；
-   密钥经书签 URL `http://<origin>/remote/v4#k=<secret>` 在手机首次打开时分发到 localStorage。
+   密钥首选随 QR/复制链接分发：KCode 桌面端 setting 写入 `zcodeRelaySelfHostKey`（与
+   `zcodeEndpointOrigin` 同级）后，二维码与复制链接自动携带 `#k=<secret>`，手机扫码即存即连；
+   书签 URL `http://<origin>/remote/v4#k=<secret>` 保留为备用通道。
 3. 上传：`dist/main.js` → `/opt/self-host-relay/main.js`；`packages/web/dist/` → `/opt/self-host-relay/web/`。
 4. systemd：unit 中 `__NODE_BIN__` 替换为 `/opt/node/bin/node`，`systemctl enable --now self-host-relay`。
 5. 云厂商安全组放行 8787/TCP（控制台操作）。

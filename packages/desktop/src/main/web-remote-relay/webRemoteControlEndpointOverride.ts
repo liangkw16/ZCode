@@ -33,3 +33,35 @@ export function resolveWebRemoteControlEndpointOverrideUrls(
     return null;
   }
 }
+
+export interface WebRemoteControlSelfHostQrKeyInput {
+  flavor: ZCodeProductFlavor;
+  settingOrigin?: string | null;
+  settingKey?: string | null;
+  finalRemoteUrl: string;
+  appVersion?: string;
+}
+
+/**
+ * kcode 自托管：判定本次 QR/复制链接是否携带 relay 密钥。门控落在最终手机页 URL——
+ * `ZCODE_WEB_REMOTE_CONTROL_URL` 等 env 覆盖可能把 remoteUrl 换成其它域，此时密钥
+ * 一律不注入，防止泄进官方域二维码。origin 不匹配 / 非 kcode / key 空 → null。
+ */
+export function resolveWebRemoteControlSelfHostQrKey(
+  input: WebRemoteControlSelfHostQrKeyInput,
+): string | null {
+  const key = input.settingKey?.trim();
+  if (!key) return null;
+  const override = resolveWebRemoteControlEndpointOverrideUrls({
+    flavor: input.flavor,
+    settingOrigin: input.settingOrigin,
+    appVersion: input.appVersion,
+  });
+  if (!override) return null;
+  try {
+    if (new URL(input.finalRemoteUrl).origin !== override.origin) return null;
+  } catch {
+    return null;
+  }
+  return key;
+}

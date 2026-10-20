@@ -450,4 +450,18 @@ describe("远程介绍回滚兼容", () => {
       false,
     );
   });
+
+  it("zcodeRelaySelfHostKey：合法串 trim 保留；空白/非字符串/超长整键丢弃且不拖垮其余字段", () => {
+    expect(appSettingsSchema.parse({ zcodeRelaySelfHostKey: "  k1  " })).toMatchObject({
+      zcodeRelaySelfHostKey: "k1",
+    });
+    for (const bad of ["", "   ", 123, "x".repeat(513)]) {
+      const parsed = appSettingsSchema.parse({
+        zcodeRelaySelfHostKey: bad,
+        zcodeEndpointOrigin: "https://relay.example.com",
+      });
+      expect(parsed.zcodeRelaySelfHostKey).toBeUndefined();
+      expect(parsed.zcodeEndpointOrigin).toBe("https://relay.example.com");
+    }
+  });
 });

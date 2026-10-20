@@ -122,6 +122,12 @@ export interface WebRemoteControlV2QrParams {
 
 export type BuildWebRemoteControlExternalQrUrlOptions = WebRemoteControlV2QrParams & {
   baseUrl: string;
+  /**
+   * kcode 自托管：非空时把 relay 密钥写入 `#k=` fragment（fragment 不发往服务端），
+   * 手机页 readSelfHostKey 解析后持久化并摘除。缺省必须保持无 hash 的官方现状；
+   * 调用方（desktop 门控）负责校验最终 URL 指向自建 origin 才传入。
+   */
+  selfHostKey?: string | null;
 };
 
 function readNonEmptySearchParam(params: URLSearchParams, name: string): string | undefined {
@@ -169,6 +175,7 @@ export function buildWebRemoteControlExternalQrUrl({
   deviceMid,
   deviceName,
   appVersion,
+  selfHostKey: selfHostKeyInput,
 }: BuildWebRemoteControlExternalQrUrlOptions): string {
   const url = new URL(baseUrl);
   if (deviceSid !== undefined) url.searchParams.set("sid", deviceSid);
@@ -184,6 +191,10 @@ export function buildWebRemoteControlExternalQrUrl({
   }
   if (appVersion?.trim()) {
     url.searchParams.set("app_version", appVersion);
+  }
+  const selfHostKey = selfHostKeyInput?.trim();
+  if (selfHostKey) {
+    url.hash = `k=${encodeURIComponent(selfHostKey)}`;
   }
   return url.toString();
 }

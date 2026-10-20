@@ -179,6 +179,19 @@ const zcodeEndpointOriginSchema = z.preprocess((value) => {
   }
 }, z.string().optional());
 
+// kcode 自托管 relay 密钥：非法值整键丢弃而非拖垮 settings 读取（同 zcodeEndpointOrigin 策略）。
+// 密钥是部署方生成的随机串（当前为 64 hex）；超长值视为污染数据丢弃。
+const zcodeRelaySelfHostKeySchema = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 512) {
+    return undefined;
+  }
+  return trimmed;
+}, z.string().optional());
+
 function sanitizeZCodeEndpointOrigin(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return value;
@@ -580,6 +593,7 @@ const appSettingsObjectSchema = z.object({
   webRemoteControlExternalRelayDevice: webRemoteControlExternalRelayDeviceSchema.optional(),
   webRemoteControlLastEnabledContext: webRemoteControlLastEnabledContextSchema.optional(),
   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
+  zcodeRelaySelfHostKey: zcodeRelaySelfHostKeySchema.optional(),
 });
 
 export const appSettingsSchema = z.preprocess(
@@ -692,4 +706,5 @@ export const appSettingsPatchSchema = z.object({
   webRemoteControlExternalRelayDevice: webRemoteControlExternalRelayDeviceSchema.optional(),
   webRemoteControlLastEnabledContext: webRemoteControlLastEnabledContextSchema.optional(),
   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
+  zcodeRelaySelfHostKey: zcodeRelaySelfHostKeySchema.optional(),
 });

@@ -132,7 +132,10 @@ import {
   resolveExplicitStartupWorkspaceBootstrap,
 } from "./startupWorkspaceDeepLinkGate.js";
 import { createWebRemoteControlManager } from "./webRemoteControlManager.js";
-import { createWebRemoteControlDeviceStorage } from "#src/main/web-remote-relay/index.js";
+import {
+  createWebRemoteControlDeviceStorage,
+  resolveWebRemoteControlEndpointOverrideUrls,
+} from "#src/main/web-remote-relay/index.js";
 import { createWebRemoteControlFeatureGate } from "./webRemoteControlFeatureGate.js";
 import { reconnectWebRemoteControlWorkspaceInRenderer } from "./webRemoteControlRendererReconnect.js";
 import { sendWebRemoteControlStatusChangedToWindow } from "./webRemoteControlStatusEvents.js";
@@ -923,9 +926,18 @@ let startupOpenWorkspaceRequest: ExplicitStartupWorkspaceRequest | null =
 
 const webRemoteControlManager = createWebRemoteControlManager({
   getEndpointUrls: async () => {
-    const derived = buildZCodeEndpointUrls(await resolveCurrentZCodeEndpointOrigin(), {
+    // kcode 自用：setting 的 endpoint origin 只覆盖远控三端点，其余流量仍走官方域。
+    const override = resolveWebRemoteControlEndpointOverrideUrls({
+      flavor: ZCODE_PRODUCT_FLAVOR,
+      settingOrigin: (await mainSettingService.get()).zcodeEndpointOrigin,
       appVersion: webRemoteControlAppVersion,
     });
+    const derived = buildZCodeEndpointUrls(
+      override?.origin ?? (await resolveCurrentZCodeEndpointOrigin()),
+      {
+        appVersion: webRemoteControlAppVersion,
+      },
+    );
     return {
       ...derived,
       relayWsUrl: resolveWebRemoteControlRelayWsUrl({

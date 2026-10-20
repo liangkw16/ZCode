@@ -63,6 +63,8 @@ digraph {
 - `setting/settingService.ts`：settings 文件路径 `join(resolveUserHomeDir(), ".zcode", "v2", "setting.json")` → 统一解析。**远控身份随此文件自动隔离。**
 - 其余全局派生点收口（实现计划中列全量清单，当前已知）：`subagents/`、`subagentStorage`、`plugin-sync/`、`settings-sync/`（skills/commands/plugins/AGENTS.md）、`skill-sync/`、`skills/`、`hooks/`、`mcp-sync/`、`zcode-agent/`（log、modelTrajectoryFileTail）、`node.ts:1136`、cua-permission-broker 的安装根若直连 `.zcode` 一并收口。
 
+补记（计划期查证）：开源 `zcode-cua` 包与 `cuaHelperInstaller` 均无 `~/.zcode` 直连（Helper 安装根在闭源 producer，个人构建不打包 Helper，variant env 已隔离），CUA 安装根收口一项确认无需改动、出范围。
+
 ### 4.2 desktop（`packages/desktop/src`）
 
 - `main/desktopDataBaseDirBootstrap.ts`、`main/index.ts:573`（settings 路径）、`main/exportLogs.ts`（全局 `~/.zcode/cli|computer-use`）、`main/desktopRuntimeEnv.ts:536`（dev helper `ZCODE_HOME` 回退）。
@@ -73,13 +75,15 @@ digraph {
 
 - 全局派生点收口：`adapters/src/storage/session-store/paths.ts`、`adapters/src/context/index.ts`、`adapters/src/auth/shared-credentials.ts`、`adapters/src/storage/workspace-hook-trust-store.ts`、`cli/src/provider-runtime-env.ts`、`cli/src/clipboard-image.ts`、`cli/src/sea-runtime-tools.ts`、`bootstrap/src/provider-endpoint-routing-source-headers.ts`、`bootstrap/src/app/script-workflow-*` 的 `homedir()` 分支、`telemetry` 设备标识等。
 - **保持不动**：`join(workingDirectory, ".zcode", ...)` 全部（plugins.ts 工作区配置、subagents 项目级、workflows 项目级、agent-memory、office-runtime 工作区导入目录等）。
-- `credential-cipher` fallback key 含 `homedir()`：根变化使 KCode 派生自己的 key——与 zcode 凭据互不可解密，正是隔离语义（预期行为，不是回归）。
+- `credential-cipher` fallback key 含 `homedir()`：镜像布局不改变 `homedir()`，两 app 派生相同 key；隔离由凭据文件分属两个根实现，key 相同反而支持一次性手动拷贝凭据播种（勘误：原文「互不可解密」判断有误）。
 - agent bundle 构建链注入同一 segment。
 
 ### 4.4 构建与打包
 
 - `desktop-product-identity.mjs` 导出 segment（kcode → `.kcode`），tsup/vite/agent 构建统一取用，单一事实源。
 - `ZCODE_DATA_BASE_DIR` 用户自定义数据目录功能保持可用（路径变为 `join(dataBaseDir, segment)`），Windows 安装目录保护逻辑不变。
+
+补记（计划期查证并入实施计划）：`packages/shared/src/zcode-agent-runtime.ts`（nativeConfigDir 描述符）、`packages/services/src/storage/adapters/rootsResolver.ts`（storage R1/R2 根，资源管理器扫/删入口）、CLI `skills/commands roots`（user/project scope 分流）、`contracts/src/tools/saved-workflow.ts`（全局 workflows 前缀）、`apps/zcode-cli/turbo.json`（segment 进构建 env 白名单）、`exportLogs` 三天保留规则前缀、登录发起时接管 handler（`desktopOAuthDeepLink.ensureDeepLinkHandlerForLogin`，见 §6）。
 
 ## 5. 明确不改
 
@@ -94,9 +98,9 @@ digraph {
 
 凭据隔离后 KCode 需首次登录。浏览器 OAuth 回调 `zcode://` 由系统默认 handler 接收（可能是 ZCode）。方案：
 
-1. KCode 检测未登录且用户发起登录时，main 进程通过 `LSSetDefaultHandlerForURLScheme("zcode", dev.zcode.app.kcode)` 把自己设为默认 handler，再拉起浏览器。
-2. 登录成功后记录状态；用户可随时在系统设置把默认 handler 切回 ZCode（两个 app 各自登录态独立，互不影响对方已保存的凭据）。
-3. 该逻辑仅 kcode flavor 编译进包；ZCode 官方行为零变化。
+1. 每个桌面 app 启动期已各自调用 `app.setAsDefaultProtocolClient("zcode")`（`desktopOAuthDeepLink.ts`），后启动者为默认 handler——这解释了为何仅靠启动注册不够：顺序「启动 KCode → 启动 ZCode → 在 KCode 发起登录」会把回调送进 ZCode，而 OAuth state 只存发起进程内。
+2. 实现为 `ensureDeepLinkHandlerForLogin()`（Electron 的 `setAsDefaultProtocolClient` 即 LSSetDefaultHandlerForURLScheme 封装）：kcode 打包态在打开登录页（`loadWindow(page="login")`）前重新接管 handler；登录成功后不自动切回，用户可随时在系统设置切换（两 app 登录态独立，互不影响）。
+3. 该逻辑仅 kcode flavor 打包态生效；ZCode 官方行为零变化。
 
 备选（零代码）：手动 `open` 一次 Finder「显示简介→打开方式」切换。实现按 1/2 做。
 

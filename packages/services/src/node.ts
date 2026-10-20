@@ -130,7 +130,9 @@ export { createTerminalService } from "./terminal/terminalService.js";
 export {
   createSettingService,
   createSettingServiceWithMigrations,
+  resolveSettingsFilePath,
 } from "./setting/settingService.js";
+export { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 export { createCredentialService } from "./credential/credentialService.js";
 export { createBroadcastService } from "./broadcast/broadcastService.js";
 export { createZCodeAgentService } from "./zcode-agent/zcodeAgentService.js";

@@ -1,5 +1,6 @@
 packages:
   - apps/dev-docs
+  - apps/self-host-relay
   - packages/*
   - apps/zcode-cli
   - apps/zcode-cli/packages/*

@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { defineConfig } from "tsup";
 import { getBuildMetadata } from "./scripts/build-metadata.mjs";
-import { resolveDesktopProductFlavor } from "./scripts/desktop-product-identity.mjs";
+import {
+  resolveDesktopDataDirSegment,
+  resolveDesktopProductFlavor,
+} from "./scripts/desktop-product-identity.mjs";
 const { copyGenUiRuntimeAssets } = await import(
   pathToFileURL(resolve(import.meta.dirname, "scripts/gen-ui-runtime-assets.mjs")).href
 );
@@ -70,7 +73,8 @@ const env = loadEnvFiles();
 const { environment: zcodeEnv } = await loadBuiltinProviderConfig();
 // 安装包身份与后端环境分轴：ZCODE_PREVIEW_IDENTITY=1 让生产后端的构建仍以 ZCode Preview 身份打包运行。
 const zcodeProductFlavor = resolveDesktopProductFlavor({ ...process.env, ZCODE_ENV: zcodeEnv });
-console.log(`[tsup] ZCODE_ENV=${zcodeEnv} ZCODE_PRODUCT_FLAVOR=${zcodeProductFlavor}`);
+const zcodeDataDirSegment = resolveDesktopDataDirSegment({ ...process.env, ZCODE_ENV: zcodeEnv });
+console.log(`[tsup] ZCODE_ENV=${zcodeEnv} ZCODE_PRODUCT_FLAVOR=${zcodeProductFlavor} ZCODE_DATA_DIR_SEGMENT=${zcodeDataDirSegment}`);
 
 function parseCsvEnv(value: string | undefined): string[] {
   return (value ?? "")
@@ -197,6 +201,7 @@ function createSharedDefines() {
     __ZCODE_BUILD_TIME__: JSON.stringify(buildMetadata.buildTime),
     __ZCODE_ENV__: JSON.stringify(zcodeEnv),
     __ZCODE_PRODUCT_FLAVOR__: JSON.stringify(zcodeProductFlavor),
+    __ZCODE_DATA_DIR_SEGMENT__: JSON.stringify(zcodeDataDirSegment),
     ...buildTimeConfigDefines,
     // Computer Use Helper build identity — helperInstaller 读它决定下载哪个 Helper bundle。
     // 缺失时 installer 抛 "Packaged ZCode is missing its embedded Computer Use Helper build identity"。

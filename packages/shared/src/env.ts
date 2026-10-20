@@ -12,6 +12,7 @@ export type ArmsRumEnv = "local" | "prod";
 // 非构建环境（如 e2e 测试的 mocha）下 define 不存在，用 typeof 检查 + fallback 避免 ReferenceError
 declare const __ZCODE_ENV__: string;
 declare const __ZCODE_PRODUCT_FLAVOR__: string;
+declare const __ZCODE_DATA_DIR_SEGMENT__: string;
 declare const __ZCODE_ARMS_RUM_ENDPOINT__: string;
 declare const __ZCODE_TELEMETRY_REPORT_ENDPOINT__: string;
 declare const __ZCODE_AUTO_UPDATE_ENABLED__: boolean;
@@ -44,6 +45,16 @@ export const ZCODE_PRODUCT_FLAVOR = normalizeZCodeProductFlavor(
   typeof __ZCODE_PRODUCT_FLAVOR__ !== "undefined" ? __ZCODE_PRODUCT_FLAVOR__ : undefined,
   ZCODE_ENV,
 );
+/**
+ * 全局数据目录名（~/.zcode | ~/.kcode 镜像根）。kcode 自用档构建时由 tsup/vite/agent
+ * bundle 的 define 折叠注入；未注入 define 的 bundle（web、独立 CLI、测试）回落 .zcode，
+ * 与上游默认行为保持一致。单一事实源见 desktop-product-identity.mjs 的
+ * resolveDesktopDataDirSegment。
+ */
+export const ZCODE_DATA_DIR_SEGMENT =
+  typeof __ZCODE_DATA_DIR_SEGMENT__ !== "undefined"
+    ? (__ZCODE_DATA_DIR_SEGMENT__ as ".zcode" | ".kcode")
+    : ".zcode";
 export const ZCODE_APP_VERSION_ENV = "ZCODE_APP_VERSION" as const;
 export const ZCODE_BUILD_COMMIT_ID_ENV = "ZCODE_BUILD_COMMIT_ID" as const;
 

@@ -28,6 +28,9 @@ export function resolveDesktopProductFlavor(
 export function resolveDesktopProductIdentity(
   env?: Record<string, string | undefined>,
 ): DesktopProductIdentity;
+export function resolveDesktopDataDirSegment(
+  env?: Record<string, string | undefined>,
+): ".zcode" | ".kcode";
 export function resolveDesktopArtifactSuffix(env?: Record<string, string | undefined>): string;
 export function resolveWindowsAppUserModelIdForFlavor(
   flavor: DesktopProductFlavor,

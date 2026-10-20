@@ -106,6 +106,15 @@ export function resolveDesktopProductIdentity(env = process.env) {
 }
 
 /**
+ * 全局数据目录 segment：决定 `~/.zcode` 与 `~/.kcode` 镜像根。默认（含 preview）一律
+ * `.zcode`，只有 kcode 自用档改用 `.kcode`，保证上游默认构建零变化。tsup/vite/agent
+ * 构建统一从这里取值折叠成编译期常量，是唯一事实源。
+ */
+export function resolveDesktopDataDirSegment(env = process.env) {
+  return resolveDesktopProductFlavor(env) === "kcode" ? ".kcode" : ".zcode";
+}
+
+/**
  * 产物文件名后缀标记的是后端环境而不是身份：`_TEST` 只出现在测试后端的安装包上。
  * 生产后端的 Preview 包靠 productName（`ZCode Preview-<version>-...`）与正式包区分。
  */

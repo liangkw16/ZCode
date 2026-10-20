@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import {
   desktopProductIdentities,
   resolveDesktopArtifactSuffix,
+  resolveDesktopDataDirSegment,
   resolveDesktopProductFlavor,
   resolveWindowsAppUserModelId,
   resolveWindowsAppUserModelIdForFlavor,
@@ -161,5 +162,17 @@ describe("desktop product identity", () => {
 
   it("开发态继续使用独立 AUMID，避免污染打包版 Shell 身份", () => {
     expect(resolveWindowsAppUserModelId({}, { isPackaged: false })).toBe("cn.aminer.zcode");
+  });
+
+  it("数据目录 segment 跟随 flavor：kcode 用 .kcode，其余一律 .zcode", () => {
+    expect(
+      resolveDesktopDataDirSegment({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: "1" }),
+    ).toBe(".kcode");
+    expect(resolveDesktopDataDirSegment({ ZCODE_ENV: "production" })).toBe(".zcode");
+    expect(
+      resolveDesktopDataDirSegment({ ZCODE_ENV: "production", ZCODE_PREVIEW_IDENTITY: "1" }),
+    ).toBe(".zcode");
+    expect(resolveDesktopDataDirSegment({ ZCODE_ENV: "test" })).toBe(".zcode");
+    expect(resolveDesktopDataDirSegment({})).toBe(".zcode");
   });
 });

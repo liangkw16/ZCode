@@ -8,7 +8,10 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolveZCodeEndpointOrigin } from "@zcode/shared/zcodeEndpoint";
 import { pdfJsCMapsPlugin } from "../ui/vite/pdfJsCMapsPlugin.js";
 import { getBuildMetadata } from "./scripts/build-metadata.mjs";
-import { resolveDesktopProductFlavor } from "./scripts/desktop-product-identity.mjs";
+import {
+  resolveDesktopDataDirSegment,
+  resolveDesktopProductFlavor,
+} from "./scripts/desktop-product-identity.mjs";
 
 // 动态加载仓库根的构建工具，避免配置打包后其 import.meta.dirname 被重定位到 desktop。
 // 构建期可选能力（ARMS、事件上报、自动更新），见 docs/desktop/build-time-optional-capabilities.md
@@ -161,6 +164,11 @@ export default defineConfig(({ mode }) => {
     ...env,
     ZCODE_ENV: zcodeEnv,
   });
+  const zcodeDataDirSegment = resolveDesktopDataDirSegment({
+    ...process.env,
+    ...env,
+    ZCODE_ENV: zcodeEnv,
+  });
   const e2eCoverageEnabled =
     env.ZCODE_E2E_COVERAGE === "1" || process.env.ZCODE_E2E_COVERAGE === "1";
   const e2eStoreBridgeEnabled =
@@ -207,6 +215,7 @@ export default defineConfig(({ mode }) => {
       __ZCODE_BUILD_TIME__: JSON.stringify(buildMetadata.buildTime),
       __ZCODE_ENV__: JSON.stringify(zcodeEnv),
       __ZCODE_PRODUCT_FLAVOR__: JSON.stringify(zcodeProductFlavor),
+      __ZCODE_DATA_DIR_SEGMENT__: JSON.stringify(zcodeDataDirSegment),
       ...buildTimeConfigDefines,
       __ZCODE_LOCAL_DEVELOPMENT_RUNTIME__: JSON.stringify(mode !== "production"),
       "import.meta.env.VITE_ZCODE_BASE_URL": JSON.stringify(zcodeEndpointOrigin),

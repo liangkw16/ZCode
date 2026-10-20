@@ -60,6 +60,18 @@ describe("shared runtime env", () => {
     expect(env.normalizeZCodeProductFlavor("KCode", "production")).toBe("kcode");
   });
 
+  it("数据目录 segment：注入 .kcode 时透出，未注入回落 .zcode", async () => {
+    vi.stubGlobal("__ZCODE_ENV__", "production");
+    vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", ".kcode");
+
+    const env = await importFreshEnvModule();
+
+    expect(env.ZCODE_DATA_DIR_SEGMENT).toBe(".kcode");
+    vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", undefined);
+    const fallback = await importFreshEnvModule();
+    expect(fallback.ZCODE_DATA_DIR_SEGMENT).toBe(".zcode");
+  });
+
   it("mapZCodeEnvToArmsRumEnv 将非本地 production 映射为 prod", async () => {
     vi.stubGlobal("__ZCODE_ENV__", "production");
 

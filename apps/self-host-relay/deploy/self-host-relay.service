@@ -1,0 +1,15 @@
+[Unit]
+Description=ZCode self-host relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/self-host-relay.env
+ExecStart=__NODE_BIN__ /opt/self-host-relay/main.js
+Restart=always
+RestartSec=3
+StateDirectory=self-host-relay
+WorkingDirectory=/opt/self-host-relay
+
+[Install]
+WantedBy=multi-user.target

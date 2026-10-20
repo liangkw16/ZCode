@@ -41,8 +41,7 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 ```text
 手机（免登录）                自建 ECS（单 origin，默认 http://IP:8787）         KCode 桌面
   扫码/书签打开 ── GET /remote/v4（self-host 构建，stub auth=密钥）
-                          │ nginx：静态页 + /api/v1/remote/* 反代 + 限流
-                          │ self-host-relay（Node, systemd, 127.0.0.1）
+                          │ self-host-relay（Node, systemd：静态页 + relay + 限流，单进程）
                           │◄── POST /device（Bearer=真实 OAuth JWT，任意 bearer 即可）  注册 sid
                           │◄── POST /token(device) + ws2 + auth_init(sid, meta)
   POST /token(terminal) ──►│（Bearer=密钥，仅此端点与 GET /device 要求密钥）
@@ -89,6 +88,8 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 
 密钥错误/缺失返回 HTTP 401（手机端映射 auth-required；正常部署下密钥正确不会触达）。
 所有 bearer 映射到固定单用户 `self`；设备表、token 表按该用户隔离（无跨用户分支）。
+内置每 IP 限流（20 req/s，超出返回 429，防注册端点被刷爆设备表）；无 CORS 头
+（同源部署 + 桌面 main 进程调用均不需要）。
 
 #### 1.2 WebSocket 契约
 
@@ -100,8 +101,8 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
   - device 角色：未知 SID 返回 `AUTH_FAILED`（桌面 transport 既有「同次启动最多重注册一次」
     语义会重注册）。成功后进入 `waiting`，记录 meta（name/platform/version）。
   - terminal 角色：SID 未知 → `AUTH_FAILED`（手机映射 device-not-owned）；SID 已知但
-    device 不在线 → `DEVICE_OFFLINE`（手机保留 15 秒宽限重试）；device 在线 → 双方
-    `matched`，device 侧补发 `pair_status_ack(matched)`。
+    device 不在线 → `auth_ack(waiting)`（与假 relay 行为一致，手机停在「等待桌面端配对」
+    阶段继续心跳，桌面上线即 matched）。`DEVICE_OFFLINE` 仅用于已配对会话中 device 断开。
   - 重复认证或未认证发 data/query → `WRONG_PARAM` 并关闭。
 - 同 `(sid, role)` 新连接替换旧 owner：旧连接收 `KICKED` 后关闭；异步 close 不得移除新 owner。
 - `pair_status_query{client_ts?}` → `pair_status_ack{terminal_sid, pair_status, server_ts}`
@@ -125,13 +126,14 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 #### 1.4 部署
 
 - ECS（默认 `alecs`，实现前先验证两台的系统版本、Node 可用性与端口连通性；结论记入实现记录）。
-- 对外：nginx 监听高位端口（默认 8787，http）；`/remote/v4` 静态托管手机页产物，
-  `/api/v1/remote/` 反代 `127.0.0.1:8788`（含 WS Upgrade 头），`limit_req` 限流
-  （10r/s，burst 20）。relay 仅绑 `127.0.0.1`。
+- **默认形态：单进程直连，无 nginx。** relay 服务自身提供可选静态目录托管
+  （`/remote/v4` 前缀 → 手机页构建产物，含路径穿越防护与 `index.html` 回退），与
+  HTTP/WS 同 origin 同端口（默认 `0.0.0.0:8787`，http）。手机 URL 即
+  `http://<ECS-IP>:8787/remote/v4`。
 - 进程：tsup 单文件 bundle + `self-host-relay.service`（systemd，`EnvironmentFile` 注入
   `SELF_HOST_RELAY_SECRET` 等配置；密钥 `openssl rand -hex 32` 生成，只存 ECS，不入库不入日志）。
-- 升级 TLS（域名 + certbot 或 cloudflared tunnel）时仅改 nginx 与 KCode setting 的 origin，
-  代码与 bundle 不动。
+- 升级 TLS（域名 + certbot 或 cloudflared tunnel）时在前面引入 nginx 做终止/静态/反代，
+  relay 退回 `127.0.0.1` 监听：仅改部署配置与 KCode setting 的 origin，代码与 bundle 不动。
 
 ### 2. 手机页 self-host 模式（packages/web）
 
@@ -148,8 +150,8 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
   切换账号弹窗在该模式下不可达。
 - 版本守卫（`webRemoteControlVersion.ts`）为纯客户端逻辑，无 OSS 运行时依赖；
   KCode 3.16.1 > v4 门槛 3.4.0，无兼容问题。
-- nginx 侧 `/remote/v4` 与 `/remote/v4/assets/` 由同一 `index.html` + hash 资源满足
-  （`try_files ... /remote/v4/index.html`）。
+- relay 内置静态服务托管 `/remote/v4` 与 `/remote/v4/assets/`（同一 `index.html` +
+  hash 资源，目录不存在该前缀 404）。
 
 ### 3. KCode 桌面端点覆盖（packages/desktop）
 
@@ -162,8 +164,10 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 - 新增纯函数 `resolveWebRemoteControlEndpointOverrideUrls(options)`：
   `flavor === "kcode" && setting.zcodeEndpointOrigin` 存在时，以该 origin 构建
   `{origin, relayWsUrl, remoteUrl}`（复用 `buildZCodeEndpointUrls` + `resolveWebRemoteControlRelayWsUrl`）。
-- `packages/desktop/src/main/index.ts:925-942` 的 `getEndpointUrls` 与 fallback 常量接入该
-  函数：仅覆盖远控三端点；`apiBaseUrl`、遥测、帮助配置、插件市场等其余流量仍走官方域。
+- `packages/desktop/src/main/index.ts:925-936` 的 `getEndpointUrls` 接入该函数：仅覆盖
+  远控三端点；`apiBaseUrl`、遥测、帮助配置、插件市场等其余流量仍走官方域。
+  模块加载期的 fallback 常量（`index.ts:938-942`）保持不动——它们只在
+  `getEndpointUrls` 不可用时兜底，主进程恒注入该回调，属死路径默认值。
 - 优先级：`ZCODE_WEB_REMOTE_CONTROL_URL` / `ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL` env
   覆盖（既有开发调试口）> setting 覆盖 > 默认官方域。
 - setting 键复用 `zcodeEndpointOrigin`（已有 zod 校验，`normalizeZCodeEndpointOrigin` 接受
@@ -208,7 +212,7 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
   既有模式）——无登录视图、密钥 bearer、401 落失败页。
 - 桌面单测：`resolveWebRemoteControlEndpointOverrideUrls`——kcode+setting 覆盖、
   kcode 无 setting 默认、非 kcode+setting 不覆盖、env 覆盖优先。
-- 构建验收：`build:web-remote-control:selfhost` 产物在 nginx 本地容器/目录冒烟可打开。
+- 构建验收：`build:web-remote-control:selfhost` 产物由本地 relay 进程静态托管冒烟可打开。
 - 真机验收（用户执行，记录到实现记录）：手机扫码免登录直连；杀后台/锁屏恢复（replayable）；
   relay 重启后双端自动恢复；KCode（自建 relay）与 ZCode（官方 relay）双端远控同时在线。
 - 仓库门禁：`pnpm typecheck`、`pnpm lint`、`pnpm architecture:check --changed`、

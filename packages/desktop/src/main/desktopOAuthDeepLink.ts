@@ -8,6 +8,7 @@ import {
   type OAuthProviderId,
   type OAuthStateRegistration,
   PlatformChannels,
+  ZCODE_PRODUCT_FLAVOR,
 } from "@zcode/shared";
 import {
   extractWorkspaceOpenPath,
@@ -68,6 +69,18 @@ function enqueuePendingShareImport(
   if (pendingShareImports.length > MAX_PENDING_SHARE_IMPORTS) {
     pendingShareImports.shift();
   }
+}
+
+/**
+ * KCode 与 ZCode 共用 zcode:// scheme，系统默认 handler 是"最后注册者"。app 启动期的
+ * 自注册只是初始态：若 KCode 先启动、ZCode 后启动，此时在 KCode 发起登录，OAuth 回调
+ * 会落进 ZCode，而 state 只存在发起进程内，KCode 登录永远无法完成。因此在 kcode 打包态
+ * 打开登录页前重新接管 handler（官方 ZCode 构建不受影响）。
+ */
+export function ensureDeepLinkHandlerForLogin(): void {
+  if (!app.isPackaged || ZCODE_PRODUCT_FLAVOR !== "kcode") return;
+  // 注册失败时登录流程本身会因收不到回调而暴露，无需额外日志通道。
+  app.setAsDefaultProtocolClient("zcode");
 }
 
 export function parseOAuthStateRegistration(payload: unknown): OAuthStateRegistration | null {

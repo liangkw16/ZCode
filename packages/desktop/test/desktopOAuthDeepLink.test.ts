@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PlatformChannels } from "@zcode/shared";
 
 const electronMocks = vi.hoisted(() => ({
+  isPackaged: false,
   appShow: vi.fn(),
   showMessageBoxSync: vi.fn(() => 0),
   getFocusedWindow: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock("electron", () => ({
   app: {
     getPath: vi.fn(() => "/tmp"),
     get isPackaged() {
-      return false;
+      return electronMocks.isPackaged;
     },
     setAsDefaultProtocolClient: electronMocks.setAsDefaultProtocolClient,
     show: electronMocks.appShow,
@@ -46,6 +47,7 @@ const tempDirs: string[] = [];
 
 beforeEach(() => {
   vi.resetModules();
+  electronMocks.isPackaged = false;
   electronMocks.appShow.mockClear();
   electronMocks.showMessageBoxSync.mockReset();
   electronMocks.showMessageBoxSync.mockReturnValue(0);
@@ -480,5 +482,34 @@ describe("desktopOAuthDeepLink share import routing", () => {
     expect(firstWindow.webContents.send).toHaveBeenCalledWith(PlatformChannels.ShareImport, {
       shareCode: "share-code-4",
     });
+  });
+});
+
+describe("ensureDeepLinkHandlerForLogin（kcode 登录时接管 zcode:// handler）", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    electronMocks.isPackaged = false;
+  });
+
+  it("kcode 打包态调用时重新注册默认 handler", async () => {
+    electronMocks.isPackaged = true;
+    vi.stubGlobal("__ZCODE_ENV__", "production");
+    vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "kcode");
+    const mod = await import("../src/main/desktopOAuthDeepLink.js");
+    mod.ensureDeepLinkHandlerForLogin();
+    expect(electronMocks.setAsDefaultProtocolClient).toHaveBeenCalledWith("zcode");
+  });
+
+  it("非 kcode 或未打包时不注册（官方 ZCode 行为零变化）", async () => {
+    vi.stubGlobal("__ZCODE_ENV__", "production");
+    vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "production");
+    const mod = await import("../src/main/desktopOAuthDeepLink.js");
+    mod.ensureDeepLinkHandlerForLogin();
+    expect(electronMocks.setAsDefaultProtocolClient).not.toHaveBeenCalled();
+    vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "kcode");
+    vi.resetModules();
+    const mod2 = await import("../src/main/desktopOAuthDeepLink.js");
+    mod2.ensureDeepLinkHandlerForLogin();
+    expect(electronMocks.setAsDefaultProtocolClient).not.toHaveBeenCalled();
   });
 });

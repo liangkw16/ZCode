@@ -1,4 +1,5 @@
 import { ingestToolExecResource } from "./desktopResourceTelemetry.js";
+import { ensureDeepLinkHandlerForLogin } from "./desktopOAuthDeepLink.js";
 import { ingestMcpResourceSamples } from "./processResourceMcpTelemetrySource.js";
 /* eslint-disable max-lines -- host process 统一处理 main↔host 生命周期、日志、ZCode Agent，拆分前先保持跨进程消息收口。 */
 import {
@@ -133,6 +134,11 @@ export function loadWindow(
       locale: bootstrap?.locale,
     }).filter((entry): entry is [string, string] => entry[1] != null),
   );
+
+  // kcode 打包态打开登录页前接管 zcode:// 默认 handler，避免回调落入后启动的 ZCode。
+  if (page === "login") {
+    ensureDeepLinkHandlerForLogin();
+  }
 
   if (page === "index") {
     const partial = getMainLaunchPartialMarks();

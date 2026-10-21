@@ -22,6 +22,7 @@ export {
   MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
   MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   getAutoCompactOutputReserveTokens,
+  applyCompactModelOverrides,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   shouldAutoCompact,
@@ -42,7 +43,11 @@ export type {
   CompactModelMessage,
   TokenUsageLike,
 } from "./manual.js";
-export type { AutoCompactDecision, AutoCompactPolicyConfig } from "./policy.js";
+export type {
+  AutoCompactDecision,
+  AutoCompactPolicyConfig,
+  CompactModelOverrideResolution,
+} from "./policy.js";
 export type { AutoCompactTokenOverride, AutoCompactTokenSource } from "./policy.js";
 export type {
   LocalMicrocompactBoundaryPayload,

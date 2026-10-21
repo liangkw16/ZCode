@@ -118,6 +118,50 @@ export function getAutoCompactThreshold(config: AutoCompactPolicyConfig = {}): n
   return Math.min(absoluteThreshold, ratioThreshold);
 }
 
+export interface CompactModelOverrideResolution {
+  /** 已剥离 modelOverrides 键的策略；未命中时与输入（除该键外）等价。 */
+  config: AutoCompactPolicyConfig;
+  /** model-override = 应用了至少一个覆盖字段；global = 未应用（含空对象条目）。 */
+  source: "model-override" | "global";
+  /** 覆盖表中存在该 providerId+modelId 条目（含空对象），用于诊断未命中/空条目。 */
+  matched: boolean;
+}
+
+/**
+ * 按实际执行模型挑选 compact.modelOverrides 白名单字段（纯函数，不查 Registry、
+ * 不写日志、不改 Model.properties）：
+ * - providerId+modelId 精确匹配，大小写敏感，无通配；
+ * - 未设置的字段剔除，不得以 undefined 覆盖模型窗口或全局值（omitUndefined 语义）；
+ * - 结果剥离 modelOverrides 键，避免配置结构泄漏进阈值计算。
+ */
+export function applyCompactModelOverrides(
+  config: AutoCompactPolicyConfig,
+  model: { providerId: string; modelId: string },
+): CompactModelOverrideResolution {
+  const { modelOverrides: overrides, ...rest } = config;
+  const override = overrides?.[model.providerId]?.[model.modelId];
+  if (!override) return { config: rest, source: "global", matched: false };
+  const resolved: AutoCompactPolicyConfig = { ...rest };
+  let applied = false;
+  if (override.contextWindowTokens !== undefined) {
+    resolved.contextWindow = override.contextWindowTokens;
+    applied = true;
+  }
+  if (override.thresholdRatio !== undefined) {
+    resolved.thresholdRatio = override.thresholdRatio;
+    applied = true;
+  }
+  if (override.bufferTokens !== undefined) {
+    resolved.bufferTokens = override.bufferTokens;
+    applied = true;
+  }
+  if (override.outputReserveTokens !== undefined) {
+    resolved.outputReserveTokens = override.outputReserveTokens;
+    applied = true;
+  }
+  return { config: resolved, source: applied ? "model-override" : "global", matched: true };
+}
+
 export function shouldAutoCompact(input: {
   messages: readonly CompactModelMessage[];
   config?: AutoCompactPolicyConfig;

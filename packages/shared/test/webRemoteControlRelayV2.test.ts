@@ -77,3 +77,74 @@ it("accepts server ACKs/errors and rejects wrong direction or invalid status", (
   ])
     expect(parseWebRemoteControlRelayV2IncomingMessage(invalid)).toBeNull();
 });
+
+it("accepts optional multi-terminal routing fields in the correct direction", () => {
+  const auth = { type: "auth_init", device_sid: "d_1", terminal_id: "t_a" };
+  expect(parseWebRemoteControlRelayV2OutgoingMessage(auth)).toEqual(auth);
+
+  const outgoingData = {
+    type: "data",
+    payload: { hello: "desktop" },
+    target_terminal_id: "t_b",
+  };
+  expect(parseWebRemoteControlRelayV2OutgoingMessage(outgoingData)).toEqual(outgoingData);
+  expect(
+    parseWebRemoteControlRelayV2OutgoingMessage({
+      ...outgoingData,
+      from_terminal_id: "t_a",
+    }),
+  ).toBeNull();
+
+  const incomingData = {
+    type: "data",
+    payload: { hello: "phone" },
+    from_terminal_id: "t_a",
+  };
+  expect(parseWebRemoteControlRelayV2IncomingMessage(incomingData)).toEqual(incomingData);
+  expect(
+    parseWebRemoteControlRelayV2IncomingMessage({
+      ...incomingData,
+      target_terminal_id: "t_b",
+    }),
+  ).toBeNull();
+
+  const ack = {
+    type: "auth_ack",
+    device_sid: "d_1",
+    pair_status: "matched",
+    terminal_id: "t_a",
+    terminal_ids: ["t_a", "t_b"],
+  };
+  expect(parseWebRemoteControlRelayV2IncomingMessage(ack)).toEqual(ack);
+
+  const pairAck = {
+    type: "pair_status_ack",
+    pair_status: "matched",
+    terminal_ids: ["t_a", "t_b"],
+  };
+  expect(parseWebRemoteControlRelayV2IncomingMessage(pairAck)).toEqual(pairAck);
+});
+
+it("rejects blank or malformed terminal ids", () => {
+  expect(
+    parseWebRemoteControlRelayV2OutgoingMessage({
+      type: "auth_init",
+      device_sid: "d_1",
+      terminal_id: " ",
+    }),
+  ).toBeNull();
+  expect(
+    parseWebRemoteControlRelayV2OutgoingMessage({
+      type: "data",
+      payload: {},
+      target_terminal_id: "",
+    }),
+  ).toBeNull();
+  expect(
+    parseWebRemoteControlRelayV2IncomingMessage({
+      type: "pair_status_ack",
+      pair_status: "matched",
+      terminal_ids: ["t_a", " "],
+    }),
+  ).toBeNull();
+});

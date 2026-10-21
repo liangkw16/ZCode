@@ -16,9 +16,13 @@ const meta = z.strictObject({
 const role = z.enum(["device", "terminal"]);
 const pairStatus = z.enum(["waiting", "matched"]);
 const errorCode = z.enum(["AUTH_FAILED", "WRONG_PARAM", "KICKED", "INTERNAL", "DEVICE_OFFLINE"]);
+// 多 terminal 路由：逻辑 terminal 身份与集合，全部可选，旧链路不发送即不受影响。
+const terminalId = identifier;
+const terminalIdList = z.array(identifier).max(64);
 const authInit = z.strictObject({
   type: z.literal("auth_init"),
   device_sid: deviceSid,
+  terminal_id: terminalId.optional(),
   meta: meta.optional(),
   client_ts: unixSeconds.optional(),
 });
@@ -36,6 +40,8 @@ const pairStatusQuery = z.strictObject({
 const outgoingData = z.strictObject({
   type: z.literal("data"),
   payload: z.json(),
+  // 仅 device → relay 方向：指定接收 terminal；缺省广播。terminal 发送会被拒绝。
+  target_terminal_id: terminalId.optional(),
   client_ts: unixSeconds.optional(),
 });
 const outgoingMessage = z.discriminatedUnion("type", [authInit, pairStatusQuery, outgoingData]);
@@ -54,18 +60,25 @@ const authAck = z.strictObject({
   type: z.literal("auth_ack"),
   device_sid: deviceSid,
   terminal_sid: z.string().optional(),
+  // 仅当 terminal 在 auth_init 声明了 terminal_id 时由 relay 回显（旧客户端兼容开关）。
+  terminal_id: terminalId.optional(),
+  // 仅 device 方向：认证时的初始 terminal 集合。
+  terminal_ids: terminalIdList.optional(),
   pair_status: pairStatus,
   server_ts: unixSeconds.optional(),
 });
 const pairStatusAck = z.strictObject({
   type: z.literal("pair_status_ack"),
   terminal_sid: z.string().optional(),
+  terminal_ids: terminalIdList.optional(),
   pair_status: pairStatus,
   server_ts: unixSeconds.optional(),
 });
 const incomingData = z.strictObject({
   type: z.literal("data"),
   payload: z.json(),
+  // 仅 relay → device 方向：由 relay 附加的发送方 terminal 身份。
+  from_terminal_id: terminalId.optional(),
   server_ts: unixSeconds.optional(),
 });
 const relayError = z.strictObject({

@@ -93,7 +93,7 @@ describe("self-host relay HTTP 契约", () => {
     expect(((await bad.json()) as { code: number }).code).toBe(3001);
 
     const owner = { id: "conn" };
-    store.claimOwnership(deviceSid, "device", {}, owner);
+    store.claimDevice(deviceSid, {}, owner);
     const online = await call("/api/v1/remote/device/delete", {
       method: "POST",
       headers: { Authorization: "Bearer x", "Content-Type": "application/json" },
@@ -101,7 +101,7 @@ describe("self-host relay HTTP 契约", () => {
     });
     expect(online.status).toBe(400);
     expect(((await online.json()) as { code: number }).code).toBe(3005);
-    store.releaseOwnership(deviceSid, "device", owner);
+    store.releaseDevice(deviceSid, owner);
 
     const missing = await call("/api/v1/remote/device/delete", {
       method: "POST",

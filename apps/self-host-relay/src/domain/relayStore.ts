@@ -18,11 +18,12 @@ export interface RelayStoreOptions {
   newSid: () => string;
 }
 
-/** 唯一状态所有者：设备表、一次性 token、(sid, role) owner；不持有 IO。 */
+/** 唯一状态所有者：设备表、一次性 token、device owner 与 terminal 集合；不持有 IO。 */
 export class RelayStore implements SelfHostRelayStore {
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly tokens = new Map<string, { role: "device" | "terminal"; expiresAt: number }>();
-  private readonly owners = new Map<string, Partial<Record<"device" | "terminal", OwnerSlot>>>();
+  private readonly deviceOwners = new Map<string, OwnerSlot>();
+  private readonly terminalOwners = new Map<string, Map<string, OwnerSlot>>();
   private devicesChangeListener: (() => void) | undefined;
 
   constructor(private readonly options: RelayStoreOptions) {}
@@ -49,11 +50,11 @@ export class RelayStore implements SelfHostRelayStore {
   listDevices(nowMs: number): WebRemoteControlRelayV2Device[] {
     void nowMs;
     return [...this.devices.values()].map((record) => {
-      const slot = this.owners.get(record.deviceSid)?.device;
+      const slot = this.deviceOwners.get(record.deviceSid);
       return {
         device_sid: record.deviceSid,
         device_mid: record.deviceMid,
-        online: !!slot,
+        online: Boolean(slot),
         created_at: record.createdAt,
         meta: slot ? { ...slot.meta } : {},
       };
@@ -61,8 +62,9 @@ export class RelayStore implements SelfHostRelayStore {
   }
 
   deleteDevice(deviceSid: string): "deleted" | "missing" | "device-online" {
-    if (this.owners.get(deviceSid)?.device) return "device-online";
+    if (this.deviceOwners.has(deviceSid)) return "device-online";
     if (!this.devices.delete(deviceSid)) return "missing";
+    this.terminalOwners.delete(deviceSid);
     this.notifyDevicesChange();
     return "deleted";
   }
@@ -84,36 +86,84 @@ export class RelayStore implements SelfHostRelayStore {
     return entry.expiresAt > nowMs ? entry.role : null;
   }
 
-  claimOwnership(
+  claimDevice(
     deviceSid: string,
-    role: "device" | "terminal",
     meta: WebRemoteControlRelayV2Device["meta"],
     owner: unknown,
   ): { kicked: unknown | null } | null {
     if (!this.devices.has(deviceSid)) return null;
-    const roles = this.owners.get(deviceSid) ?? {};
-    const kicked = roles[role]?.owner ?? null;
-    roles[role] = { owner, meta: { ...meta } };
-    this.owners.set(deviceSid, roles);
+    const kicked = this.deviceOwners.get(deviceSid)?.owner ?? null;
+    this.deviceOwners.set(deviceSid, { owner, meta: { ...meta } });
     return { kicked };
   }
 
-  releaseOwnership(deviceSid: string, role: "device" | "terminal", owner: unknown): boolean {
-    const roles = this.owners.get(deviceSid);
-    // Bugfix：被替换连接的 close 晚于新认证完成，必须按 owner 引用身份释放，
-    // 否则旧连接异步关闭会拆掉新 owner（契约：异步 close 不得移除新 owner）。
-    if (!roles || roles[role]?.owner !== owner) return false;
-    delete roles[role];
-    if (!roles.device && !roles.terminal) this.owners.delete(deviceSid);
-    return true;
+  releaseDevice(
+    deviceSid: string,
+    owner: unknown,
+  ): { released: boolean; terminals: { terminalId: string; owner: unknown }[] } {
+    const slot = this.deviceOwners.get(deviceSid);
+    if (!slot || slot.owner !== owner) return { released: false, terminals: [] };
+    this.deviceOwners.delete(deviceSid);
+    // device 位换人后不能看到上一代残留 terminal：槽位整体清空，引用交还 gateway 关闭连接。
+    const slots = this.terminalOwners.get(deviceSid);
+    const terminals = slots
+      ? [...slots].map(([terminalId, entry]) => ({ terminalId, owner: entry.owner }))
+      : [];
+    this.terminalOwners.delete(deviceSid);
+    return { released: true, terminals };
   }
 
-  getOwner(
+  getDeviceOwner(
     deviceSid: string,
-    role: "device" | "terminal",
   ): { owner: unknown; meta: WebRemoteControlRelayV2Device["meta"] } | undefined {
-    const slot = this.owners.get(deviceSid)?.[role];
+    const slot = this.deviceOwners.get(deviceSid);
     return slot ? { owner: slot.owner, meta: { ...slot.meta } } : undefined;
+  }
+
+  claimTerminal(
+    deviceSid: string,
+    terminalId: string,
+    meta: WebRemoteControlRelayV2Device["meta"],
+    owner: unknown,
+  ): { kicked: unknown | null; terminalIds: string[] } | null {
+    if (!this.devices.has(deviceSid)) return null;
+    let slots = this.terminalOwners.get(deviceSid);
+    if (!slots) {
+      slots = new Map();
+      this.terminalOwners.set(deviceSid, slots);
+    }
+    const kicked = slots.get(terminalId)?.owner ?? null;
+    slots.set(terminalId, { owner, meta: { ...meta } });
+    return { kicked, terminalIds: [...slots.keys()] };
+  }
+
+  releaseTerminal(
+    deviceSid: string,
+    terminalId: string,
+    owner: unknown,
+  ): { released: boolean; terminalIds: string[] } {
+    const slots = this.terminalOwners.get(deviceSid);
+    const slot = slots?.get(terminalId);
+    // 被同 id 新连接替换后的迟到 close 不能移除新 owner（引用身份比对）。
+    if (!slots || !slot || slot.owner !== owner) {
+      return { released: false, terminalIds: slots ? [...slots.keys()] : [] };
+    }
+    slots.delete(terminalId);
+    const terminalIds = [...slots.keys()];
+    if (slots.size === 0) this.terminalOwners.delete(deviceSid);
+    return { released: true, terminalIds };
+  }
+
+  getTerminalOwner(
+    deviceSid: string,
+    terminalId: string,
+  ): { owner: unknown; meta: WebRemoteControlRelayV2Device["meta"] } | undefined {
+    const slot = this.terminalOwners.get(deviceSid)?.get(terminalId);
+    return slot ? { owner: slot.owner, meta: { ...slot.meta } } : undefined;
+  }
+
+  listTerminalIds(deviceSid: string): string[] {
+    return [...(this.terminalOwners.get(deviceSid)?.keys() ?? [])];
   }
 
   serializeDevices(): {

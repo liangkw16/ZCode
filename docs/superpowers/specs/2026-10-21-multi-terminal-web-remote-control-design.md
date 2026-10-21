@@ -665,3 +665,41 @@ draft 工作区 host 状态**（14:04 版当天连续运行时页面正常，当
 待办：在桌面 UI 手动打开 draft 工作区（或新建任务）后重测页面；给 web 入口加临时诊断
 日志（IAB 无 devtools，需借 mobile-diagnostic 通道）定位页面放弃连接的确切原因。
 MT08/11/13 视觉级真机验收维持 blocked（协议级与单测级已通过）。
+
+## 架构变更：本机 relay + EasyTier 直连（2026-10-21 晚，替代 ECS）
+
+用户裁决：删除 ECS relay，relay 常驻 Mac 本机，手机经 EasyTier 组网直连
+（Mac 虚拟 IP `10.126.126.7`，utun0）。动机：ECS 直连带宽在晚高峰劣化到
+秒级延迟，6.8MB web 首载要数分钟；本机首载 <30ms。
+
+部署形态：
+
+- relay：`apps/self-host-relay/dist/main.js`（与原 ECS 同一 multi-terminal 产物），
+  LaunchAgent `com.zcode.self-host-relay` 常驻（绝对 node 路径；mise shim 在
+  LaunchAgent 上下文不可用）。SECRET 复用原 `zcodeRelaySelfHostKey`（手机端
+  密钥不变）；devicesFile `~/.kcode/self-host-relay/devices.json`；
+  staticRoot 直指 `packages/web/dist`（**build 即部署**）。
+- 桌面：`zcodeEndpointOrigin = http://10.126.126.7:8787`（origin 门控要求最终
+  手机页 URL 同源）；设备对本机 relay 重新注册（新 deviceSid）。
+- 手机 URL：`http://10.126.126.7:8787/remote/v4#k=<同一密钥>`（手机需加入同一
+  EasyTier 网络）。
+- ECS：self-host-relay 服务/文件/nginx vhost（kcode-remote.conf → .disabled）/
+  设备库全部移除；域名 kcode.lkw16vip.win 不再服务远控。
+- 切回 ECS 的路径：恢复 vhost + 重新部署 relay/web（git 里全套可重建），桌面
+  改回 endpointOrigin 并清设备记录。
+
+## 真机互踢验收记录（2026-10-21 晚，本机部署后完成）
+
+Playwright 驱动真实 Chrome（独立 profile，右侧可见窗口）× ZCode IAB 双页，
+同一 EasyTier/localhost relay：
+
+| 场景                                    | 结果                                                                 |
+| --------------------------------------- | -------------------------------------------------------------------- |
+| Chrome 持有「今天金价」→ IAB 打开同任务 | ✅ 桌面日志 `task view preempted`；Chrome 优雅退回任务列表（修复后） |
+| Chrome 刷新后重进同任务                 | ✅ IAB 被踢回任务列表（对称接管）                                    |
+| 被踢页禁入（修复前的失败页样本）        | ✅ bridge 断开 + 恢复重试全部被拒 → 超时失败页，输入无通道           |
+| 同浏览器两 tab                          | ✅ 焦点跟随（可见性语义），不互踢——与设计一致                        |
+
+验收过程中发现并修复两处真机缺陷（`54442ada` 入口吞点击重试、`3eb6b6d4`
+preempted 通知漏登运行时解析器 + 匹配放宽）。MT08/11/13 至此单测、协议级、
+视觉级三层验证齐备。

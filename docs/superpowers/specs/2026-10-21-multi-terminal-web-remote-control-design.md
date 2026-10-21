@@ -612,3 +612,17 @@ MT09 的同 id 替换正交）；不阻止两页打开同一 workspace 的不同
 - 构建备忘：必须走 `bundle.mjs`（其内部用 `pnpm exec electron-builder --config electron-builder.config.js`）。直接 `npx electron-builder` 不会加载 config（产物退化为 `com.electron.zcodedesktop` 默认身份），且缺 pnpm 环境时 electron-builder 按 npm 解析 hoisted 布局，只收集到 3 个包，afterPack 重打包因 staging 无 native 触发"重打包结果缺少 app.asar.unpacked"硬失败。
 
 验收状态：MT08（新语义）/MT11/MT12 已由单测覆盖（接管+资源不中断、抑制+对称再接管、断线重置抑制）；真机双页验收待用户重启 KCode 后执行。
+
+## 实现与部署记录：输入禁入（2026-10-21 第三批）
+
+实现：提交 `e5ea7f46`（抢占即断桥 + 禁入期拒绝 bridge-open + view=null 唯一解禁 + bridge-open
+去重释放代数防御）。门禁：typecheck / lint 0 error / architecture 0 violation；
+multi-terminal 72/72、关联套件 145/145。web 与 relay 无改动。
+
+部署：`bundle.mjs` 正规入口重建 KCode（`dev.zcode.app.kcode`，含禁入逻辑，
+runtime-dependencies 校验通过）并安装到 `/Applications/KCode.app`；生效仍需用户重启 KCode。
+本批与第二批（任务视图独占）合并生效：重启一次即可全部到位。
+
+真机验收要点（用户重启 KCode 后）：MT08 新语义（后开接管+旧页提示）、MT11（旧页退出后
+可再接管）、MT13（旧页禁入期无法重建 bridge——旧 web 显示失败提示、返回任务列表解禁；
+新 web 正常导航回家）；两页开不同任务互不影响（MT02 回归）。

@@ -223,9 +223,17 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
   let store2: RelayStore;
   let gateway2: { close(): Promise<void> };
 
+  // 可控时钟：本 describe 的用例总数会在 1 秒内打出 20+ 次 token 请求，恰好撞上
+  // 每 IP 20 req/s 限流的边界。每次 mint 前推进 60ms，让限流窗口自然滚动。
+  let routerNow = 0;
+  const tick = () => {
+    routerNow += 60;
+    return routerNow;
+  };
+
   beforeAll(async () => {
     store2 = new RelayStore({ newSid: () => `d_${Math.random().toString(36).slice(2)}` });
-    const router = createSelfHostRelayHttpRouter({ store: store2, secret: SECRET });
+    const router = createSelfHostRelayHttpRouter({ store: store2, secret: SECRET, now: tick });
     server2 = createServer((request, response) => {
       void router(request, response).then((handled) => {
         if (!handled) {
@@ -234,7 +242,7 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
         }
       });
     });
-    gateway2 = attachSelfHostRelayWsGateway(server2, { store: store2 });
+    gateway2 = attachSelfHostRelayWsGateway(server2, { store: store2, now: () => routerNow });
     server2.listen(0, "127.0.0.1");
     await once(server2, "listening");
     const port = (server2.address() as { port: number }).port;
@@ -254,6 +262,7 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
   }
 
   async function mint2(role: "device" | "terminal"): Promise<string> {
+    tick();
     const response = await fetch(`${base2}/api/v1/remote/token`, {
       method: "POST",
       headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
@@ -270,10 +279,19 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
     });
   }
 
-  async function auth2(role: "device" | "terminal", sidToUse: string) {
+  async function auth2(
+    role: "device" | "terminal",
+    sidToUse: string,
+    terminalId?: string,
+  ) {
     const connection = await open2(await mint2(role));
     connection.socket.send(
-      JSON.stringify({ type: "auth_init", device_sid: sidToUse, meta: { name: "takeover-test" } }),
+      JSON.stringify({
+        type: "auth_init",
+        device_sid: sidToUse,
+        ...(terminalId ? { terminal_id: terminalId } : {}),
+        meta: { name: "takeover-test" },
+      }),
     );
     return connection;
   }
@@ -287,25 +305,169 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   };
 
-  it("官方语义：现任 terminal 活跃时新 terminal 立即接管并踢旧（换设备秒切）", async () => {
+  it("不同 terminal_id 共存：两个页面都 matched，互不 KICKED", async () => {
     const sid = freshSid();
     const device = await auth2("device", sid);
     await device.messages.next();
-    const incumbent = await auth2("terminal", sid);
-    await incumbent.messages.next(); // auth_ack matched
 
-    // 现任（活跃心跳）期间新设备接入：立即接管，不排队不拒绝
-    incumbent.socket.send(JSON.stringify({ type: "pair_status_query" }));
-    await incumbent.messages.next();
-    const newcomer = await auth2("terminal", sid);
-    expect(await newcomer.messages.next()).toMatchObject({
+    const a = await auth2("terminal", sid, "tA");
+    expect(await a.messages.next()).toMatchObject({
       type: "auth_ack",
       pair_status: "matched",
+      terminal_id: "tA",
     });
-    expect(await incumbent.messages.next()).toMatchObject({ type: "error", code: "KICKED" });
-    await waitClosed(incumbent.socket);
+    expect(await device.messages.next()).toMatchObject({
+      type: "pair_status_ack",
+      pair_status: "matched",
+      terminal_ids: ["tA"],
+    });
+
+    const b = await auth2("terminal", sid, "tB");
+    expect(await b.messages.next()).toMatchObject({
+      type: "auth_ack",
+      pair_status: "matched",
+      terminal_id: "tB",
+    });
+    expect(await device.messages.next()).toMatchObject({
+      type: "pair_status_ack",
+      pair_status: "matched",
+      terminal_ids: ["tA", "tB"],
+    });
+
+    a.socket.send(JSON.stringify({ type: "data", payload: { from: "a" } }));
+    expect(await device.messages.next()).toMatchObject({
+      type: "data",
+      payload: { from: "a" },
+      from_terminal_id: "tA",
+    });
+
+    device.socket.send(
+      JSON.stringify({ type: "data", payload: { to: "b" }, target_terminal_id: "tB" }),
+    );
+    expect(await b.messages.next()).toMatchObject({ type: "data", payload: { to: "b" } });
+
+    // 共存不变量：B 全程接入、定向收发之后，A 仍然在线。
+    expect(a.socket.readyState).toBe(WebSocket.OPEN);
+    a.socket.close();
     device.socket.close();
-    newcomer.socket.close();
+    b.socket.close();
+  });
+
+  it("terminal 先在线等待，device 上线后拿到 terminal_ids 并配对", async () => {
+    const sid = freshSid();
+    const terminal = await auth2("terminal", sid, "tA");
+    expect(await terminal.messages.next()).toMatchObject({
+      type: "auth_ack",
+      pair_status: "waiting",
+    });
+
+    const device = await auth2("device", sid);
+    expect(await device.messages.next()).toMatchObject({
+      type: "auth_ack",
+      pair_status: "matched",
+      terminal_ids: ["tA"],
+    });
+    expect(await terminal.messages.next()).toMatchObject({
+      type: "pair_status_ack",
+      pair_status: "matched",
+    });
+
+    device.socket.close();
+    terminal.socket.close();
+  });
+
+  it("单个 terminal 断开只更新 device 的集合，不关闭其他 terminal", async () => {
+    const sid = freshSid();
+    const device = await auth2("device", sid);
+    await device.messages.next();
+    const a = await auth2("terminal", sid, "tA");
+    await a.messages.next();
+    await device.messages.next();
+    const b = await auth2("terminal", sid, "tB");
+    await b.messages.next();
+    await device.messages.next();
+
+    a.socket.close();
+    expect(await device.messages.next()).toMatchObject({
+      type: "pair_status_ack",
+      pair_status: "matched",
+      terminal_ids: ["tB"],
+    });
+    device.socket.send(JSON.stringify({ type: "pair_status_query" }));
+    expect(await device.messages.next()).toMatchObject({
+      type: "pair_status_ack",
+      pair_status: "matched",
+      terminal_ids: ["tB"],
+    });
+    device.socket.close();
+    b.socket.close();
+  });
+
+  it("device 断开时通知并关闭全部 terminal", async () => {
+    const sid = freshSid();
+    const device = await auth2("device", sid);
+    await device.messages.next();
+    const a = await auth2("terminal", sid, "tA");
+    await a.messages.next();
+    await device.messages.next();
+    const b = await auth2("terminal", sid, "tB");
+    await b.messages.next();
+    await device.messages.next();
+
+    device.socket.close();
+    for (const terminal of [a, b]) {
+      expect(await terminal.messages.next()).toMatchObject({
+        type: "pair_status_ack",
+        pair_status: "waiting",
+      });
+      expect(await terminal.messages.next()).toMatchObject({
+        type: "error",
+        code: "DEVICE_OFFLINE",
+      });
+      await waitClosed(terminal.socket);
+    }
+  });
+
+  it("同 terminal_id 重连只踢旧连接", async () => {
+    const sid = freshSid();
+    const device = await auth2("device", sid);
+    await device.messages.next();
+    const first = await auth2("terminal", sid, "tSame");
+    await first.messages.next();
+    await device.messages.next();
+
+    const second = await auth2("terminal", sid, "tSame");
+    expect(await second.messages.next()).toMatchObject({
+      type: "auth_ack",
+      terminal_id: "tSame",
+    });
+    expect(await first.messages.next()).toMatchObject({ type: "error", code: "KICKED" });
+    await waitClosed(first.socket);
+    device.socket.close();
+    second.socket.close();
+  });
+
+  it("未提供 terminal_id 的旧客户端不收到新字段，且以连接级 sid 作为生效 id", async () => {
+    const sid = freshSid();
+    const device = await auth2("device", sid);
+    await device.messages.next();
+    const a = await auth2("terminal", sid);
+    const ackA = await a.messages.next();
+    expect(ackA.type).toBe("auth_ack");
+    // 旧 web 的 strict 解析不认识 terminal_id：未声明能力的客户端不能看到该字段。
+    expect(ackA).not.toHaveProperty("terminal_id");
+    const deviceListA = await device.messages.next();
+    expect(deviceListA).toMatchObject({ type: "pair_status_ack", pair_status: "matched" });
+    expect(deviceListA.terminal_ids).toEqual([ackA.terminal_sid]);
+    const b = await auth2("terminal", sid);
+    const ackB = await b.messages.next();
+    expect(ackB).not.toHaveProperty("terminal_id");
+    expect(ackB.terminal_sid).not.toBe(ackA.terminal_sid);
+    const deviceListB = await device.messages.next();
+    expect(deviceListB.terminal_ids).toEqual([ackA.terminal_sid, ackB.terminal_sid]);
+    device.socket.close();
+    a.socket.close();
+    b.socket.close();
   });
 
   it("已删除 SID 返回 AUTH_FAILED（契约 §1.2）", async () => {

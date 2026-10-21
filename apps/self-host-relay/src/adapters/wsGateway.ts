@@ -12,11 +12,14 @@ import type { SelfHostRelayStore } from "../contract.js";
 export interface SelfHostRelayWsGatewayOptions {
   store: SelfHostRelayStore;
   now?: () => number;
+  /** 单设备 terminal 集合上限；超出回 KICKED，防异常客户端无限建 session。 */
+  maxTerminals?: number;
 }
 
 interface RelayConnection {
   role: WebRemoteControlRelayV2Role;
   terminalSid: string;
+  terminalId: string | null;
   deviceSid: string | null;
   ownerRef: unknown;
   socket: WebSocket;
@@ -28,6 +31,7 @@ export function attachSelfHostRelayWsGateway(
 ): { close(): Promise<void> } {
   const now = options.now ?? Date.now;
   const store = options.store;
+  const maxTerminals = options.maxTerminals ?? 32;
   const wsServer = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
   const connections = new Map<unknown, RelayConnection>();
 
@@ -37,11 +41,19 @@ export function attachSelfHostRelayWsGateway(
     }
   };
 
-  const peerOf = (connection: RelayConnection): RelayConnection | undefined => {
-    if (!connection.deviceSid) return undefined;
-    const otherRole: WebRemoteControlRelayV2Role = connection.role === "device" ? "terminal" : "device";
-    const owner = store.getOwner(connection.deviceSid, otherRole);
-    return owner ? connections.get(owner.owner) : undefined;
+  const deviceConnectionOf = (deviceSid: string): RelayConnection | undefined => {
+    const slot = store.getDeviceOwner(deviceSid);
+    return slot ? connections.get(slot.owner) : undefined;
+  };
+
+  const terminalConnectionsOf = (deviceSid: string): RelayConnection[] => {
+    const result: RelayConnection[] = [];
+    for (const terminalId of store.listTerminalIds(deviceSid)) {
+      const slot = store.getTerminalOwner(deviceSid, terminalId);
+      const connection = slot ? connections.get(slot.owner) : undefined;
+      if (connection) result.push(connection);
+    }
+    return result;
   };
 
   server.on("upgrade", (request, socket, head) => {
@@ -64,6 +76,7 @@ export function attachSelfHostRelayWsGateway(
       const connection: RelayConnection = {
         role,
         terminalSid: role === "terminal" ? `t_${randomUUID()}` : "",
+        terminalId: null,
         deviceSid: null,
         ownerRef: {},
         socket: ws,
@@ -87,19 +100,67 @@ export function attachSelfHostRelayWsGateway(
           return;
         }
         if (message.type === "auth_init") {
-          if (connection.deviceSid) {
+          if (connection.deviceSid || connection.terminalId) {
             send(connection, { type: "error", code: "WRONG_PARAM" });
             ws.close();
             return;
           }
-          // 恢复官方"新替旧"语义（spec 追记三 §3.1 修订记录）：现任保护/排队接管在实测中
-          // 阻断了"换设备控制"这一真实需求（新设备排队→KICKED×2→"已被接管"终态页，
-          // 用户视角即页面打不开）。官方语义下新 terminal 立即接管，旧页面由客户端
-          // kickedDelay 双踢终态机制在 ~10s 内自然收敛退出，不会无限互踢。
-          // 设备不存在（含已删除 SID）仍回 AUTH_FAILED（契约 §1.2）。
-          const claimed = store.claimOwnership(
+          if (connection.role === "terminal") {
+            const terminalId = (message.terminal_id ?? connection.terminalSid).trim();
+            if (
+              !store.getTerminalOwner(message.device_sid, terminalId) &&
+              store.listTerminalIds(message.device_sid).length >= maxTerminals
+            ) {
+              // 复用 KICKED 的"有限重连后终止"客户端路径，避免异常客户端无限占资源。
+              console.warn("[self-host-relay] terminal limit reached, rejecting", {
+                deviceSid: message.device_sid,
+                maxTerminals,
+              });
+              send(connection, { type: "error", code: "KICKED" });
+              ws.close();
+              return;
+            }
+            const claimed = store.claimTerminal(
+              message.device_sid,
+              terminalId,
+              message.meta ?? {},
+              connection.ownerRef,
+            );
+            if (!claimed) {
+              send(connection, { type: "error", code: "AUTH_FAILED" });
+              ws.close();
+              return;
+            }
+            const kickedConnection = claimed.kicked ? connections.get(claimed.kicked) : undefined;
+            if (kickedConnection) {
+              send(kickedConnection, { type: "error", code: "KICKED" });
+              kickedConnection.socket.close();
+            }
+            connection.deviceSid = message.device_sid;
+            connection.terminalId = terminalId;
+            const device = deviceConnectionOf(message.device_sid);
+            const pairStatus = device ? "matched" : "waiting";
+            // 兼容开关：仅当 terminal 自己携带 terminal_id 时才回显该字段。
+            // 旧 web 的 strict schema 会拒绝未知字段，无条件回显会让旧页面认证超时重连。
+            send(connection, {
+              type: "auth_ack",
+              device_sid: message.device_sid,
+              terminal_sid: connection.terminalSid,
+              ...(message.terminal_id ? { terminal_id: terminalId } : {}),
+              pair_status: pairStatus,
+            });
+            if (device) {
+              send(device, {
+                type: "pair_status_ack",
+                pair_status: "matched",
+                terminal_ids: claimed.terminalIds,
+              });
+            }
+            return;
+          }
+
+          const claimed = store.claimDevice(
             message.device_sid,
-            connection.role,
             message.meta ?? {},
             connection.ownerRef,
           );
@@ -114,18 +175,20 @@ export function attachSelfHostRelayWsGateway(
             kickedConnection.socket.close();
           }
           connection.deviceSid = message.device_sid;
-          const peer = peerOf(connection);
-          const pairStatus = peer ? "matched" : "waiting";
-          if (peer) {
-            // 契约：认证即配对时，对端收 pair_status_ack(matched)；terminal_sid 推送 ACK 为空。
-            send(peer, { type: "pair_status_ack", pair_status: "matched", terminal_sid: "" });
-          }
+          const terminalIds = store.listTerminalIds(message.device_sid);
+          const pairStatus = terminalIds.length > 0 ? "matched" : "waiting";
           send(connection, {
             type: "auth_ack",
             device_sid: message.device_sid,
-            terminal_sid: connection.terminalSid,
+            terminal_sid: "",
+            terminal_ids: terminalIds,
             pair_status: pairStatus,
           });
+          if (terminalIds.length > 0) {
+            for (const terminal of terminalConnectionsOf(message.device_sid)) {
+              send(terminal, { type: "pair_status_ack", pair_status: "matched", terminal_sid: "" });
+            }
+          }
           return;
         }
         if (!connection.deviceSid) {
@@ -134,35 +197,91 @@ export function attachSelfHostRelayWsGateway(
           return;
         }
         if (message.type === "pair_status_query") {
-          const peer = peerOf(connection);
+          if (connection.role === "terminal") {
+            const device = deviceConnectionOf(connection.deviceSid);
+            send(connection, {
+              type: "pair_status_ack",
+              pair_status: device ? "matched" : "waiting",
+              terminal_sid: "",
+            });
+            return;
+          }
+          const terminalIds = store.listTerminalIds(connection.deviceSid);
           send(connection, {
             type: "pair_status_ack",
-            pair_status: peer ? "matched" : "waiting",
-            terminal_sid: peer?.terminalSid ?? "",
+            pair_status: terminalIds.length > 0 ? "matched" : "waiting",
+            terminal_sid: "",
+            terminal_ids: terminalIds,
           });
           return;
         }
-        const peer = peerOf(connection);
-        if (peer) send(peer, { type: "data", payload: message.payload });
-        else send(connection, { type: "error", code: "INTERNAL" });
+        if (message.type === "data") {
+          if (connection.role === "terminal") {
+            const device = deviceConnectionOf(connection.deviceSid);
+            if (!device) {
+              send(connection, { type: "error", code: "INTERNAL" });
+              return;
+            }
+            send(device, {
+              type: "data",
+              payload: message.payload,
+              from_terminal_id: connection.terminalId ?? "",
+            });
+            return;
+          }
+          const targetId = message.target_terminal_id;
+          if (targetId) {
+            const slot = store.getTerminalOwner(connection.deviceSid, targetId);
+            const target = slot ? connections.get(slot.owner) : undefined;
+            if (!target) {
+              // 过期目标是常态（页面刚断开）：丢弃即可，不能回 INTERNAL 触发 device 重连。
+              console.debug("[self-host-relay] dropping data for unknown terminal", { targetId });
+              return;
+            }
+            send(target, { type: "data", payload: message.payload });
+            return;
+          }
+          const terminals = terminalConnectionsOf(connection.deviceSid);
+          if (terminals.length === 0) {
+            send(connection, { type: "error", code: "INTERNAL" });
+            return;
+          }
+          for (const terminal of terminals) {
+            send(terminal, { type: "data", payload: message.payload });
+          }
+          return;
+        }
       });
       ws.on("close", () => {
         connections.delete(connection.ownerRef);
         if (!connection.deviceSid) return;
-        // 按引用身份释放：被 KICKED 替换后的迟到 close 不能拆新 owner。
-        const released = store.releaseOwnership(
+
+        if (connection.role === "device") {
+          const released = store.releaseDevice(connection.deviceSid, connection.ownerRef);
+          if (!released.released) return;
+          for (const terminal of released.terminals) {
+            const target = connections.get(terminal.owner);
+            if (!target) continue;
+            send(target, { type: "pair_status_ack", pair_status: "waiting", terminal_sid: "" });
+            send(target, { type: "error", code: "DEVICE_OFFLINE" });
+            target.socket.close();
+          }
+          return;
+        }
+
+        const released = store.releaseTerminal(
           connection.deviceSid,
-          connection.role,
+          connection.terminalId ?? connection.terminalSid,
           connection.ownerRef,
         );
-        if (!released) return;
-        const peer = peerOf(connection);
-        if (peer) {
-          send(peer, { type: "pair_status_ack", pair_status: "waiting", terminal_sid: "" });
-          if (connection.role === "device") {
-            send(peer, { type: "error", code: "DEVICE_OFFLINE" });
-            peer.socket.close();
-          }
+        if (!released.released) return;
+        const device = deviceConnectionOf(connection.deviceSid);
+        if (device) {
+          send(device, {
+            type: "pair_status_ack",
+            pair_status: released.terminalIds.length > 0 ? "matched" : "waiting",
+            terminal_ids: released.terminalIds,
+          });
         }
       });
     });

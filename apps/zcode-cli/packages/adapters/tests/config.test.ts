@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ConfigScope, ConfigScopePriority } from "@zcode/contracts";
-import { createConfig, mergeConfigs, updateUiLocaleInFileConfig } from "../src/config/index.js";
+import { ConfigKey, ConfigScope, ConfigScopePriority } from "@zcode/contracts";
+import {
+  createConfig,
+  createConfigPort,
+  mergeConfigs,
+  updateUiLocaleInFileConfig,
+} from "../src/config/index.js";
 import { parseEnvConfig } from "../src/config/env-config.adapter.js";
 import {
   addSuppressedBuiltinInFileConfig,
@@ -560,6 +565,75 @@ describe("config adapters", () => {
     expect(merged.compact).toEqual({
       bufferTokens: 8_000,
       microcompact: { enabled: true, keepRecentToolResults: 3, minTokenSavings: 512 },
+    });
+  });
+
+  it("merges compact.modelOverrides per provider, model and field across scopes", () => {
+    const userLayer = {
+      compact: {
+        modelOverrides: {
+          "provider-a": {
+            "Model-One": { contextWindowTokens: 400_000 },
+            "Model-Two": { thresholdRatio: 0.8 },
+          },
+          "provider-b": { "Model-Three": { bufferTokens: 9_000 } },
+        },
+      },
+    };
+    const projectLayer = {
+      compact: {
+        modelOverrides: { "provider-a": { "Model-One": { thresholdRatio: 0.76 } } },
+      },
+    };
+
+    const merged = mergeConfigs(
+      { config: userLayer, scope: ConfigScope.User, priority: ConfigScopePriority[ConfigScope.User] },
+      {
+        config: projectLayer,
+        scope: ConfigScope.Project,
+        priority: ConfigScopePriority[ConfigScope.Project],
+      },
+    );
+
+    // Project 层只改 provider-a/Model-One 的一个字段：其余 provider、model、字段必须保留。
+    expect(merged.compact?.modelOverrides).toEqual({
+      "provider-a": {
+        "Model-One": { contextWindowTokens: 400_000, thresholdRatio: 0.76 },
+        "Model-Two": { thresholdRatio: 0.8 },
+      },
+      "provider-b": { "Model-Three": { bufferTokens: 9_000 } },
+    });
+    // 合并不修改输入对象。
+    expect(userLayer.compact.modelOverrides?.["provider-a"]?.["Model-One"]).toEqual({
+      contextWindowTokens: 400_000,
+    });
+  });
+
+  it("keeps compact.modelOverrides across repeated incremental config port merges", () => {
+    const port = createConfigPort({
+      compact: {
+        modelOverrides: {
+          "provider-a": {
+            "Model-One": { contextWindowTokens: 400_000 },
+            "Model-Two": { thresholdRatio: 0.8 },
+          },
+          "provider-b": { "Model-Three": { bufferTokens: 9_000 } },
+        },
+      },
+    });
+
+    port.merge(
+      { compact: { modelOverrides: { "provider-a": { "Model-One": { thresholdRatio: 0.76 } } } } },
+      ConfigScope.Project,
+    );
+
+    // 增量 merge 与启动 mergeConfigs 必须同语义：高优先层只改一个字段时不丢其他条目。
+    expect(port.get(ConfigKey.Compact)?.modelOverrides).toEqual({
+      "provider-a": {
+        "Model-One": { contextWindowTokens: 400_000, thresholdRatio: 0.76 },
+        "Model-Two": { thresholdRatio: 0.8 },
+      },
+      "provider-b": { "Model-Three": { bufferTokens: 9_000 } },
     });
   });
 

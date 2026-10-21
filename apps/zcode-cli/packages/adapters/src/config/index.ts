@@ -13,6 +13,8 @@ import {
   DefaultRuntimeConfig as DefaultConfig,
 } from "@zcode/contracts";
 
+import { mergeCompactModelOverrides } from "./compact-model-overrides-merge.js";
+
 type Handler<K extends ConfigKey> = (value: ConfigValue<K>, prev: ConfigValue<K>) => void;
 type AllHandler = (key: ConfigKey, value: unknown, prev: unknown) => void;
 
@@ -208,6 +210,12 @@ class ConfigStore {
     }
     if (config.compact) {
       const previous = this.get(ConfigKey.Compact) ?? DefaultConfig.compact;
+      // 与启动 mergeConfigs 共用三层合并 helper：增量 merge 只改一个模型字段时
+      // 不能丢掉已合并的其他条目，否则两条路径产生不同语义。
+      const mergedModelOverrides = mergeCompactModelOverrides(
+        previous.modelOverrides,
+        config.compact.modelOverrides,
+      );
       this.set(
         ConfigKey.Compact,
         {
@@ -223,6 +231,7 @@ class ConfigStore {
                 },
               }
             : {}),
+          ...(mergedModelOverrides !== undefined ? { modelOverrides: mergedModelOverrides } : {}),
         },
         scope,
       );

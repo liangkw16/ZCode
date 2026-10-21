@@ -8,6 +8,8 @@ import type {
 } from "@zcode/contracts";
 import { ConfigScope, ConfigScopePriority } from "@zcode/contracts";
 
+import { mergeCompactModelOverrides } from "./compact-model-overrides-merge.js";
+
 type PluginOptions = Record<string, PluginOptionValues>;
 
 /**
@@ -147,6 +149,10 @@ export function mergeConfigs(...configs: PrioritizedConfig[]): RuntimeConfigPatc
       result.hooks = mergeHooksConfig(previousHooks, config.hooks);
     }
     if (config.compact) {
+      const mergedModelOverrides = mergeCompactModelOverrides(
+        previousCompact?.modelOverrides,
+        config.compact.modelOverrides,
+      );
       result.compact = {
         // Object.assign 已把 result.compact 指向当前高优先级层；必须从 previousCompact
         // 开始构造，否则低优先层只写 compact 顶层字段时会被整段覆盖丢失。
@@ -161,6 +167,8 @@ export function mergeConfigs(...configs: PrioritizedConfig[]): RuntimeConfigPatc
               },
             }
           : {}),
+        // modelOverrides 与 microcompact 同理：provider→model→字段三层逐级合并，不做整表替换。
+        ...(mergedModelOverrides !== undefined ? { modelOverrides: mergedModelOverrides } : {}),
       };
     }
     if (config.ui) {

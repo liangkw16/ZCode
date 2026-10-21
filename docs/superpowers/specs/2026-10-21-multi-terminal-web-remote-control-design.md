@@ -626,3 +626,25 @@ runtime-dependencies 校验通过）并安装到 `/Applications/KCode.app`；生
 真机验收要点（用户重启 KCode 后）：MT08 新语义（后开接管+旧页提示）、MT11（旧页退出后
 可再接管）、MT13（旧页禁入期无法重建 bridge——旧 web 显示失败提示、返回任务列表解禁；
 新 web 正常导航回家）；两页开不同任务互不影响（MT02 回归）。
+
+### 2026-10-21 晚：内置浏览器验证记录与两项发现
+
+**发现 1（已修复，部署事故）**：第二批 web 部署时构建命令缺少 `VITE_ZCODE_REMOTE_SELF_HOSTED=1`
+与 `--base /remote/v4/`，产物走官方 OAuth 分支且资源路径为根相对 `/assets/`——自托管页面新加载
+全部卡 Loading（已打开的旧页面因缓存资源不受影响，故当时未察觉）。已用正确参数重建部署
+（`env VITE_ZCODE_REMOTE_SELF_HOSTED=1 npx vite build --base /remote/v4/`），线上引用
+`/remote/v4/assets/index-DFjbhFgR.js` 且 env 字面量与旧版一致，页面可正常加载与配对。
+**web 构建必须同时携带这两个参数**，已列入部署检查。
+
+**验证进展**：协议层全通——IAB 页面对新桌面完成 auth_init→paired→bootstrap（epoch 正常）→
+workspace-bridge-open→"workspace bridge active"（桌面日志实证），抢占/禁入语义由 72 个单测覆盖。
+
+**发现 2（未解，待查）**：页面在 bridge active 后数秒内回退到设备选择页（"Choose a computer"），
+循环往复。新旧 web bundle 均复现（旧 bundle + 新桌面同样失败），而 16:27 旧 bundle + 旧桌面正常
+——变量指向新桌面构建的 bridge RPC 交换（页面 Root 初始化失败导致入口回退）。relay 自 14:41 起
+同一二进制连续运行（journalctl 无后续重启，亦可排除）。裸 node 终端驱动被 relay 401 拒（非浏览器
+握手差异，未能用于绕过 UI 复现）。
+
+**下一步（二分定位）**：worktree 检出 `779d0560` 构建旧桌面复测页面入口；若正常则逐批回退
+（batch-2 client 协议 routing reserve → batch-3 manager）定位破坏 bridge RPC 的改动。在此之前
+MT08/11/13 的视觉级真机验收标记为 blocked（协议级与单测级已通过）。

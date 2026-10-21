@@ -62,3 +62,26 @@ describe("WebRemoteControlRelayPayloadSerializer", () => {
     );
   });
 });
+
+describe("targeted serialization", () => {
+  it("includes target_terminal_id in JSON, byte count and cache key", () => {
+    const serializer = new WebRemoteControlRelayPayloadSerializer();
+    const payload: WebRemoteControlAppPayload = {
+      zcode_type: "bootstrap-request",
+      requestId: "request-targeted",
+    };
+
+    const targeted = serializer.prepare(payload, 100, "t_a");
+    expect(targeted.message).toMatchObject({ target_terminal_id: "t_a" });
+    expect(JSON.parse(targeted.json).target_terminal_id).toBe("t_a");
+    expect(targeted.bytes).toBe(new TextEncoder().encode(targeted.json).byteLength);
+    expect(serializer.prepare(payload, 200, "t_a")).toBe(targeted);
+
+    const other = serializer.prepare(payload, 100, "t_b");
+    expect(other).not.toBe(targeted);
+    expect(JSON.parse(other.json).target_terminal_id).toBe("t_b");
+
+    const untargeted = serializer.prepare(payload, 100);
+    expect(JSON.parse(untargeted.json).target_terminal_id).toBeUndefined();
+  });
+});

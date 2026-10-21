@@ -14,6 +14,7 @@ import {
   createWebRemoteControlRelayProtocol,
 } from "../src/webRemoteControlRelayProtocol.js";
 import { AcknowledgedRelayBatchQueue } from "../src/webRemoteControlAcknowledgedRelayBatchQueue.js";
+import { WebRemoteControlRelayPayloadSerializer } from "../src/webRemoteControlRelayPayloadSerializer.js";
 import type { AcknowledgedRelayOutboundBatch } from "../src/webRemoteControlAcknowledgedRelayProtocolTypes.js";
 
 const acknowledgedIdentity = {
@@ -323,6 +324,46 @@ describe("createWebRemoteControlRelayProtocol", () => {
 describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("分片预算为 relay 路由字段预留余量：追加 target/from 字段后仍不超 1MiB", () => {
+    const outbound: WebRemoteControlRpcTransportPayload[] = [];
+    const sender = createAcknowledgedWebRemoteControlRelayProtocol({
+      ...acknowledgedIdentity,
+      sendFrame: (payload) => {
+        outbound.push(payload);
+        return true;
+      },
+    });
+    // codex 复现尺寸：900_000 字节消息按裸 envelope 贴满 1MiB 分片，
+    // 追加路由字段后达 1_048_603 > 1_048_576。
+    const bytes = new Uint8Array(900_000).fill(65);
+    sender.protocol.send(VSBuffer.wrap(bytes));
+
+    const frames = outbound.filter(isTransportFrame);
+    expect(frames.length).toBeGreaterThan(0);
+    expect(sender.isDegraded()).toBe(false);
+    const limit = WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxPhysicalFrameBytes;
+    // 最坏合法 terminal_id：identifier 上限 128 字符，控制字符 JSON 转义后每字符 6 字节。
+    const worstTerminalId = "\u0000".repeat(128);
+    const serializer = new WebRemoteControlRelayPayloadSerializer();
+    for (const frame of frames) {
+      // desktop 方向：serializer 附加 target_terminal_id 后的实际发送字节。
+      expect(serializer.prepare(frame, 1_800_000_000, worstTerminalId).bytes).toBeLessThanOrEqual(
+        limit,
+      );
+      // web 方向：relay 附加 from_terminal_id 后 device 收到的字节。
+      expect(
+        new TextEncoder().encode(
+          JSON.stringify({
+            type: "data",
+            payload: frame,
+            from_terminal_id: worstTerminalId,
+            server_ts: 1_800_000_000,
+          }),
+        ).byteLength,
+      ).toBeLessThanOrEqual(limit);
+    }
   });
 
   it("splits oversized raw messages and only delivers/ACKs after the final fragment", () => {

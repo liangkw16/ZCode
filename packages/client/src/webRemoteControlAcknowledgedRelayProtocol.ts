@@ -1,5 +1,6 @@
 import { Emitter, VSBuffer, type IMessagePassingProtocol } from "@zcode/rpc";
 import {
+  WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS,
   WebRemoteControlRpcTransportAssembler,
   WebRemoteControlRpcTransportEncodingError,
   encodeWebRemoteControlRpcTransportMessage,
@@ -129,6 +130,11 @@ class AcknowledgedRelayProtocol implements AcknowledgedWebRemoteControlRelayProt
         ...this.identity,
         firstPhysicalSeq: this.nextPhysicalSeq,
         messageSeq: this.nextMessageSeq,
+        // 分片后 wire envelope 还会被追加路由字段（desktop 侧 target_terminal_id，
+        // relay 侧 from_terminal_id）；不预留余量的贴满分片会在发送前被判 oversize。
+        maxPhysicalFrameBytes:
+          WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxPhysicalFrameBytes -
+          WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.routingFieldReserveBytes,
       });
     } catch (error) {
       this.enterDegraded({

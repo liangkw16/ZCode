@@ -9,6 +9,11 @@ import {
 
 export const WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS = {
   maxPhysicalFrameBytes: PROTOCOL_V4_LIMITS.maxFrameBytes,
+  // relay 多 terminal 路由字段（target/from_terminal_id）在分片之后追加到最终 wire envelope；
+  // identifier 上限 128 字符、控制字符 JSON 转义最坏 6 字节/字符，加字段名与引号 <1024。
+  // 分片预算按本值预留，否则贴满 1MiB 的合法大 RPC 会在追加路由字段后被 oversize 拒绝
+  // 并 degraded bridge。
+  routingFieldReserveBytes: 1024,
   maxMessageBytes: 16 * 1024 * 1024,
   maxFragments: 64,
   assemblyTimeoutMs: 30_000,

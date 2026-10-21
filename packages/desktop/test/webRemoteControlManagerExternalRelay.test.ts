@@ -67,7 +67,11 @@ function createManagerHarness(options?: {
     (await options?.getEndpointUrls?.())?.origin ?? "https://zcode.z.ai";
   let startupRestoreContext = options?.startupRestoreContext;
   let transportStartCount = 0;
-  let deliverPayload: ((payload: WebRemoteControlAppPayload) => void) | undefined;
+  const sentTargets: (string | undefined)[] = [];
+  let emitTerminalIds: ((terminalIds: string[]) => void) | undefined;
+  let deliverPayload:
+    | ((payload: WebRemoteControlAppPayload, terminalId?: string) => void)
+    | undefined;
   let latestTransportOptions:
     | Parameters<
         NonNullable<Parameters<typeof createWebRemoteControlManager>[0]["createDeviceTransport"]>
@@ -81,9 +85,10 @@ function createManagerHarness(options?: {
   const disposeTransport = vi.fn();
   const reportRemoteUsageEvent = options?.reportRemoteUsageEvent ?? vi.fn();
   const reportRendererTelemetryEvent = vi.fn();
+  let attachmentSeq = 0;
   const defaultAttachWorkspaceHost = vi.fn(async () => ({
-    entryId: "entry-1",
-    attachmentId: "attachment-1",
+    entryId: `entry-${++attachmentSeq}`,
+    attachmentId: `attachment-${attachmentSeq}`,
     process: {} as never,
     port: createFakePort() as never,
   }));
@@ -156,6 +161,7 @@ function createManagerHarness(options?: {
         const markReady = async () => {
           await transportOptions.resolveDeviceSid(new AbortController().signal, false);
           deliverPayload = transportOptions.onPayload;
+          emitTerminalIds = transportOptions.onTerminalIdsChange;
           transportOptions.onStateChange("waiting_terminal");
         };
         if (options?.delayReadyMs !== undefined) {
@@ -172,10 +178,11 @@ function createManagerHarness(options?: {
         return true;
       },
       measurePayloadBytes: (payload) => JSON.stringify(payload).length,
-      sendPayloadResult: (payload) => {
+      sendPayloadResult: (payload, targetTerminalId) => {
         if (options?.canSendPayload && !options.canSendPayload()) {
           return { kind: "unavailable" as const };
         }
+        sentTargets.push(targetTerminalId);
         sentPayloads.push(payload);
         return { kind: "sent" as const, bytes: JSON.stringify(payload).length };
       },
@@ -196,11 +203,18 @@ function createManagerHarness(options?: {
     sentPayloads,
     getStartupRestoreContext: () => startupRestoreContext,
     getLatestTransportOptions: () => latestTransportOptions,
-    deliverPayload: (payload: WebRemoteControlAppPayload) => {
+    sentTargets,
+    emitTerminalIds: (terminalIds: string[]) => {
+      if (!emitTerminalIds) {
+        throw new Error("transport not started");
+      }
+      emitTerminalIds(terminalIds);
+    },
+    deliverPayload: (payload: WebRemoteControlAppPayload, terminalId?: string) => {
       if (!deliverPayload) {
         throw new Error("transport not started");
       }
-      deliverPayload(payload);
+      deliverPayload(payload, terminalId);
     },
     emitTransportState: (state: Parameters<NonNullable<typeof emitTransportState>>[0]) => {
       if (!emitTransportState) {
@@ -244,6 +258,35 @@ async function createPrimedWorkspaceSyncHarness(
 }
 
 describe("createWebRemoteControlManager external relay", () => {
+  it("带 terminalId 的请求响应会定向发送；缺省时保持旧行为", async () => {
+    const h = createManagerHarness();
+    await h.manager.start(1, { workspacePath: localWorkspace.workspacePath });
+    h.emitTransportState("paired");
+    h.sentPayloads.length = 0;
+    h.sentTargets.length = 0;
+
+    h.deliverPayload({ zcode_type: "bootstrap-request", requestId: "r-a" }, "tA");
+    h.deliverPayload({ zcode_type: "bootstrap-request", requestId: "r-b" });
+    await vi.waitFor(() =>
+      expect(
+        h.sentPayloads.filter((p) => p.zcode_type === "bootstrap-response"),
+      ).toHaveLength(2),
+    );
+
+    const bootstrapTargets = h.sentPayloads
+      .map((payload, index) => ({ payload, target: h.sentTargets[index] }))
+      .filter((entry) => entry.payload.zcode_type === "bootstrap-response")
+      .map((entry) => entry.target);
+    expect(bootstrapTargets).toEqual(["tA", undefined]);
+    expect(h.sentPayloads).toContainEqual(
+      expect.objectContaining({
+        zcode_type: "bootstrap-response",
+        requestId: "r-a",
+      }),
+    );
+    await h.manager.stop(1);
+  });
+
   it("returns the desktop's own version before a workspace bridge is attached", async () => {
     const h = createManagerHarness();
     await h.manager.start(1, { workspacePath: localWorkspace.workspacePath });

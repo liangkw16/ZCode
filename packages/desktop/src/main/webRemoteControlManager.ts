@@ -86,8 +86,11 @@ interface WorkspaceBridgeRuntime {
 interface WebRemoteControlDeviceTransportLike {
   start(): void;
   sendPayload(payload: WebRemoteControlAppPayload): boolean;
-  sendPayloadResult?(payload: WebRemoteControlAppPayload): WebRemoteControlPayloadSendResult;
-  measurePayloadBytes?(payload: WebRemoteControlAppPayload): number;
+  sendPayloadResult?(
+    payload: WebRemoteControlAppPayload,
+    targetTerminalId?: string,
+  ): WebRemoteControlPayloadSendResult;
+  measurePayloadBytes?(payload: WebRemoteControlAppPayload, targetTerminalId?: string): number;
   dispose(): void;
 }
 
@@ -112,6 +115,39 @@ interface WindowControlLifecycle {
   identity?: { userId: string; endpointOrigin: string };
 }
 
+// legacy 兼容 session 的 map 键：wire identifier 强制非空白，空串不会与真实 terminal_id 冲突。
+// 不用 "default" 这类字面值——它在 schema 上是合法 terminal_id，会被对账逻辑误删。
+const LEGACY_TERMINAL_SESSION_KEY = "";
+
+/** 每个 terminal（页面）独立的会话状态：bridge、缓冲与视图。 */
+interface TerminalSession {
+  terminalId: string;
+  currentBridge?: WorkspaceBridgeRuntime;
+  bridgeOpen?: {
+    bridgeSessionId: string;
+    bridgeGeneration?: number;
+    intentKey: string;
+    hostRequestId: string;
+    preparingProject: boolean;
+    promise: Promise<WebRemoteControlExternalWorkspaceBridge>;
+  };
+  pendingBridgeInvalidation?: Extract<
+    WebRemoteControlAppPayload,
+    { zcode_type: "bridge-degraded" }
+  >;
+  pendingOutboundPayloads: WebRemoteControlAppPayload[];
+  pendingOutboundPayloadTimer?: ReturnType<typeof setTimeout>;
+  mobileViewState?: WebRemoteControlMobileViewState;
+  mobileTaskView?: NonNullable<WebRemoteControlStatus["mobileTaskView"]>;
+  mobileTaskViewEpoch?: string;
+  mobileTaskViewSeq?: number;
+  mobileDeviceInfo?: WebRemoteControlMobileDeviceInfo;
+  lastActivityAt: number;
+  detachedAt?: number;
+  detachTimer?: ReturnType<typeof setTimeout>;
+  workspaceListSignature?: string;
+}
+
 interface WindowControlRuntime {
   windowId: number;
   workspacePath: string;
@@ -131,26 +167,9 @@ interface WindowControlRuntime {
   hasEverPaired: boolean;
   hasObservedSendReadyForPairing: boolean;
   transportState?: WebRemoteControlDeviceTransportState;
+  /** 跨页共享的"最近手机视图"偏好；当前各页视图在 session 上。 */
   mobileViewState?: WebRemoteControlMobileViewState;
-  mobileTaskView?: NonNullable<WebRemoteControlStatus["mobileTaskView"]>;
-  mobileTaskViewEpoch?: string;
-  mobileTaskViewSeq?: number;
-  mobileDeviceInfo?: WebRemoteControlMobileDeviceInfo;
-  currentBridge?: WorkspaceBridgeRuntime;
-  bridgeOpen?: {
-    bridgeSessionId: string;
-    bridgeGeneration?: number;
-    intentKey: string;
-    hostRequestId: string;
-    preparingProject: boolean;
-    promise: Promise<WebRemoteControlExternalWorkspaceBridge>;
-  };
-  pendingBridgeInvalidation?: Extract<
-    WebRemoteControlAppPayload,
-    { zcode_type: "bridge-degraded" }
-  >;
-  pendingOutboundPayloads: WebRemoteControlAppPayload[];
-  pendingOutboundPayloadTimer?: ReturnType<typeof setTimeout>;
+  terminalSessions: Map<string, TerminalSession>;
   mobileDisconnectGraceTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -355,7 +374,6 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       remoteKind,
     };
   }
-  const pushedWorkspaceListSignaturesByWindowId = new Map<number, string>();
   let startupRestoreClaimed = false;
   let lifecycleRevision = 0;
   let authNotificationRevision = 0;
@@ -420,9 +438,12 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     }
   }
 
-  function disposeRuntimeBridgeResources(runtime: WindowControlRuntime): void {
-    clearMobileTaskView(runtime);
-    const bridge = runtime.currentBridge;
+  function disposeRuntimeBridgeResources(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+  ): void {
+    clearMobileTaskView(runtime, session);
+    const bridge = session.currentBridge;
     if (!bridge) {
       return;
     }
@@ -440,22 +461,28 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       dependencies.releaseWorkspaceHostAttachment(bridge.attachmentId);
     }
 
-    runtime.currentBridge = undefined;
+    session.currentBridge = undefined;
   }
 
   function isCurrentBridgeRuntime(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     bridge: WorkspaceBridgeRuntime,
   ): boolean {
-    return runtimes.get(runtime.windowId) === runtime && runtime.currentBridge === bridge;
+    return (
+      runtimes.get(runtime.windowId) === runtime &&
+      runtime.terminalSessions.get(session.terminalId) === session &&
+      session.currentBridge === bridge
+    );
   }
 
   function degradeBridgeAfterRawFault(
     runtime: WindowControlRuntime,
-    bridge: WorkspaceBridgeRuntime,
+    session: TerminalSession,
     reasonCode: string,
   ): void {
-    if (!isCurrentBridgeRuntime(runtime, bridge) || bridge.degraded) return;
+    const bridge = session.currentBridge;
+    if (!bridge || !isCurrentBridgeRuntime(runtime, session, bridge) || bridge.degraded) return;
     bridge.degraded = true;
     dependencies.logger.warn("[web-remote-control] raw relay bridge degraded", {
       windowId: runtime.windowId,
@@ -465,7 +492,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       recoveryId: bridge.recoveryId,
       reasonCode,
     });
-    runtime.pendingBridgeInvalidation = {
+    session.pendingBridgeInvalidation = {
       zcode_type: "bridge-degraded",
       bridgeSessionId: bridge.bridgeSessionId,
       ...(bridge.bridgeGeneration === undefined
@@ -478,16 +505,74 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     };
     // Bug 原因：degraded 后 raw 两端都已禁止继续转发，保留旧 attachment 只会泄漏
     // scoped subscription。物理 Host/Agent 不受影响，只释放手机短生命周期 attachment。
-    disposeRuntimeBridgeResources(runtime);
-    sendPendingBridgeInvalidation(runtime);
+    disposeRuntimeBridgeResources(runtime, session);
+    sendPendingBridgeInvalidation(runtime, session);
   }
 
-  function clearPendingOutboundPayloadTimer(runtime: WindowControlRuntime): void {
-    if (!runtime.pendingOutboundPayloadTimer) {
+  function createTerminalSession(terminalId: string): TerminalSession {
+    return {
+      terminalId,
+      pendingOutboundPayloads: [],
+      lastActivityAt: Date.now(),
+    };
+  }
+
+  function getOrCreateTerminalSession(
+    runtime: WindowControlRuntime,
+    terminalId?: string,
+  ): TerminalSession {
+    const id = terminalId ?? LEGACY_TERMINAL_SESSION_KEY;
+    let session = runtime.terminalSessions.get(id);
+    if (!session) {
+      session = createTerminalSession(id);
+      runtime.terminalSessions.set(id, session);
+      if (runtime.transportState === "paired") {
+        session.mobileTaskViewEpoch = randomUUID();
+        session.mobileTaskViewSeq = -1;
+      }
+    }
+    session.lastActivityAt = Date.now();
+    return session;
+  }
+
+  function getStatusProjection(runtime: WindowControlRuntime): TerminalSession | undefined {
+    let latest: TerminalSession | undefined;
+    for (const session of runtime.terminalSessions.values()) {
+      if (session.detachedAt !== undefined) continue;
+      if (!latest || session.lastActivityAt > latest.lastActivityAt) latest = session;
+    }
+    if (latest) return latest;
+    for (const session of runtime.terminalSessions.values()) {
+      if (!latest || session.lastActivityAt > latest.lastActivityAt) latest = session;
+    }
+    return latest;
+  }
+
+  function disposeTerminalSession(runtime: WindowControlRuntime, session: TerminalSession): void {
+    if (runtime.terminalSessions.get(session.terminalId) !== session) return;
+    cancelBridgeOpen(runtime, session);
+    disposeRuntimeBridgeResources(runtime, session);
+    if (session.pendingOutboundPayloadTimer) {
+      clearTimeout(session.pendingOutboundPayloadTimer);
+      session.pendingOutboundPayloadTimer = undefined;
+    }
+    session.pendingOutboundPayloads.length = 0;
+    runtime.terminalSessions.delete(session.terminalId);
+    emitRuntimeStatus(runtime);
+  }
+
+  // Task 8 会补全集合对账与宽限期；本实现保证单 terminal 行为与旧 runtime 完全一致。
+  function reconcileTerminalIds(runtime: WindowControlRuntime, terminalIds: string[]): void {
+    void runtime;
+    void terminalIds;
+  }
+
+  function clearPendingOutboundPayloadTimer(session: TerminalSession): void {
+    if (!session.pendingOutboundPayloadTimer) {
       return;
     }
-    clearTimeout(runtime.pendingOutboundPayloadTimer);
-    runtime.pendingOutboundPayloadTimer = undefined;
+    clearTimeout(session.pendingOutboundPayloadTimer);
+    session.pendingOutboundPayloadTimer = undefined;
   }
 
   function clearMobileDisconnectGraceTimer(runtime: WindowControlRuntime): void {
@@ -500,41 +585,50 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   function buildRuntimeStatus(runtime: WindowControlRuntime): WebRemoteControlStatus {
     const target = getRuntimeStatusTarget(runtime);
+    const projected = getStatusProjection(runtime);
     return {
       status: runtime.status,
       sessionId: runtime.deviceSid,
       windowControlSessionId: runtime.deviceSid,
       mobileConnected: runtime.mobileConnected,
       mobileViewState: runtime.mobileViewState,
-      mobileTaskView: runtime.mobileTaskView ?? null,
-      mobileDeviceInfo: runtime.mobileDeviceInfo,
+      mobileTaskView: projected?.mobileTaskView ?? null,
+      mobileDeviceInfo: projected?.mobileDeviceInfo,
       qrUrl: runtime.qrUrl,
       connectUrl: runtime.connectUrl,
       workspacePath: target.workspacePath,
       workspaceIdentity: target.workspaceIdentity,
       remoteSessionId: target.remoteSessionId,
-      initialTaskId: runtime.currentBridge?.initialTaskId ?? runtime.initialTaskId,
+      initialTaskId: projected?.currentBridge?.initialTaskId ?? runtime.initialTaskId,
       error: runtime.error,
       failure: runtime.failure,
     };
   }
 
   function emitRuntimeStatus(runtime: WindowControlRuntime): void {
+    if (runtimes.get(runtime.windowId) !== runtime) return;
     dependencies.onStatusChanged?.(runtime.windowId, buildRuntimeStatus(runtime));
   }
 
-  function clearMobileTaskView(runtime: WindowControlRuntime): void {
-    if (!runtime.mobileTaskView) return;
-    runtime.mobileTaskView = undefined;
+  function clearMobileTaskView(runtime: WindowControlRuntime, session: TerminalSession): void {
+    if (!session.mobileTaskView) return;
+    session.mobileTaskView = undefined;
     emitRuntimeStatus(runtime);
   }
 
-  function requestMobileTaskView(runtime: WindowControlRuntime): void {
-    if (runtime.transportState !== "paired" || !runtime.mobileTaskViewEpoch) return;
-    sendAppPayload(runtime, {
-      zcode_type: "mobile-task-view-request",
-      epoch: runtime.mobileTaskViewEpoch,
-    });
+  function requestMobileTaskView(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+  ): void {
+    if (runtime.transportState !== "paired" || !session.mobileTaskViewEpoch) return;
+    sendAppPayload(
+      runtime,
+      {
+        zcode_type: "mobile-task-view-request",
+        epoch: session.mobileTaskViewEpoch,
+      },
+      session,
+    );
   }
 
   function emitIdleStatus(windowId: number): void {
@@ -556,16 +650,20 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     }, MOBILE_DISCONNECT_STATUS_GRACE_MS);
   }
 
-  function schedulePendingOutboundPayloadTimeout(runtime: WindowControlRuntime): void {
-    if (runtime.pendingOutboundPayloadTimer || runtime.pendingOutboundPayloads.length === 0) {
+  function schedulePendingOutboundPayloadTimeout(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+  ): void {
+    if (session.pendingOutboundPayloadTimer || session.pendingOutboundPayloads.length === 0) {
       return;
     }
-    runtime.pendingOutboundPayloadTimer = setTimeout(() => {
-      runtime.pendingOutboundPayloadTimer = undefined;
-      const droppedCount = runtime.pendingOutboundPayloads.splice(0).length;
+    session.pendingOutboundPayloadTimer = setTimeout(() => {
+      session.pendingOutboundPayloadTimer = undefined;
+      const droppedCount = session.pendingOutboundPayloads.splice(0).length;
       dependencies.logger.warn("[web-remote-control] dropped buffered outbound payloads", {
         windowId: runtime.windowId,
         session: runtime.deviceSid,
+        terminalId: session.terminalId,
         droppedCount,
       });
     }, WEB_REMOTE_CONTROL_OUTBOUND_PAYLOAD_BUFFER_TIMEOUT_MS);
@@ -574,19 +672,26 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
   function sendPayloadToTransport(
     runtime: WindowControlRuntime,
     payload: WebRemoteControlAppPayload,
+    session: TerminalSession,
   ): WebRemoteControlPayloadSendResult {
+    // legacy session（官方 relay）发送时不带 target；真实 terminal_id 才定向。
+    const target =
+      session.terminalId === LEGACY_TERMINAL_SESSION_KEY ? undefined : session.terminalId;
     if (runtime.transport.sendPayloadResult) {
-      return runtime.transport.sendPayloadResult(payload);
+      return runtime.transport.sendPayloadResult(payload, target);
     }
     return runtime.transport.sendPayload(payload)
       ? { kind: "sent", bytes: 0 }
       : { kind: "unavailable" };
   }
 
-  function sendPendingBridgeInvalidation(runtime: WindowControlRuntime): void {
-    const payload = runtime.pendingBridgeInvalidation;
+  function sendPendingBridgeInvalidation(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+  ): void {
+    const payload = session.pendingBridgeInvalidation;
     if (!payload) return;
-    const result = sendPayloadToTransport(runtime, payload);
+    const result = sendPayloadToTransport(runtime, payload, session);
     if (result.kind === "oversize") {
       dependencies.logger.error("[web-remote-control] bridge invalidation is oversized", {
         bridgeSessionId: payload.bridgeSessionId,
@@ -599,32 +704,37 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   function bufferOutboundPayload(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     payload: WebRemoteControlAppPayload,
   ): void {
-    if (runtime.pendingOutboundPayloads.length >= 50) {
-      const droppedCount = runtime.pendingOutboundPayloads.length + 1;
-      runtime.pendingOutboundPayloads.length = 0;
-      clearPendingOutboundPayloadTimer(runtime);
+    if (session.pendingOutboundPayloads.length >= 50) {
+      const droppedCount = session.pendingOutboundPayloads.length + 1;
+      session.pendingOutboundPayloads.length = 0;
+      clearPendingOutboundPayloadTimer(session);
       dependencies.logger.warn("[web-remote-control] dropped overflowing outbound payloads", {
         windowId: runtime.windowId,
         session: runtime.deviceSid,
+        terminalId: session.terminalId,
         droppedCount,
       });
       return;
     }
-    runtime.pendingOutboundPayloads.push(payload);
-    schedulePendingOutboundPayloadTimeout(runtime);
+    session.pendingOutboundPayloads.push(payload);
+    schedulePendingOutboundPayloadTimeout(runtime, session);
   }
 
-  function flushPendingOutboundPayloads(runtime: WindowControlRuntime): void {
-    while (runtime.pendingOutboundPayloads.length > 0) {
-      const payload = runtime.pendingOutboundPayloads[0];
+  function flushPendingOutboundPayloads(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+  ): void {
+    while (session.pendingOutboundPayloads.length > 0) {
+      const payload = session.pendingOutboundPayloads[0];
       if (!payload) {
         break;
       }
-      const result = sendPayloadToTransport(runtime, payload);
+      const result = sendPayloadToTransport(runtime, payload, session);
       if (result.kind === "unavailable") {
-        schedulePendingOutboundPayloadTimeout(runtime);
+        schedulePendingOutboundPayloadTimeout(runtime, session);
         return;
       }
       if (result.kind === "oversize") {
@@ -635,21 +745,41 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
           maxBytes: result.maxBytes,
         });
       }
-      runtime.pendingOutboundPayloads.shift();
+      session.pendingOutboundPayloads.shift();
     }
-    clearPendingOutboundPayloadTimer(runtime);
+    clearPendingOutboundPayloadTimer(session);
   }
 
   function sendAppPayload(
     runtime: WindowControlRuntime,
     payload: WebRemoteControlAppPayload,
+    session?: TerminalSession,
   ): void {
-    if (runtime.pendingOutboundPayloads.length > 0) {
-      bufferOutboundPayload(runtime, payload);
-      flushPendingOutboundPayloads(runtime);
+    if (session) {
+      sendAppPayloadToSession(runtime, payload, session);
       return;
     }
-    const result = sendPayloadToTransport(runtime, payload);
+    // 未指定 session 的窗口级广播：每个 session 各复制一份（无 session 时落 legacy）。
+    if (runtime.terminalSessions.size === 0) {
+      sendAppPayloadToSession(runtime, payload, getOrCreateTerminalSession(runtime));
+      return;
+    }
+    for (const target of runtime.terminalSessions.values()) {
+      sendAppPayloadToSession(runtime, payload, target);
+    }
+  }
+
+  function sendAppPayloadToSession(
+    runtime: WindowControlRuntime,
+    payload: WebRemoteControlAppPayload,
+    session: TerminalSession,
+  ): void {
+    if (session.pendingOutboundPayloads.length > 0) {
+      bufferOutboundPayload(runtime, session, payload);
+      flushPendingOutboundPayloads(runtime, session);
+      return;
+    }
+    const result = sendPayloadToTransport(runtime, payload, session);
     if (result.kind === "sent") {
       return;
     }
@@ -663,7 +793,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     }
     // Bugfix: relay suspect 窗口内 sendPayload 会返回 false。
     // desktop 发出的响应/RPC 帧不能静默丢弃，先短暂缓冲，等 paired 恢复后再 flush。
-    bufferOutboundPayload(runtime, payload);
+    bufferOutboundPayload(runtime, session, payload);
   }
 
   function preserveWindowRuntimeFailure(
@@ -681,11 +811,10 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       reason: failure.reason,
       error: failure.message ?? failure.reason,
     });
-    cancelBridgeOpen(runtime);
-    disposeRuntimeBridgeResources(runtime);
-    clearPendingOutboundPayloadTimer(runtime);
+    for (const session of [...runtime.terminalSessions.values()]) {
+      disposeTerminalSession(runtime, session);
+    }
     clearMobileDisconnectGraceTimer(runtime);
-    runtime.pendingOutboundPayloads.length = 0;
     runtime.transport.dispose();
     runtime.status = "error";
     runtime.mobileConnected = false;
@@ -712,12 +841,10 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       error: "Desktop disconnected this Web remote control session.",
     });
     runtimes.delete(windowId);
-    pushedWorkspaceListSignaturesByWindowId.delete(windowId);
-    cancelBridgeOpen(runtime);
-    disposeRuntimeBridgeResources(runtime);
-    clearPendingOutboundPayloadTimer(runtime);
+    for (const session of [...runtime.terminalSessions.values()]) {
+      disposeTerminalSession(runtime, session);
+    }
     clearMobileDisconnectGraceTimer(runtime);
-    runtime.pendingOutboundPayloads.length = 0;
     runtime.transport.dispose();
     dependencies.disposeWorkspaceHostAttachmentsForWindow(windowId, reason);
 
@@ -734,10 +861,11 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     dependencies.onStatusChanged?.(windowId, { status: "auth-required" });
   }
 
-  function getRuntimeWorkspaceTarget(
+  function getSessionWorkspaceTarget(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
   ): WebRemoteControlWorkspaceTarget {
-    const bridge = runtime.currentBridge;
+    const bridge = session.currentBridge;
     if (bridge) {
       return {
         workspacePath: bridge.workspacePath,
@@ -773,6 +901,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   function getAvailableWorkspaces(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
   ): WebRemoteControlWorkspaceTarget[] {
     const workspaceByKey = new Map<string, WebRemoteControlWorkspaceTarget>();
 
@@ -782,7 +911,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       workspaceByKey.set(resolveWebRemoteControlWorkspaceKey(workspace), workspace);
     }
 
-    const currentTarget = getRuntimeWorkspaceTarget(runtime);
+    const currentTarget = getSessionWorkspaceTarget(runtime, session);
     if (isBridgeableRemoteTarget(currentTarget)) {
       const currentKey = resolveWebRemoteControlWorkspaceKey(currentTarget);
       if (!workspaceByKey.has(currentKey)) {
@@ -795,8 +924,9 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   function getRuntimeInitialViewState(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
   ): WebRemoteControlMobileViewState | undefined {
-    const activeTarget = getRuntimeWorkspaceTarget(runtime);
+    const activeTarget = getSessionWorkspaceTarget(runtime, session);
     if (!runtime.initialTaskId || !isBridgeableRemoteTarget(activeTarget)) {
       return undefined;
     }
@@ -810,31 +940,35 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   function buildBootstrapResult(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
   ): WebRemoteControlWindowBootstrapResult {
     return {
       windowControlSessionId: runtime.deviceSid,
       desktopAppVersion: dependencies.appVersion,
-      workspaces: getAvailableWorkspaces(runtime),
-      initialViewState: getRuntimeInitialViewState(runtime),
-      mobileViewState: runtime.mobileViewState,
-      mobileTaskViewEpoch: runtime.mobileTaskViewEpoch,
+      workspaces: getAvailableWorkspaces(runtime, session),
+      initialViewState: getRuntimeInitialViewState(runtime, session),
+      mobileViewState: session.mobileViewState ?? runtime.mobileViewState,
+      mobileTaskViewEpoch: session.mobileTaskViewEpoch,
     };
   }
 
   function buildWorkspaceListResult(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
   ): WebRemoteControlWorkspaceListResult {
-    const activeTarget = getRuntimeWorkspaceTarget(runtime);
-    const initialViewState = getRuntimeInitialViewState(runtime);
+    const activeTarget = getSessionWorkspaceTarget(runtime, session);
+    const initialViewState = getRuntimeInitialViewState(runtime, session);
     return {
-      workspaces: getAvailableWorkspaces(runtime),
+      workspaces: getAvailableWorkspaces(runtime, session),
       activeWorkspaceKey:
+        session.mobileViewState?.activeWorkspaceKey ??
         runtime.mobileViewState?.activeWorkspaceKey ??
         initialViewState?.activeWorkspaceKey ??
         resolveWebRemoteControlWorkspaceKey(activeTarget),
       activeTaskId:
+        session.mobileViewState?.activeTaskId ??
+        session.currentBridge?.initialTaskId ??
         runtime.mobileViewState?.activeTaskId ??
-        runtime.currentBridge?.initialTaskId ??
         initialViewState?.activeTaskId,
     };
   }
@@ -861,21 +995,40 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
   }
 
   function pushWorkspaceListUpdated(runtime: WindowControlRuntime): void {
-    const result = buildWorkspaceListResult(runtime);
+    if (runtime.terminalSessions.size === 0) {
+      // 单 terminal/官方 relay：尚未收到任何 terminal payload 时也要推送（与旧行为一致）。
+      pushWorkspaceListUpdatedForSession(runtime, getOrCreateTerminalSession(runtime));
+      return;
+    }
+    for (const session of runtime.terminalSessions.values()) {
+      pushWorkspaceListUpdatedForSession(runtime, session);
+    }
+  }
+
+  function pushWorkspaceListUpdatedForSession(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+  ): void {
+    const result = buildWorkspaceListResult(runtime, session);
     const signature = buildWorkspaceListPushSignature(result);
-    if (pushedWorkspaceListSignaturesByWindowId.get(runtime.windowId) === signature) {
+    if (session.workspaceListSignature === signature) {
       return;
     }
 
-    pushedWorkspaceListSignaturesByWindowId.set(runtime.windowId, signature);
-    sendAppPayload(runtime, {
-      zcode_type: "workspace-list-updated",
-      result,
-    });
+    session.workspaceListSignature = signature;
+    sendAppPayload(
+      runtime,
+      {
+        zcode_type: "workspace-list-updated",
+        result,
+      },
+      session,
+    );
   }
 
   async function respondToPlatformRequest(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     request: WebRemoteControlPlatformRequestPayload,
   ): Promise<void> {
     let response: WebRemoteControlPlatformResponsePayload;
@@ -903,18 +1056,19 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       };
     }
 
-    sendAppPayload(runtime, response);
+    sendAppPayload(runtime, response, session);
   }
 
-  function cancelBridgeOpen(runtime: WindowControlRuntime): void {
-    const pending = runtime.bridgeOpen;
-    runtime.bridgeOpen = undefined;
+  function cancelBridgeOpen(runtime: WindowControlRuntime, session: TerminalSession): void {
+    const pending = session.bridgeOpen;
+    session.bridgeOpen = undefined;
     if (pending?.preparingProject)
       dependencies.cancelProjectPreparation?.(runtime.windowId, pending.hostRequestId);
   }
 
   function createWorkspaceBridge(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     request: WebRemoteControlWorkspaceBridgeOpenPayload,
   ): Promise<WebRemoteControlExternalWorkspaceBridge> {
     const intentKey = JSON.stringify([
@@ -926,7 +1080,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       request.taskHostId,
       request.fileTreeTaskId,
     ]);
-    const previous = runtime.bridgeOpen;
+    const previous = session.bridgeOpen;
     if (
       previous?.bridgeSessionId === request.bridgeSessionId &&
       previous.bridgeGeneration === request.bridgeGeneration
@@ -934,16 +1088,16 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       if (previous.intentKey !== intentKey)
         return Promise.reject(new Error("Workspace bridge identity cannot change intent."));
       if (
-        runtime.currentBridge?.degraded ||
-        (runtime.pendingBridgeInvalidation?.bridgeSessionId === request.bridgeSessionId &&
-          runtime.pendingBridgeInvalidation.bridgeGeneration === request.bridgeGeneration)
+        session.currentBridge?.degraded ||
+        (session.pendingBridgeInvalidation?.bridgeSessionId === request.bridgeSessionId &&
+          session.pendingBridgeInvalidation.bridgeGeneration === request.bridgeGeneration)
       )
         return Promise.reject(new Error("Degraded workspace bridge requires a new identity."));
       return previous.promise;
     }
-    cancelBridgeOpen(runtime);
+    cancelBridgeOpen(runtime, session);
     // 同一 transport identity 的重试复用整次 admission；新导航立即使旧异步结果失效。
-    const pending: NonNullable<WindowControlRuntime["bridgeOpen"]> = {
+    const pending: TerminalSession["bridgeOpen"] = {
       bridgeSessionId: request.bridgeSessionId,
       bridgeGeneration: request.bridgeGeneration,
       intentKey,
@@ -951,15 +1105,16 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       preparingProject: Boolean(request.project || request.taskHostId),
       promise: undefined as never,
     };
-    runtime.bridgeOpen = pending;
-    pending.promise = buildWorkspaceBridge(runtime, request, pending);
+    session.bridgeOpen = pending;
+    pending.promise = buildWorkspaceBridge(runtime, session, request, pending);
     return pending.promise;
   }
 
   async function buildWorkspaceBridge(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     request: WebRemoteControlWorkspaceBridgeOpenPayload,
-    pending: NonNullable<WindowControlRuntime["bridgeOpen"]>,
+    pending: NonNullable<TerminalSession["bridgeOpen"]>,
   ): Promise<WebRemoteControlExternalWorkspaceBridge> {
     let target: WebRemoteControlWorkspaceTarget | undefined;
     const intent: HostProjectWorkspaceNavigationInput | undefined =
@@ -994,11 +1149,15 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         pending.preparingProject = false;
       }
     } else {
-      target = getAvailableWorkspaces(runtime).find(
+      target = getAvailableWorkspaces(runtime, session).find(
         (workspace) => resolveWebRemoteControlWorkspaceKey(workspace) === request.workspaceKey,
       );
     }
-    if (runtimes.get(runtime.windowId) !== runtime || runtime.bridgeOpen !== pending)
+    if (
+      runtimes.get(runtime.windowId) !== runtime ||
+      runtime.terminalSessions.get(session.terminalId) !== session ||
+      session.bridgeOpen !== pending
+    )
       throw new Error("Workspace bridge request was superseded.");
     if (!target) {
       throw new Error("目标工作区不在当前桌面窗口中，无法创建 Web 远程控制 bridge。");
@@ -1008,7 +1167,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     }
     const targetWorkspaceKey = resolveWebRemoteControlWorkspaceKey(target);
 
-    const invalidation = runtime.pendingBridgeInvalidation;
+    const invalidation = session.pendingBridgeInvalidation;
     if (
       invalidation?.bridgeSessionId === request.bridgeSessionId &&
       invalidation.bridgeGeneration === request.bridgeGeneration
@@ -1017,9 +1176,9 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     }
     // 收到新 identity 的 open 已证明手机消费了 invalidation；后续失败由显式 bridge-error
     // 和 Web 侧有界 retry 收口，不再重复旧 generation 的 degraded 通知。
-    runtime.pendingBridgeInvalidation = undefined;
+    session.pendingBridgeInvalidation = undefined;
 
-    disposeRuntimeBridgeResources(runtime);
+    disposeRuntimeBridgeResources(runtime, session);
     runtime.status = "connecting";
     runtime.error = undefined;
     runtime.failure = undefined;
@@ -1040,10 +1199,10 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       readyAnnounced: false,
       degraded: false,
     };
-    runtime.currentBridge = bridgeRuntime;
+    session.currentBridge = bridgeRuntime;
 
     dependencies.logger.info(
-      `[web-remote-control] attaching workspace bridge window=${runtime.windowId} session=${runtime.deviceSid} bridgeSession=${request.bridgeSessionId} workspace=${target.workspacePath}`,
+      `[web-remote-control] attaching workspace bridge window=${runtime.windowId} session=${runtime.deviceSid} terminal=${session.terminalId} bridgeSession=${request.bridgeSessionId} workspace=${target.workspacePath}`,
     );
 
     let acquired: WebRemoteControlHostAttachmentHandle | undefined;
@@ -1055,7 +1214,10 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         initialTaskId: request.taskId,
         kind: target.kind,
       });
-      if (!isCurrentBridgeRuntime(runtime, bridgeRuntime) || runtime.bridgeOpen !== pending) {
+      if (
+        !isCurrentBridgeRuntime(runtime, session, bridgeRuntime) ||
+        session.bridgeOpen !== pending
+      ) {
         dependencies.releaseWorkspaceHostAttachment(acquired.attachmentId);
         acquired = undefined;
         throw new Error("Workspace bridge request was superseded.");
@@ -1066,11 +1228,15 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         bridgeGeneration: bridgeRuntime.bridgeGeneration,
         recoveryId: bridgeRuntime.recoveryId,
         measureFrameBytes: (frame) =>
-          runtime.transport.measurePayloadBytes?.(frame) ??
-          measureWebRemoteControlRpcRelayEnvelopeBytes(frame),
+          runtime.transport.measurePayloadBytes?.(
+            frame,
+            session.terminalId === LEGACY_TERMINAL_SESSION_KEY
+              ? undefined
+              : session.terminalId,
+          ) ?? measureWebRemoteControlRpcRelayEnvelopeBytes(frame),
         sendFrame: (payload) => {
           if (!bridgeRuntime.readyAnnounced || bridgeRuntime.degraded) return false;
-          const result = sendPayloadToTransport(runtime, payload);
+          const result = sendPayloadToTransport(runtime, payload, session);
           if (result.kind === "oversize") {
             throw new Error("remote.rpcFrame.envelopeTooLarge");
           }
@@ -1086,14 +1252,16 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         hostProtocol.send(buffer);
       });
       const disposeDegraded = relayProtocol.onDegraded((fault) => {
-        degradeBridgeAfterRawFault(runtime, bridgeRuntime, fault.reasonCode);
+        degradeBridgeAfterRawFault(runtime, session, fault.reasonCode);
       });
       const disposeSaturated = relayProtocol.onSaturated(() => {
-        if (!isCurrentBridgeRuntime(runtime, bridgeRuntime) || bridgeRuntime.degraded) return;
+        if (!isCurrentBridgeRuntime(runtime, session, bridgeRuntime) || bridgeRuntime.degraded)
+          return;
         hostProtocol.sendFlowState("saturated");
       });
       const disposeDrained = relayProtocol.onDrained(() => {
-        if (!isCurrentBridgeRuntime(runtime, bridgeRuntime) || bridgeRuntime.degraded) return;
+        if (!isCurrentBridgeRuntime(runtime, session, bridgeRuntime) || bridgeRuntime.degraded)
+          return;
         hostProtocol.sendFlowState("drained");
       });
 
@@ -1141,8 +1309,8 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       if (acquired) {
         dependencies.releaseWorkspaceHostAttachment(acquired.attachmentId);
       }
-      if (isCurrentBridgeRuntime(runtime, bridgeRuntime)) {
-        disposeRuntimeBridgeResources(runtime);
+      if (isCurrentBridgeRuntime(runtime, session, bridgeRuntime)) {
+        disposeRuntimeBridgeResources(runtime, session);
         runtime.status = runtime.mobileConnected ? "active" : "running";
         emitRuntimeStatus(runtime);
       }
@@ -1152,21 +1320,26 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   async function respondToWorkspaceBridgeOpen(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     request: WebRemoteControlWorkspaceBridgeOpenPayload,
   ): Promise<void> {
     try {
-      const bridge = await createWorkspaceBridge(runtime, request);
-      sendAppPayload(runtime, {
-        zcode_type: "workspace-bridge-ready",
-        requestId: request.requestId,
-        bridgeSessionId: request.bridgeSessionId,
-        ...(request.bridgeGeneration !== undefined
-          ? { bridgeGeneration: request.bridgeGeneration }
-          : {}),
-        ...(request.recoveryId ? { recoveryId: request.recoveryId } : {}),
-        bridge,
-      });
-      const currentBridge = runtime.currentBridge;
+      const bridge = await createWorkspaceBridge(runtime, session, request);
+      sendAppPayload(
+        runtime,
+        {
+          zcode_type: "workspace-bridge-ready",
+          requestId: request.requestId,
+          bridgeSessionId: request.bridgeSessionId,
+          ...(request.bridgeGeneration !== undefined
+            ? { bridgeGeneration: request.bridgeGeneration }
+            : {}),
+          ...(request.recoveryId ? { recoveryId: request.recoveryId } : {}),
+          bridge,
+        },
+        session,
+      );
+      const currentBridge = session.currentBridge;
       if (
         currentBridge?.bridgeSessionId === request.bridgeSessionId &&
         currentBridge.bridgeGeneration === request.bridgeGeneration
@@ -1190,55 +1363,68 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         ...(request.recoveryId ? { recoveryId: request.recoveryId } : {}),
         reason: mapWorkspaceBridgeFailureReason(error),
         error: message,
-      });
+      }, session);
     }
   }
 
   async function respondToWorkspaceReconnectRequest(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     request: Extract<WebRemoteControlAppPayload, { zcode_type: "workspace-reconnect-request" }>,
   ): Promise<void> {
     try {
       await dependencies.reconnectWorkspace(runtime.windowId, request.workspaceKey);
-      sendAppPayload(runtime, {
-        zcode_type: "workspace-reconnect-response",
-        requestId: request.requestId,
-        workspaceKey: request.workspaceKey,
-        success: true,
-      });
+      sendAppPayload(
+        runtime,
+        {
+          zcode_type: "workspace-reconnect-response",
+          requestId: request.requestId,
+          workspaceKey: request.workspaceKey,
+          success: true,
+        },
+        session,
+      );
     } catch (error) {
-      sendAppPayload(runtime, {
-        zcode_type: "workspace-reconnect-response",
-        requestId: request.requestId,
-        workspaceKey: request.workspaceKey,
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      sendAppPayload(
+        runtime,
+        {
+          zcode_type: "workspace-reconnect-response",
+          requestId: request.requestId,
+          workspaceKey: request.workspaceKey,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        session,
+      );
     }
   }
 
   function applyMobileViewStateUpdate(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     viewState: WebRemoteControlMobileViewState,
     deviceInfo?: WebRemoteControlMobileDeviceInfo,
   ): void {
+    session.mobileViewState = viewState;
     runtime.mobileViewState = viewState;
     if (deviceInfo) {
-      runtime.mobileDeviceInfo = deviceInfo;
+      session.mobileDeviceInfo = deviceInfo;
     }
+    session.lastActivityAt = Date.now();
   }
 
   function applyMobileTaskViewUpdate(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     payload: WebRemoteControlMobileTaskViewUpdatePayload,
   ): void {
-    const bridge = runtime.currentBridge;
+    const bridge = session.currentBridge;
     const view = payload.view;
     // 导航缓存、断线宽限和旧 bridge 回包都不能证明当前查看；只接收本代配对的完整地址。
     if (
       runtime.transportState !== "paired" ||
-      payload.epoch !== runtime.mobileTaskViewEpoch ||
-      payload.seq <= (runtime.mobileTaskViewSeq ?? -1) ||
+      payload.epoch !== session.mobileTaskViewEpoch ||
+      payload.seq <= (session.mobileTaskViewSeq ?? -1) ||
       !bridge?.readyAnnounced ||
       bridge.degraded ||
       payload.bridgeSessionId !== bridge.bridgeSessionId ||
@@ -1248,7 +1434,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
           resolveWebRemoteControlWorkspaceKey(view) !== bridge.workspaceKey))
     )
       return;
-    runtime.mobileTaskViewSeq = payload.seq;
+    session.mobileTaskViewSeq = payload.seq;
     // legacy 身份不能反查 Source；读与 CAS 必须携带所属 bridge 的可信 session，不能接受 Web 自报。
     const trustedView = view
       ? {
@@ -1256,7 +1442,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
           ...(bridge.kind === "remote" ? { remoteSessionId: bridge.remoteSessionId } : {}),
         }
       : undefined;
-    const previous = runtime.mobileTaskView;
+    const previous = session.mobileTaskView;
     if (
       previous?.taskId === trustedView?.taskId &&
       previous?.workspacePath === trustedView?.workspacePath &&
@@ -1264,25 +1450,31 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       previous?.remoteSessionId === trustedView?.remoteSessionId
     )
       return;
-    runtime.mobileTaskView = trustedView;
+    session.mobileTaskView = trustedView;
     emitRuntimeStatus(runtime);
   }
 
   function routeRpcTransportPayload(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     frame: WebRemoteControlRpcTransportPayload,
   ): void {
-    routeRawTransportCandidate(runtime, frame);
+    routeRawTransportCandidate(runtime, session, frame);
   }
 
-  function routeRawTransportCandidate(runtime: WindowControlRuntime, payload: unknown): boolean {
-    const bridge = runtime.currentBridge;
+  function routeRawTransportCandidate(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+    payload: unknown,
+  ): boolean {
+    const bridge = session.currentBridge;
     if (!bridge || bridge.degraded) return false;
     return bridge.relayProtocol?.acceptPayload(payload) ?? false;
   }
 
   function logMobileDiagnostic(
     runtime: WindowControlRuntime,
+    session: TerminalSession,
     payload: Extract<WebRemoteControlAppPayload, { zcode_type: "mobile-diagnostic" }>,
   ): void {
     dependencies.logger.info("[web-remote-control] mobile diagnostic", {
@@ -1305,49 +1497,61 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     });
   }
 
-  function routePayload(runtime: WindowControlRuntime, payload: WebRemoteControlAppPayload): void {
+  function routePayload(
+    runtime: WindowControlRuntime,
+    session: TerminalSession,
+    payload: WebRemoteControlAppPayload,
+  ): void {
     switch (payload.zcode_type) {
       case "bootstrap-request":
-        sendAppPayload(runtime, {
-          zcode_type: "bootstrap-response",
-          requestId: payload.requestId,
-          success: true,
-          result: buildBootstrapResult(runtime),
-        });
+        sendAppPayload(
+          runtime,
+          {
+            zcode_type: "bootstrap-response",
+            requestId: payload.requestId,
+            success: true,
+            result: buildBootstrapResult(runtime, session),
+          },
+          session,
+        );
         break;
       case "workspace-list-request":
-        sendAppPayload(runtime, {
-          zcode_type: "workspace-list-response",
-          requestId: payload.requestId,
-          success: true,
-          result: buildWorkspaceListResult(runtime),
-        });
+        sendAppPayload(
+          runtime,
+          {
+            zcode_type: "workspace-list-response",
+            requestId: payload.requestId,
+            success: true,
+            result: buildWorkspaceListResult(runtime, session),
+          },
+          session,
+        );
         break;
       case "platform-request":
-        void respondToPlatformRequest(runtime, payload);
+        void respondToPlatformRequest(runtime, session, payload);
         break;
       case "mobile-view-state-update":
-        applyMobileViewStateUpdate(runtime, payload.viewState, payload.deviceInfo);
+        applyMobileViewStateUpdate(runtime, session, payload.viewState, payload.deviceInfo);
         break;
       case "mobile-task-view-update":
-        applyMobileTaskViewUpdate(runtime, payload);
+        applyMobileTaskViewUpdate(runtime, session, payload);
         break;
       case "workspace-bridge-open":
-        void respondToWorkspaceBridgeOpen(runtime, payload);
+        void respondToWorkspaceBridgeOpen(runtime, session, payload);
         break;
       case "workspace-reconnect-request":
-        void respondToWorkspaceReconnectRequest(runtime, payload);
+        void respondToWorkspaceReconnectRequest(runtime, session, payload);
         break;
       case "rpc-frame":
       case "rpc-frame-ack":
-        routeRpcTransportPayload(runtime, payload);
+        routeRpcTransportPayload(runtime, session, payload);
         break;
       case "telemetry-report":
         // 手机已在创建边界构造事件；Main 只转发，不维护会话事实或干预 replayable 链路。
         dependencies.reportRendererTelemetryEvent?.(payload.event);
         break;
       case "mobile-diagnostic":
-        logMobileDiagnostic(runtime, payload);
+        logMobileDiagnostic(runtime, session, payload);
         break;
       default:
         break;
@@ -1362,12 +1566,16 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     runtime.transportState = state;
     // 瞬时查看不能沿用连接弹窗的断线宽限；恢复必须由新 epoch 下的可见页面重新声明。
     if (state !== "paired") {
-      runtime.mobileTaskViewEpoch = undefined;
-      runtime.mobileTaskViewSeq = undefined;
-      clearMobileTaskView(runtime);
+      for (const session of runtime.terminalSessions.values()) {
+        session.mobileTaskViewEpoch = undefined;
+        session.mobileTaskViewSeq = undefined;
+        clearMobileTaskView(runtime, session);
+      }
     } else if (previousTransportState !== "paired") {
-      runtime.mobileTaskViewEpoch = randomUUID();
-      runtime.mobileTaskViewSeq = -1;
+      for (const session of runtime.terminalSessions.values()) {
+        session.mobileTaskViewEpoch = randomUUID();
+        session.mobileTaskViewSeq = -1;
+      }
     }
     if (state !== "paired") {
       runtime.hasObservedSendReadyForPairing = false;
@@ -1422,9 +1630,11 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       emitRuntimeStatus(runtime);
       // Bugfix: 普通断线重连重新 paired 时 transport 不一定触发 onSendReady。
       // 这里在状态恢复为可发送后主动 flush，避免重连窗口内缓冲的响应/RPC 帧超时丢弃。
-      flushPendingOutboundPayloads(runtime);
-      sendPendingBridgeInvalidation(runtime);
-      if (previousTransportState !== "paired") requestMobileTaskView(runtime);
+      for (const session of runtime.terminalSessions.values()) {
+        flushPendingOutboundPayloads(runtime, session);
+        sendPendingBridgeInvalidation(runtime, session);
+        if (previousTransportState !== "paired") requestMobileTaskView(runtime, session);
+      }
       return;
     }
     if (state === "kicked") {
@@ -1680,24 +1890,45 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
               }
               if (state === "kicked") finish(new Error("session-conflict"));
             },
-            onPayload: (payload) => routePayload(runtime, payload),
-            onRawTransportPayload: (payload) => routeRawTransportCandidate(runtime, payload),
-            onRawTransportFault: (reasonCode) =>
-              runtime.currentBridge?.relayProtocol?.markDegraded(reasonCode),
+            onPayload: (payload, terminalId) =>
+              routePayload(runtime, getOrCreateTerminalSession(runtime, terminalId), payload),
+            onRawTransportPayload: (payload, terminalId) =>
+              routeRawTransportCandidate(
+                runtime,
+                getOrCreateTerminalSession(runtime, terminalId),
+                payload,
+              ),
+            onRawTransportFault: (reasonCode) => {
+              // 入站裸帧超限在解析前无法归属 terminal，按 transport 级故障处理：
+              // 所有 session 的 bridge 都标记 degraded，各页面走自己的既有恢复链路。
+              for (const session of runtime.terminalSessions.values()) {
+                degradeBridgeAfterRawFault(runtime, session, reasonCode);
+              }
+            },
+            onTerminalIdsChange: (terminalIds) => {
+              if (runtimes.get(windowId) !== runtime) return;
+              reconcileTerminalIds(runtime, terminalIds);
+            },
             onSendReady: (event) => {
-              flushPendingOutboundPayloads(runtime);
+              for (const session of runtime.terminalSessions.values()) {
+                flushPendingOutboundPayloads(runtime, session);
+              }
               const isFirstSendReadyForPairing = !runtime.hasObservedSendReadyForPairing;
               runtime.hasObservedSendReadyForPairing = true;
               if (event.kind === "reconnected-socket" || isFirstSendReadyForPairing) {
                 // Bug 原因：same-socket 心跳 ACK 每约 10 秒都会触发 send-ready；若每次都补发
                 // degraded latch，Web 会反复重建同一恢复 generation，破坏 1s/2s/5s 有界退避。
-                sendPendingBridgeInvalidation(runtime);
-                requestMobileTaskView(runtime);
+                for (const session of runtime.terminalSessions.values()) {
+                  sendPendingBridgeInvalidation(runtime, session);
+                  requestMobileTaskView(runtime, session);
+                }
               }
-              const relayProtocol = runtime.currentBridge?.relayProtocol;
-              // 同 bridge 未 ACK 批次仍由 adapter 独占；重连后重放，不刷新 queued age。
-              if (relayProtocol && !relayProtocol.isDegraded())
-                relayProtocol.replayUnacknowledged();
+              for (const session of runtime.terminalSessions.values()) {
+                const relayProtocol = session.currentBridge?.relayProtocol;
+                // 同 bridge 未 ACK 批次仍由 adapter 独占；重连后重放，不刷新 queued age。
+                if (relayProtocol && !relayProtocol.isDegraded())
+                  relayProtocol.replayUnacknowledged();
+              }
             },
             onError: (error) => {
               if (runtimes.get(windowId) !== runtime) return;
@@ -1728,7 +1959,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
             mobileConnected: false,
             hasEverPaired: false,
             hasObservedSendReadyForPairing: false,
-            pendingOutboundPayloads: [],
+            terminalSessions: new Map(),
           };
           runtimes.set(windowId, runtime);
           emitRuntimeStatus(runtime);
@@ -1936,11 +2167,6 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       workspaceIdentity: string;
     }): Promise<void> {
       for (const [windowId, runtime] of runtimes) {
-        const bridge = runtime.currentBridge;
-        const bridgeMatches =
-          bridge?.remoteSessionId === event.previousSessionId &&
-          bridge.workspacePath === event.workspacePath &&
-          bridge.workspaceIdentity === event.workspaceIdentity;
         const runtimeMatches = runtime.remoteSessionId === event.previousSessionId;
         const availableWorkspaces = availableWorkspacesByWindowId.get(windowId);
         if (availableWorkspaces) {
@@ -1956,27 +2182,35 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
           );
         }
         if (runtimeMatches) runtime.remoteSessionId = event.sessionId;
-        if (!bridgeMatches || !bridge) {
-          if (runtimeMatches || availableWorkspaces) pushWorkspaceListUpdated(runtime);
-          continue;
-        }
+        let anyBridgeMatched = false;
+        for (const session of runtime.terminalSessions.values()) {
+          const bridge = session.currentBridge;
+          const bridgeMatches =
+            bridge?.remoteSessionId === event.previousSessionId &&
+            bridge.workspacePath === event.workspacePath &&
+            bridge.workspaceIdentity === event.workspaceIdentity;
+          if (!bridgeMatches || !bridge) continue;
+          anyBridgeMatched = true;
 
-        // Bug 原因：过去 Main 复用相同 bridge identity 重建 acknowledged protocol，
-        // 新协议的 seq 从 1 开始，手机 assembler 却仍等待 N+1，新帧会被当成旧 duplicate
-        // 静默丢弃。这里只发非终态 degraded，由 Web 已有恢复流程以新 identity 主动重建。
-        bridge.degraded = true;
-        runtime.pendingBridgeInvalidation = {
-          zcode_type: "bridge-degraded",
-          bridgeSessionId: bridge.bridgeSessionId,
-          ...(bridge.bridgeGeneration === undefined
-            ? {}
-            : { bridgeGeneration: bridge.bridgeGeneration }),
-          ...(bridge.recoveryId ? { recoveryId: bridge.recoveryId } : {}),
-          reason: "source-session-replaced",
-        };
-        disposeRuntimeBridgeResources(runtime);
-        sendPendingBridgeInvalidation(runtime);
-        pushWorkspaceListUpdated(runtime);
+          // Bug 原因：过去 Main 复用相同 bridge identity 重建 acknowledged protocol，
+          // 新协议的 seq 从 1 开始，手机 assembler 却仍等待 N+1，新帧会被当成旧 duplicate
+          // 静默丢弃。这里只发非终态 degraded，由 Web 已有恢复流程以新 identity 主动重建。
+          bridge.degraded = true;
+          session.pendingBridgeInvalidation = {
+            zcode_type: "bridge-degraded",
+            bridgeSessionId: bridge.bridgeSessionId,
+            ...(bridge.bridgeGeneration === undefined
+              ? {}
+              : { bridgeGeneration: bridge.bridgeGeneration }),
+            ...(bridge.recoveryId ? { recoveryId: bridge.recoveryId } : {}),
+            reason: "source-session-replaced",
+          };
+          disposeRuntimeBridgeResources(runtime, session);
+          sendPendingBridgeInvalidation(runtime, session);
+        }
+        if (anyBridgeMatched || runtimeMatches || availableWorkspaces) {
+          pushWorkspaceListUpdated(runtime);
+        }
       }
     },
 
@@ -1986,7 +2220,6 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       clearStartAuthorizationsForWindow(windowId);
       await stopWindowRuntime(windowId, "window-disposed");
       availableWorkspacesByWindowId.delete(windowId);
-      pushedWorkspaceListSignaturesByWindowId.delete(windowId);
     },
 
     failRemoteSession(
@@ -1995,29 +2228,34 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       failure: WebRemoteControlFailure,
     ): void {
       for (const [windowId, runtime] of runtimes) {
-        const bridge = runtime.currentBridge;
-        const bridgeUsesRemoteSession = bridge?.remoteSessionId === remoteSessionId;
         const runtimeUsesRemoteSession = runtime.remoteSessionId === remoteSessionId;
+        let anyBridgeUsesRemoteSession = false;
+        for (const session of runtime.terminalSessions.values()) {
+          const bridge = session.currentBridge;
+          if (bridge?.remoteSessionId !== remoteSessionId) continue;
+          anyBridgeUsesRemoteSession = true;
 
-        if (!bridgeUsesRemoteSession && !runtimeUsesRemoteSession) {
-          continue;
+          // Bugfix: 远程 workspace session 只是某个 workspace/bridge 的依赖，不能把它的断开升级成
+          // 窗口级 Web 远控 device WS 失败；否则单个远端空闲退出会错误关闭电脑端全局远控入口。
+          disposeRuntimeBridgeResources(runtime, session);
+          sendAppPayload(
+            runtime,
+            {
+              zcode_type: "workspace-bridge-error",
+              bridgeSessionId: bridge.bridgeSessionId,
+              ...(bridge.bridgeGeneration !== undefined
+                ? { bridgeGeneration: bridge.bridgeGeneration }
+                : {}),
+              ...(bridge.recoveryId ? { recoveryId: bridge.recoveryId } : {}),
+              requestId: `remote-session-closed:${remoteSessionId}`,
+              reason: failure.reason,
+              error: failure.message ?? failure.reason,
+            },
+            session,
+          );
         }
-
-        // Bugfix: 远程 workspace session 只是某个 workspace/bridge 的依赖，不能把它的断开升级成
-        // 窗口级 Web 远控 device WS 失败；否则单个远端空闲退出会错误关闭电脑端全局远控入口。
-        if (bridgeUsesRemoteSession) {
-          disposeRuntimeBridgeResources(runtime);
-          sendAppPayload(runtime, {
-            zcode_type: "workspace-bridge-error",
-            bridgeSessionId: bridge.bridgeSessionId,
-            ...(bridge.bridgeGeneration !== undefined
-              ? { bridgeGeneration: bridge.bridgeGeneration }
-              : {}),
-            ...(bridge.recoveryId ? { recoveryId: bridge.recoveryId } : {}),
-            requestId: `remote-session-closed:${remoteSessionId}`,
-            reason: failure.reason,
-            error: failure.message ?? failure.reason,
-          });
+        if (!anyBridgeUsesRemoteSession && !runtimeUsesRemoteSession) {
+          continue;
         }
         if (runtimeUsesRemoteSession) {
           runtime.remoteSessionId = undefined;

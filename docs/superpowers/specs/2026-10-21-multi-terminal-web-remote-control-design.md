@@ -344,17 +344,30 @@ const TERMINAL_SESSION_GRACE_MS = 30_000;
   入口：
   - **声明即抢占**：某 session 声明查看任务 X 成功时，遍历其他 session，凡
     `mobileTaskView` 指向同一 `(workspaceKey, taskId)` 的旧持有者被抢占——清除其
-    `mobileTaskView` 并定向发送新 payload
-    `{ zcode_type: "mobile-task-view-preempted", bridgeSessionId, workspaceKey, taskId, reason: "opened-by-other-terminal" }`。
-  - **不中断执行状态**：抢占只清除视图事实并通知，**不 dispose 被踢 session 的 bridge、
-    不释放 host attachment**；workspace host/agent 运行与该 terminal 的其他能力不受影响。
+    `mobileTaskView`、定向发送新 payload
+    `{ zcode_type: "mobile-task-view-preempted", bridgeSessionId, workspaceKey, taskId, reason: "opened-by-other-terminal" }`，
+    并**立即断开其 bridge**（dispose 该 terminal 的短生命周期 attachment；Host/Agent
+    执行不中断）。
+  - **输入禁入（2026-10-21 第三批强化）**：bridge 是 workspace 级输入通道，manager 无法
+    按任务解析 RPC 内容，因此"被踢页不得再向该会话输入"只能密闭为"被踢 terminal 禁入期
+    不得持有任何 bridge"：
+    - 抑制记录（`preemptedTaskViewKey`）存续期间，该 session 的所有
+      `workspace-bridge-open` 一律拒绝（错误码 `WORKSPACE_TASK_PREEMPTED` →
+      `workspace-closed`，提示返回任务列表或刷新）；
+    - **唯一逃生门是 `view=null` 上报**：为让被踢页"退出聊天页"即可解禁，
+      null 上报放宽为无 bridge / degraded bridge 时也接受（epoch 与 seq 单调仍校验）。
+      新 web 被踢后导航回任务列表即触发；旧 web 用户点返回同样触发；
+    - 旧 web（不识别 preempted、停留在聊天页）的输入路径：断桥后其 rpc-frame 命中
+      既有自愈（bridge-degraded source-session-replaced）→ 恢复流程 bridge-open 被拒 →
+      页面显示失败提示 → 用户返回任务列表（null 上报解禁）或刷新后恢复正常；
+    - 禁入不触碰其他 terminal：其他页面、其他会话完全不受影响；被踢页解禁后打开任何
+      会话（含重新接管原会话）恢复正常。
+  - **不中断执行状态**：抢占只清视图事实并断被踢 terminal 的页面侧 attachment，
+    workspace host/agent 运行不受影响。
   - **抑制重报（防乒乓）**：被踢 session 记录 `preemptedTaskViewKey`；此后它对同一任务的
-    上报一律拒绝（不重设视图、不触发反向抢占）。记录在以下时机清除：该 session 上报
-    `view=null` 或其他任务（页面确认离开）、新 bridge open（`disposeRuntimeBridgeResources`
-    重建路径）、transport 离开 paired（全部视图与 epoch 本就重置）。旧 web 不认识
-    preempted payload 也不会导航，其 visibilitychange/pageshow 周期性重报由该抑制挡住；
-    旧页面刷新即新建 bridge，可重新打开该任务。
-  - **对称语义**：被踢页回到任务列表（上报 null 清除抑制）后再次点入同一任务，视为
+    上报一律拒绝（不重设视图、不触发反向抢占）。记录仅在 `view=null` 上报或 transport
+    离开 paired（全部视图与 epoch 本就重置）时清除；session 回收时随对象消亡。
+  - **对称语义**：被踢页退出聊天页（null 上报解禁）后再次点入同一任务，视为
     "新开"，反向抢占当前持有者。
 - 桌面状态投影：`mobileConnected` 仍取 device transport 是否 paired（至少一个页面在线）；
   `mobileViewState` 取 `runtime.mobileViewState`；`mobileTaskView` / `mobileDeviceInfo` 取
@@ -510,8 +523,9 @@ device 断开
 | MT08 | 两页打开同一个 task         | 后开者接管任务视图；先开者退出到任务列表并收到提示；bridge/agent 执行不中断（2026-10-21 变更，原语义"都能收到流式帧"作废） |
 | MT09 | 同一 terminal_id 重复连接   | 只踢旧连接，不影响其他页面                                                                                                 |
 | MT10 | 32 个 terminal 上限         | 第 33 个收 KICKED 并关闭，其余不受影响                                                                                     |
-| MT11 | 被踢页重新进入同一 task     | 接管回来（对称的"新开踢旧开"），原持有者收到提示                                                                           |
+| MT11 | 被踢页重新进入同一 task     | 退出聊天页（null 解禁）后可重新接管，原持有者收到提示                                                                      |
 | MT12 | 被踢页后台切回重报该 task   | 桌面抑制记录拒绝重报，持有者不被反向抢占（防乒乓）                                                                         |
+| MT13 | 被踢页输入禁入              | 被踢即断桥；禁入期 bridge-open 被拒（workspace-closed）；退出聊天页解禁；其他页面/会话不受影响（2026-10-21 第三批）        |
 
 真机验证需要：KCode 桌面构建产物、ECS relay 与新 web 静态产物、同一链接的两个浏览器页面。
 本地单测与假 relay 不替代真机、OAuth、线上部署验收。
@@ -552,14 +566,15 @@ sequenceDiagram
     M->>M: 校验 B 的 bridge/epoch/seq 通过
     M->>M: B.mobileTaskView=X；A.preemptedTaskViewKey=X
     M-->>A: 定向 mobile-task-view-preempted(X)
-    M->>M: A.mobileTaskView=undefined（投影事件）
-    Note over H: bridge/attachment/agent 均不动，执行不中断
-    A->>A: 退回任务列表，Reporter 上报 view=null
-    M->>M: A.preemptedTaskViewKey 清除（可再次进入）
+    M->>M: A.mobileTaskView=undefined；断开 A 的 bridge/attachment（输入禁入）
+    Note over H: Host/agent 均不动，执行不中断
+    A->>A: 退回任务列表，Reporter 上报 view=null（无桥亦接受）
+    M->>M: A.preemptedTaskViewKey 清除（解禁，可再开任意会话）
 ```
 
 不做的部分：不在 relay 层做（app payload 对 relay 透明）；不踢 terminal 连接（与
-MT09 的同 id 替换正交）；不阻止两页打开同一 workspace 的不同任务（MT02 语义不变）。
+MT09 的同 id 替换正交）；不阻止两页打开同一 workspace 的不同任务（MT02 语义不变）；
+不做 per-task 的 RPC 级输入过滤（manager 不解析 RPC 内容，密闭性由"禁入期无桥"保证）。
 
 ## 实现与验收记录（2026-10-21）
 

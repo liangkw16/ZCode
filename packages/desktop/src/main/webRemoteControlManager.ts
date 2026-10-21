@@ -153,6 +153,7 @@ interface TerminalSession {
     intentKey: string;
     hostRequestId: string;
     preparingProject: boolean;
+    disposalEpoch: number;
     promise: Promise<WebRemoteControlExternalWorkspaceBridge>;
   };
   pendingBridgeInvalidation?: Extract<
@@ -161,14 +162,21 @@ interface TerminalSession {
   >;
   pendingOutboundPayloads: WebRemoteControlAppPayload[];
   pendingOutboundPayloadTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * bridge 释放代数：disposeRuntimeBridgeResources 每次递增。bridge-open 去重时用于
+   * 识别"记录中的 open 所属 bridge 已被释放"（含任务视图抢占断桥）——同标识重开必须
+   * 走全新 admission，不能复活已释放的旧结果；进行中的 open（未经历释放）仍正常去重。
+   */
+  bridgeDisposalEpoch?: number;
   mobileViewState?: WebRemoteControlMobileViewState;
   mobileTaskView?: NonNullable<WebRemoteControlStatus["mobileTaskView"]>;
   mobileTaskViewEpoch?: string;
   mobileTaskViewSeq?: number;
   /**
-   * 任务视图独占：被其他 terminal 抢占后记录被踢出的任务地址（workspaceKey + taskId），
-   * 抑制本页对同一任务的重复上报（旧 web 不识别 preempted 通知，后台切回会周期性重报）。
-   * 页面上报 null/其他任务、重建 bridge 或 transport 离开 paired 时清除。
+   * 任务视图独占：被其他 terminal 抢占后记录被踢出的任务地址（workspaceKey + taskId）。
+   * 存续期间该 session 禁入（抑制对同一任务的重报 + 拒绝一切 bridge-open），输入因此
+   * 被密闭（bridge 是唯一的 workspace 级输入通道）。唯一解除方式是 view=null 上报
+   * （页面退出聊天页/被踢导航回任务列表）；transport 离开 paired 时随视图整体重置。
    */
   preemptedTaskViewKey?: string;
   mobileDeviceInfo?: WebRemoteControlMobileDeviceInfo;
@@ -295,6 +303,9 @@ function mapWorkspaceBridgeFailureReason(
       return "desktop-disconnected";
     case "REMOTE_SESSION_MISSING":
     case "REMOTE_SESSION_WINDOW_MISMATCH":
+    // 任务视图独占的禁入拒绝：旧 web 只认既有 reason 枚举，复用 workspace-closed，
+    // 具体原因通过 error 文案传达。
+    case "WORKSPACE_TASK_PREEMPTED":
       return "workspace-closed";
     case "REMOTE_WORKSPACE_IDENTITY_MISSING":
     case "REMOTE_WORKSPACE_IDENTITY_MISMATCH":
@@ -518,8 +529,8 @@ export function createWebRemoteControlManager(
     session: TerminalSession,
   ): void {
     clearMobileTaskView(runtime, session);
-    // bridge 重建意味着页面上下文重置（刷新/恢复），旧抑制记录不再适用。
-    session.preemptedTaskViewKey = undefined;
+    // 禁入抑制不随 bridge 释放清除：被踢 terminal 在 view=null 解禁前不得重建 bridge。
+    session.bridgeDisposalEpoch = (session.bridgeDisposalEpoch ?? 0) + 1;
     const bridge = session.currentBridge;
     if (!bridge) {
       return;
@@ -1272,6 +1283,16 @@ export function createWebRemoteControlManager(
     session: TerminalSession,
     request: WebRemoteControlWorkspaceBridgeOpenPayload,
   ): Promise<WebRemoteControlExternalWorkspaceBridge> {
+    // 输入禁入：被抢占的 terminal 在 view=null 解禁前不得重建任何 bridge——bridge 是
+    // workspace 级输入通道，恢复 bridge 即恢复对被踢会话的输入能力。旧 web 的恢复链路
+    // （bridge-degraded → 重建）会被此拒绝挡住并显示失败提示，引导用户退出聊天页或刷新。
+    if (session.preemptedTaskViewKey) {
+      const error = new Error(
+        "该会话已在其他页面打开，请返回任务列表或刷新页面后重试。",
+      );
+      (error as { code?: string }).code = "WORKSPACE_TASK_PREEMPTED";
+      return Promise.reject(error);
+    }
     const intentKey = JSON.stringify([
       request.workspaceKey,
       request.taskId ?? null,
@@ -1300,7 +1321,15 @@ export function createWebRemoteControlManager(
         return Promise.reject(
           new Error("Degraded workspace bridge requires a new identity."),
         );
-      return previous.promise;
+      // 防御：记录中的 open 若经历过 bridge 释放（含任务视图抢占断桥），同标识重开
+      // 不能复活已释放的旧结果，走全新 admission；进行中的 open（未经历释放）保持去重。
+      if (
+        (previous.disposalEpoch ?? 0) !== (session.bridgeDisposalEpoch ?? 0)
+      ) {
+        cancelBridgeOpen(runtime, session);
+      } else {
+        return previous.promise;
+      }
     }
     cancelBridgeOpen(runtime, session);
     // 同一 transport identity 的重试复用整次 admission；新导航立即使旧异步结果失效。
@@ -1310,6 +1339,7 @@ export function createWebRemoteControlManager(
       intentKey,
       hostRequestId: randomUUID(),
       preparingProject: Boolean(request.project || request.taskHostId),
+      disposalEpoch: session.bridgeDisposalEpoch ?? 0,
       promise: undefined as never,
     };
     session.bridgeOpen = pending;
@@ -1416,6 +1446,9 @@ export function createWebRemoteControlManager(
       degraded: false,
     };
     session.currentBridge = bridgeRuntime;
+    // open 自身的 dispose 已计入代数；装载后回写，之后的任何释放（抢占断桥等）都能被
+    // 去重路径识别为"旧结果已失效"，而进行中/刚完成的 open 不受影响。
+    pending.disposalEpoch = session.bridgeDisposalEpoch ?? 0;
 
     dependencies.logger.info(
       `[web-remote-control] attaching workspace bridge window=${runtime.windowId} session=${runtime.deviceSid} terminal=${session.terminalId} bridgeSession=${request.bridgeSessionId} workspace=${target.workspacePath}`,
@@ -1656,26 +1689,33 @@ export function createWebRemoteControlManager(
     const bridge = session.currentBridge;
     const view = payload.view;
     // 导航缓存、断线宽限和旧 bridge 回包都不能证明当前查看；只接收本代配对的完整地址。
+    // view=null 是"不再查看"的确认，也是禁入解禁的唯一途径：被抢占 session 的 bridge 已被
+    // 断开，null 上报必须在无 bridge / degraded bridge 时也放行；非 null 声明仍要求
+    // 本代 ready 且未 degraded 的 bridge。
     if (
       runtime.transportState !== "paired" ||
       payload.epoch !== session.mobileTaskViewEpoch ||
       payload.seq <= (session.mobileTaskViewSeq ?? -1) ||
-      !bridge?.readyAnnounced ||
-      bridge.degraded ||
-      payload.bridgeSessionId !== bridge.bridgeSessionId ||
-      payload.bridgeGeneration !== bridge.bridgeGeneration ||
+      (bridge &&
+        (payload.bridgeSessionId !== bridge.bridgeSessionId ||
+          payload.bridgeGeneration !== bridge.bridgeGeneration)) ||
       (view &&
-        (view.workspacePath !== bridge.workspacePath ||
+        (!bridge ||
+          !bridge.readyAnnounced ||
+          bridge.degraded ||
+          view.workspacePath !== bridge.workspacePath ||
           resolveWebRemoteControlWorkspaceKey(view) !== bridge.workspaceKey))
     )
       return;
     // 任务视图独占：被抢占过的 session 重报同一任务一律拒绝。旧 web 不识别
     // preempted 通知、不会退出聊天页，后台切回时的 pageshow 重报会周期性触发，
     // 不抑制会把新持有者反向踢掉（乒乓）。
+    const claimBridge = view && bridge ? bridge : undefined;
     if (
       view &&
+      claimBridge &&
       session.preemptedTaskViewKey ===
-        taskViewOwnershipKey(bridge.workspaceKey, view.taskId)
+        taskViewOwnershipKey(claimBridge.workspaceKey, view.taskId)
     ) {
       return;
     }
@@ -1684,25 +1724,32 @@ export function createWebRemoteControlManager(
     const trustedView = view
       ? {
           ...view,
-          ...(bridge.kind === "remote"
-            ? { remoteSessionId: bridge.remoteSessionId }
+          ...(claimBridge?.kind === "remote"
+            ? { remoteSessionId: claimBridge.remoteSessionId }
             : {}),
         }
       : undefined;
     session.lastActivityAt = bumpActivityAt();
     session.mobileTaskView = trustedView;
-    if (trustedView) {
-      // 成功声明（null 或换任务都算离开原任务）即解除自身抑制，并可重新接管。
-      session.preemptedTaskViewKey = undefined;
-      preemptTaskViewOwners(runtime, session, trustedView, bridge.workspaceKey);
-    } else {
-      session.preemptedTaskViewKey = undefined;
+    // 成功上报（含 null 解禁）即清除自身抑制；非 null 声明同时抢占旧持有者。
+    session.preemptedTaskViewKey = undefined;
+    if (trustedView && claimBridge) {
+      preemptTaskViewOwners(
+        runtime,
+        session,
+        trustedView,
+        claimBridge.workspaceKey,
+      );
     }
     // 同值视图也发布：投影取最近活跃 session，值没变但活跃页可能切换。
     emitRuntimeStatus(runtime);
   }
 
-  /** 声明即抢占：清掉同任务旧持有者的视图事实并定向通知；不 dispose bridge/attachment，执行不中断。 */
+  /**
+   * 声明即抢占：清掉同任务旧持有者的视图事实、定向通知，并立即断开其 bridge。
+   * bridge 是 workspace 级输入通道，manager 不解析 RPC 内容，被踢 terminal 的输入禁入
+   * 只能密闭为"禁入期不得持有任何 bridge"；Host/agent 执行不受影响。
+   */
   function preemptTaskViewOwners(
     runtime: WindowControlRuntime,
     session: TerminalSession,
@@ -1723,20 +1770,26 @@ export function createWebRemoteControlManager(
       ) {
         continue;
       }
+      const otherBridgeSessionId = other.currentBridge?.bridgeSessionId;
       other.preemptedTaskViewKey = key;
       clearMobileTaskView(runtime, other);
-      const otherBridgeSessionId = other.currentBridge?.bridgeSessionId;
-      if (!otherBridgeSessionId) continue;
-      sendAppPayload(
-        runtime,
-        {
-          zcode_type: "mobile-task-view-preempted",
-          bridgeSessionId: otherBridgeSessionId,
-          workspaceKey,
-          taskId: view.taskId,
-          reason: "opened-by-other-terminal",
-        },
-        other,
+      if (otherBridgeSessionId) {
+        sendAppPayload(
+          runtime,
+          {
+            zcode_type: "mobile-task-view-preempted",
+            bridgeSessionId: otherBridgeSessionId,
+            workspaceKey,
+            taskId: view.taskId,
+            reason: "opened-by-other-terminal",
+          },
+          other,
+        );
+      }
+      // 断桥即输入禁入：释放该 terminal 的页面侧 attachment（抑制记录在 dispose 内保留）。
+      disposeRuntimeBridgeResources(runtime, other);
+      dependencies.logger.info(
+        `[web-remote-control] task view preempted window=${runtime.windowId} session=${runtime.deviceSid} terminal=${other.terminalId} workspaceKey=${workspaceKey} taskId=${view.taskId} bridgeReleased=${Boolean(otherBridgeSessionId)}`,
       );
     }
   }

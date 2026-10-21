@@ -317,11 +317,12 @@ describe("web remote control multi-terminal sessions", () => {
       epoch: string | undefined,
       seq: number,
       view: { workspacePath: string; taskId: string } | null,
+      bridgeId = id,
     ): void {
       h.deliverPayload(
         {
           zcode_type: "mobile-task-view-update",
-          bridgeSessionId: `bridge-${id}`,
+          bridgeSessionId: `bridge-${bridgeId}`,
           epoch,
           seq,
           view,
@@ -330,7 +331,7 @@ describe("web remote control multi-terminal sessions", () => {
       );
     }
 
-    it("后开者接管同任务视图：旧持有者被定向通知且执行资源不中断", async () => {
+    it("后开者接管同任务视图：旧持有者被定向通知并断桥（输入禁入），Host 资源与 B 不受影响", async () => {
       const h = createManagerHarness();
       await h.manager.start(1, { workspacePath });
       h.emitTransportState("paired");
@@ -369,8 +370,14 @@ describe("web remote control multi-terminal sessions", () => {
         reason: "opened-by-other-terminal",
       });
       expect(h.sentTargets[preemptIndex]).toBe("tA");
-      // 抢占只清视图：不释放 attachment、不 dispose bridge，A 仍可正常请求。
-      expect(h.releaseWorkspaceHostAttachment).not.toHaveBeenCalled();
+      // 输入禁入：A 的页面侧 attachment 立即释放；B 的保留（Host/agent 执行不受影响）。
+      expect(h.releaseWorkspaceHostAttachment).toHaveBeenCalledWith(
+        attachments[0],
+      );
+      expect(h.releaseWorkspaceHostAttachment).not.toHaveBeenCalledWith(
+        attachments[1],
+      );
+      // app 层请求不依赖 bridge：A 仍可 bootstrap。
       h.sentPayloads.length = 0;
       h.sentTargets.length = 0;
       h.deliverPayload(
@@ -385,11 +392,10 @@ describe("web remote control multi-terminal sessions", () => {
           }),
         ),
       );
-      expect(attachments).toHaveLength(2);
       await h.manager.stop(1);
     });
 
-    it("被踢 session 重报同任务被抑制，上报 null 后可再次接管", async () => {
+    it("禁入期 bridge-open 被拒（workspace-closed），view=null 解禁后可重建并接管", async () => {
       const h = createManagerHarness();
       await h.manager.start(1, { workspacePath });
       h.emitTransportState("paired");
@@ -409,8 +415,23 @@ describe("web remote control multi-terminal sessions", () => {
         ),
       );
 
-      // 旧 web 式重报（如 pageshow）不得把持有者反踢回去。重报本身会让 A 成为
-      // 最近活跃页（投影语义，非视图事实）；持有关系由 B 重报同任务无新通知证明。
+      // 旧 web 的恢复链路：断桥后重建 bridge → 被禁入拒绝，提示已在他页打开。
+      h.sentPayloads.length = 0;
+      h.sentTargets.length = 0;
+      h.deliverPayload(await bridgeOpenPayload("tA"), "tA");
+      const rejected = await vi.waitFor(() => {
+        const found = h.sentPayloads.find(
+          (payload) => payload.zcode_type === "workspace-bridge-error",
+        );
+        expect(found).toBeDefined();
+        return found as { reason: string; error: string };
+      });
+      expect(rejected.reason).toBe("workspace-closed");
+      expect(rejected.error).toContain("其他页面");
+      expect(h.sentTargets.at(-1)).toBe("tA");
+
+      // 旧 web 式重报（pageshow）不得反踢持有者；B 重报同任务无新通知。
+      h.sentPayloads.length = 0;
       reportTaskView(h, "tA", epochs.get("tA"), 2, {
         workspacePath,
         taskId: "task-X",
@@ -424,17 +445,29 @@ describe("web remote control multi-terminal sessions", () => {
         h.sentPayloads.filter(
           (p) => p.zcode_type === "mobile-task-view-preempted",
         ),
-      ).toHaveLength(1);
-      expect(h.manager.getStatus(1).mobileTaskView).toMatchObject({
-        taskId: "task-X",
-      });
+      ).toHaveLength(0);
 
-      // A 确认离开（view=null 解除抑制）后再次进入：对称接管，B 被通知。
+      // view=null（退出聊天页）是唯一解禁途径：无 bridge 也必须接受。
       reportTaskView(h, "tA", epochs.get("tA"), 3, null);
-      reportTaskView(h, "tA", epochs.get("tA"), 4, {
-        workspacePath,
-        taskId: "task-X",
-      });
+      h.sentPayloads.length = 0;
+      // 解禁后重建 bridge 成功（真实恢复会换 bridge 标识），再次声明同任务 = 对称接管。
+      h.deliverPayload(await bridgeOpenPayload("tA-r2"), "tA");
+      await vi.waitFor(() =>
+        expect(h.sentPayloads).toContainEqual(
+          expect.objectContaining({
+            zcode_type: "workspace-bridge-ready",
+            bridgeSessionId: "bridge-tA-r2",
+          }),
+        ),
+      );
+      reportTaskView(
+        h,
+        "tA",
+        epochs.get("tA"),
+        4,
+        { workspacePath, taskId: "task-X" },
+        "tA-r2",
+      );
       await vi.waitFor(() =>
         expect(h.sentPayloads).toContainEqual(
           expect.objectContaining({
@@ -443,6 +476,9 @@ describe("web remote control multi-terminal sessions", () => {
           }),
         ),
       );
+      expect(h.manager.getStatus(1).mobileTaskView).toMatchObject({
+        taskId: "task-X",
+      });
       await h.manager.stop(1);
     });
 
@@ -470,10 +506,11 @@ describe("web remote control multi-terminal sessions", () => {
           (p) => p.zcode_type === "mobile-task-view-preempted",
         ),
       ).toHaveLength(0);
+      expect(h.releaseWorkspaceHostAttachment).not.toHaveBeenCalled();
       await h.manager.stop(1);
     });
 
-    it("transport 离开 paired 清除抑制：恢复后重新声明即可持有", async () => {
+    it("transport 离开 paired 清除禁入：恢复后重建 bridge 即可持有", async () => {
       const h = createManagerHarness();
       await h.manager.start(1, { workspacePath });
       h.emitTransportState("paired");
@@ -493,9 +530,19 @@ describe("web remote control multi-terminal sessions", () => {
         ),
       );
 
-      // 断线（视图与抑制整体重置）→ 恢复 → A 用新 epoch 声明同任务应成功。
+      // 断线（视图与禁入整体重置）→ 恢复 → A 重建 bridge 后声明同任务应成功。
       h.emitTransportState("connecting");
       h.emitTransportState("paired");
+      h.sentPayloads.length = 0;
+      h.deliverPayload(await bridgeOpenPayload("tA-r2"), "tA");
+      await vi.waitFor(() =>
+        expect(h.sentPayloads).toContainEqual(
+          expect.objectContaining({
+            zcode_type: "workspace-bridge-ready",
+            bridgeSessionId: "bridge-tA-r2",
+          }),
+        ),
+      );
       h.sentPayloads.length = 0;
       h.deliverPayload(
         { zcode_type: "bootstrap-request", requestId: "boot-tA-again" },
@@ -512,10 +559,14 @@ describe("web remote control multi-terminal sessions", () => {
       });
       expect(response.result.mobileTaskViewEpoch).toBeTruthy();
       h.sentPayloads.length = 0;
-      reportTaskView(h, "tA", response.result.mobileTaskViewEpoch, 1, {
-        workspacePath,
-        taskId: "task-X",
-      });
+      reportTaskView(
+        h,
+        "tA",
+        response.result.mobileTaskViewEpoch,
+        1,
+        { workspacePath, taskId: "task-X" },
+        "tA-r2",
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(
         h.sentPayloads.filter(

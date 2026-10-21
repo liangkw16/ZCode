@@ -392,6 +392,14 @@ export interface CompactMicrocompactRuntimeConfig {
   minTokenSavings?: number;
 }
 
+/** 按模型覆盖的压缩阈值字段白名单；仅在 providerId+modelId 精确匹配（大小写敏感）时生效。 */
+export interface CompactModelOverride {
+  contextWindowTokens?: number;
+  thresholdRatio?: number;
+  bufferTokens?: number;
+  outputReserveTokens?: number;
+}
+
 export interface CompactRuntimeConfig {
   /** 自动（Auto/Reactive/Micro）压缩总开关；手动 /compact 不受影响。未设置时回落 features.compact。 */
   enabled?: boolean;
@@ -414,6 +422,9 @@ export interface CompactRuntimeConfig {
   summaryModel?: string;
   /** 连续压缩失败熔断阈值，默认 3。 */
   maxConsecutiveFailures?: number;
+  /** providerId → modelId → 覆盖字段。未命中或字段缺省时继承本段全局值与模型窗口；
+   *  空对象条目为合法 no-op，不会清除低层已声明的条目。 */
+  modelOverrides?: Record<string, Record<string, CompactModelOverride>>;
   microcompact?: CompactMicrocompactRuntimeConfig;
 }
 

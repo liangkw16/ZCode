@@ -239,6 +239,15 @@ const compactMicrocompactSchema = z
     minTokenSavings: positiveIntegerSchema.optional(),
   })
   .strict();
+// 与全局段数值规则完全一致；21K 输出预留上限由 policy 层 min-cap 生效，schema 不重复校验。
+const compactModelOverrideSchema = z
+  .object({
+    contextWindowTokens: positiveIntegerSchema.optional(),
+    bufferTokens: positiveIntegerSchema.optional(),
+    outputReserveTokens: positiveIntegerSchema.optional(),
+    thresholdRatio: compactRatioSchema.optional(),
+  })
+  .strict();
 const compactSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -252,6 +261,9 @@ const compactSchema = z
     summaryProvider: z.string().min(1).optional(),
     summaryModel: z.string().min(1).optional(),
     maxConsecutiveFailures: positiveIntegerSchema.optional(),
+    modelOverrides: z
+      .record(z.string().min(1), z.record(z.string().min(1), compactModelOverrideSchema))
+      .optional(),
     microcompact: compactMicrocompactSchema.optional(),
   })
   .strict()

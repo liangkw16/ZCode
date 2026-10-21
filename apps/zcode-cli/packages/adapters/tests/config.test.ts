@@ -421,6 +421,13 @@ describe("config adapters", () => {
             summaryModel: "cheap-model",
             summaryProvider: "test-provider",
             thresholdRatio: 0.8,
+            modelOverrides: {
+              "test-provider": {
+                "cheap-model": { contextWindowTokens: 200_000 },
+                "other-model": { thresholdRatio: 0.7 },
+                "empty-model": {},
+              },
+            },
             microcompact: {
               enabled: true,
               keepRecentToolResults: 3,
@@ -444,6 +451,13 @@ describe("config adapters", () => {
         summaryModel: "cheap-model",
         summaryProvider: "test-provider",
         thresholdRatio: 0.8,
+        modelOverrides: {
+          "test-provider": {
+            "cheap-model": { contextWindowTokens: 200_000 },
+            "other-model": { thresholdRatio: 0.7 },
+            "empty-model": {},
+          },
+        },
         microcompact: {
           enabled: true,
           keepRecentToolResults: 3,
@@ -465,6 +479,16 @@ describe("config adapters", () => {
       { compact: { summaryModel: "cheap-model" } },
       { compact: { summaryProvider: "test-provider" } },
       { compact: { microcompact: { unknownField: 1 } } },
+      { compact: { modelOverrides: { "": { m: { contextWindowTokens: 1 } } } } },
+      { compact: { modelOverrides: { p: { "": { contextWindowTokens: 1 } } } } },
+      { compact: { modelOverrides: { p: { m: { unknownField: 1 } } } } },
+      { compact: { modelOverrides: { p: { m: { thresholdRatio: 0 } } } } },
+      { compact: { modelOverrides: { p: { m: { thresholdRatio: 1 } } } } },
+      { compact: { modelOverrides: { p: { m: { bufferTokens: -1 } } } } },
+      { compact: { modelOverrides: { p: { m: { contextWindowTokens: 0 } } } } },
+      { compact: { modelOverrides: { p: { m: { contextWindowTokens: 1.5 } } } } },
+      { compact: { modelOverrides: { p: { m: { contextWindowTokens: "400000" } } } } },
+      { compact: { modelOverrides: "nope" } },
     ];
     const dir = await mkdtemp(join(tmpdir(), "zcode-config-compact-invalid-"));
 

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createManagerHarness } from "./webRemoteControlManagerExternalRelay.test.js";
+import { encodeWebRemoteControlRpcTransportMessage } from "@zcode/shared";
 import type { WebRemoteControlAppPayload } from "@zcode/shared";
 
 const workspacePath = "/workspace/demo";
@@ -69,6 +70,72 @@ describe("web remote control multi-terminal sessions", () => {
     expect(h.releaseWorkspaceHostAttachment).not.toHaveBeenCalledWith(b);
     await h.manager.stop(1);
     vi.useRealTimers();
+  });
+
+  it("两个 session 的 bootstrap 和 workspace-list 推送互不串台", async () => {
+    const h = createManagerHarness();
+    await h.manager.start(1, { workspacePath });
+    h.emitTransportState("paired");
+    h.sentPayloads.length = 0;
+    h.sentTargets.length = 0;
+
+    h.deliverPayload({ zcode_type: "bootstrap-request", requestId: "a" }, "tA");
+    h.deliverPayload({ zcode_type: "bootstrap-request", requestId: "b" }, "tB");
+    await vi.waitFor(() =>
+      expect(
+        h.sentPayloads.filter((p) => p.zcode_type === "bootstrap-response"),
+      ).toHaveLength(2),
+    );
+    const bootstrapTargets = h.sentPayloads
+      .map((payload, index) => ({ payload, target: h.sentTargets[index] }))
+      .filter((entry) => entry.payload.zcode_type === "bootstrap-response")
+      .map((entry) => entry.target);
+    expect(bootstrapTargets).toEqual(["tA", "tB"]);
+
+    h.sentPayloads.length = 0;
+    h.sentTargets.length = 0;
+    h.manager.syncAvailableWorkspaces(1, [
+      { workspacePath, label: "demo", kind: "local" },
+    ]);
+    await vi.waitFor(() =>
+      expect(
+        h.sentPayloads.filter((p) => p.zcode_type === "workspace-list-updated"),
+      ).toHaveLength(2),
+    );
+    const pushTargets = h.sentPayloads
+      .map((payload, index) => ({ payload, target: h.sentTargets[index] }))
+      .filter((entry) => entry.payload.zcode_type === "workspace-list-updated")
+      .map((entry) => entry.target);
+    expect(pushTargets).toEqual(["tA", "tB"]);
+    await h.manager.stop(1);
+  });
+
+  it("session 丢失 bridge 后收到旧 rpc-frame 会定向回 bridge-degraded", async () => {
+    const h = createManagerHarness();
+    await h.manager.start(1, { workspacePath });
+    h.emitTransportState("paired");
+    h.sentPayloads.length = 0;
+
+    const [frame] = encodeWebRemoteControlRpcTransportMessage(
+      new Uint8Array([1, 2, 3]),
+      {
+        bridgeSessionId: "bridge-lost",
+        firstPhysicalSeq: 1,
+        messageSeq: 1,
+      },
+    );
+    h.deliverPayload(frame, "tA");
+
+    await vi.waitFor(() =>
+      expect(h.sentPayloads).toContainEqual(
+        expect.objectContaining({
+          zcode_type: "bridge-degraded",
+          bridgeSessionId: "bridge-lost",
+        }),
+      ),
+    );
+    expect(h.sentTargets.at(-1)).toBe("tA");
+    await h.manager.stop(1);
   });
 
   it("停止窗口立即释放全部 session", async () => {

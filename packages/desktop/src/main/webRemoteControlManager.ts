@@ -43,6 +43,7 @@ import {
   type RemoteUsageRemoteKind,
   type TelemetryEventPayload,
   measureWebRemoteControlRpcRelayEnvelopeBytes,
+  parseWebRemoteControlRpcTransportPayload,
 } from "@zcode/shared";
 import { WebRemoteControlV2ConnectionError } from "@zcode/shared/web-remote-relay";
 import {
@@ -1500,8 +1501,24 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     payload: unknown,
   ): boolean {
     const bridge = session.currentBridge;
-    if (!bridge || bridge.degraded) return false;
-    return bridge.relayProtocol?.acceptPayload(payload) ?? false;
+    if (bridge && !bridge.degraded && bridge.relayProtocol?.acceptPayload(payload)) {
+      return true;
+    }
+    // session 宽限释放后页面可能仍持旧 bridge 发帧：定向回 bridge-degraded 让页面自愈重建，
+    // 不能静默丢帧。legacy session（官方 relay）没有多 terminal 恢复语义，维持旧行为。
+    if (session.terminalId === LEGACY_TERMINAL_SESSION_KEY) return false;
+    const parsed = parseWebRemoteControlRpcTransportPayload(payload);
+    if (!parsed) return false;
+    sendAppPayload(
+      runtime,
+      {
+        zcode_type: "bridge-degraded",
+        bridgeSessionId: parsed.bridgeSessionId,
+        reason: "source-session-replaced",
+      },
+      session,
+    );
+    return false;
   }
 
   function logMobileDiagnostic(

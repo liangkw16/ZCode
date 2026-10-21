@@ -500,3 +500,24 @@ device 断开
 - relay 设备离线但仍有 waiting terminal 时删除 SID 的边界保持现状。
 - 若未来需要“只读观察页”或“踢出某页”，在 `terminal_ids` 与 session map 之上扩展，不改变
   本次的 wire 语义。
+
+## 实现与验收记录（2026-10-21）
+
+实现：13 个提交（`90a3a749..facbd744`），两轮 codex 审查共 8 项发现全部修复；typecheck / lint（0 error）/ architecture（0 violation）通过；13 个测试套件 304/304。发布顺序按规范执行：新 KCode（kcode flavor，`ZCODE_KCODE_IDENTITY=1` 构建）先装并连旧 relay，再同批部署新 relay bundle + 新 web 静态（资产先就绪、index.html 最后）。
+
+真机验收（KCode 内置浏览器双标签页 + ECS relay 日志/`ss` + 桌面 `~/.kcode/v2/logs`）：
+
+| #    | 场景                    | 结果                                                                                                                                                           |
+| ---- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MT01 | 同一链接两个标签页      | ✅ 双页同时 paired 进任务首页；relay 2 terminal + 1 device 连接；全程 0 KICKED                                                                                 |
+| MT02 | 两页独立导航            | ✅ B 进入「今天金价」会话，A 保持首页，互不串扰                                                                                                                |
+| MT08 | 两页同任务流式          | ✅ A 发送"多页面验收测试"，B 未刷新实时收到用户消息与模型回复「收到」；桌面日志证实两个 terminal（t_31b1…/t_99c8…）各自独立 bridge/attachment                  |
+| MT03 | 关闭一页                | ✅ B 关闭后 A 持续在线、内容保留，无终态页                                                                                                                     |
+| MT05 | relay 重启              | ✅ device ~10s 内重连（waiting_terminal→paired），页面 A 自动恢复且保留上下文                                                                                  |
+| MT06 | 桌面重启                | ✅ 按既有语义走 DEVICE_OFFLINE：自动恢复成功（restoring previous enabled state），页面超 15s 宽限进 Desktop Offline 终态页（既有单页行为一致），刷新后重新配对 |
+| MT04 | 同 terminal_id 断网重连 | 未执行（内置浏览器无法模拟断网；行为由 Task 8/10 单测覆盖）                                                                                                    |
+| MT07 | 官方 relay 回归         | 未执行（无官方 relay 环境；legacy 路径由 manager 全量既有测试覆盖）                                                                                            |
+| MT09 | 重复 terminal_id        | 真机未模拟（由 relay wsGateway 同 id 重连单测覆盖）                                                                                                            |
+| MT10 | 32 terminal 上限        | 真机未触发（实现含 maxTerminals=32 + KICKED 拒绝；无独立单测，留作后续补充）                                                                                   |
+
+已知边界：桌面重启的 15s DEVICE_OFFLINE 宽限对完整冷启动不够，页面进终态页需刷新——与单页时代一致，非多 terminal 引入的回归。

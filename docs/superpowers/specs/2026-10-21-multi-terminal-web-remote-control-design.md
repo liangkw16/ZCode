@@ -583,3 +583,17 @@ MT09 的同 id 替换正交）；不阻止两页打开同一 workspace 的不同
 补充发现（边缘缺陷，记录不修）：desktop 同一 runtime 生命周期内把 relay 从新版切回旧版（手动回滚 relay 且不重启桌面）时，切换前残留的带 `target_terminal_id` 缓冲 payload 会在重新 paired 后 flush 给旧 relay，被旧 schema 以 WRONG_PARAM 拒绝并使 device 连接进入 relay-unavailable 终态。自愈路径：重启桌面或重新开启远控（新 runtime 空 session map）即恢复；正常发布顺序（desktop 先行、relay 不单独回滚到旧版）不会触发。官方 relay（Go 解码忽略未知字段）不受影响。
 
 已知边界：桌面重启的 15s DEVICE_OFFLINE 宽限对完整冷启动不够，页面进终态页需刷新——与单页时代一致，非多 terminal 引入的回归。
+
+## 实现与部署记录：任务视图独占（2026-10-21 第二批）
+
+实现：提交 `9a658575`（shared payload 类型 + manager 抢占/抑制 + web 退出与提示 + 4 个新单测）。
+门禁：typecheck / lint 0 error / architecture 0 violation；manager 多终端套件 72/72、关联套件 133/133；
+改动文件已 prettier（仓库整体 fmt:check 历史性不通过，未新增问题）。
+
+部署（2026-10-21 傍晚）：
+
+- **web**：新静态产物（`index-BYtJ7eLf.js` 含 `mobile-task-view-preempted` 与"该会话已在其他页面打开"文案）已部署 ECS `/opt/self-host-relay/web/`，线上 `/remote/v4` 已引用新 hash；回滚件 `web.old/` 保留。relay 未动。
+- **desktop**：`node scripts/bundle.mjs --os mac --arch arm64`（`ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1`）产出 KCode 3.16.2（`dev.zcode.app.kcode`，含新逻辑，runtime-dependencies 机械校验通过），已安装到 `/Applications/KCode.app`。**需要手动重启 KCode 生效**（替换时旧进程未杀）。
+- 构建备忘：必须走 `bundle.mjs`（其内部用 `pnpm exec electron-builder --config electron-builder.config.js`）。直接 `npx electron-builder` 不会加载 config（产物退化为 `com.electron.zcodedesktop` 默认身份），且缺 pnpm 环境时 electron-builder 按 npm 解析 hoisted 布局，只收集到 3 个包，afterPack 重打包因 staging 无 native 触发"重打包结果缺少 app.asar.unpacked"硬失败。
+
+验收状态：MT08（新语义）/MT11/MT12 已由单测覆盖（接管+资源不中断、抑制+对称再接管、断线重置抑制）；真机双页验收待用户重启 KCode 后执行。

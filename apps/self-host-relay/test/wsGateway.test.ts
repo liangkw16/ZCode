@@ -469,6 +469,46 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
     device.socket.close();
   });
 
+  it("terminal 集合达上限时新 terminal 收 KICKED，已有连接不受影响", async () => {
+    const sid = freshSid();
+    const device = await auth2("device", sid);
+    await device.messages.next();
+    const first = await auth2("terminal", sid, "tCap1");
+    await first.messages.next();
+    await device.messages.next();
+    const second = await auth2("terminal", sid, "tCap2");
+    await second.messages.next();
+    await device.messages.next();
+
+    // 本 describe 的 gateway 未注入自定义 maxTerminals（默认 32）：
+    // 再连 30 个达到上限后，第 33 个被拒绝。
+    for (let i = 3; i <= 32; i++) {
+      const conn = await auth2("terminal", sid, `tCap${i}`);
+      await conn.messages.next();
+      await device.messages.next();
+    }
+    const overflow = await auth2("terminal", sid, "tCap33");
+    expect(await overflow.messages.next()).toMatchObject({
+      type: "error",
+      code: "KICKED",
+    });
+    await waitClosed(overflow.socket);
+
+    // 上限拒绝不伤害存量连接：first 仍可收定向数据。
+    device.socket.send(
+      JSON.stringify({ type: "data", payload: { cap: 1 }, target_terminal_id: "tCap1" }),
+    );
+    expect(await first.messages.next()).toMatchObject({
+      type: "data",
+      payload: { cap: 1 },
+    });
+    device.socket.close();
+    for (let i = 1; i <= 2; i++) {
+      const c = i === 1 ? first : second;
+      c.socket.close();
+    }
+  });
+
   it("未提供 terminal_id 的旧客户端不收到新字段，且以连接级 sid 作为生效 id", async () => {
     const sid = freshSid();
     const device = await auth2("device", sid);

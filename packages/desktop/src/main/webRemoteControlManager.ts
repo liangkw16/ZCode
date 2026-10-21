@@ -109,6 +109,8 @@ export interface WebRemoteControlStartAuthorization {
 }
 
 const WEB_REMOTE_CONTROL_START_AUTHORIZATION_TTL_MS = 30_000;
+// terminal 断开后的 session 宽限：页面短暂掉线重连复用原 bridge，超时才释放 attachment。
+const TERMINAL_SESSION_GRACE_MS = 30_000;
 
 interface WindowControlLifecycle {
   controller: AbortController;
@@ -531,6 +533,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         session.mobileTaskViewSeq = -1;
       }
     }
+    cancelSessionDetach(session);
     session.lastActivityAt = Date.now();
     return session;
   }
@@ -548,8 +551,15 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     return latest;
   }
 
+  function cancelSessionDetach(session: TerminalSession): void {
+    if (session.detachTimer) clearTimeout(session.detachTimer);
+    session.detachTimer = undefined;
+    session.detachedAt = undefined;
+  }
+
   function disposeTerminalSession(runtime: WindowControlRuntime, session: TerminalSession): void {
     if (runtime.terminalSessions.get(session.terminalId) !== session) return;
+    cancelSessionDetach(session);
     cancelBridgeOpen(runtime, session);
     disposeRuntimeBridgeResources(runtime, session);
     if (session.pendingOutboundPayloadTimer) {
@@ -561,10 +571,32 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     emitRuntimeStatus(runtime);
   }
 
-  // Task 8 会补全集合对账与宽限期；本实现保证单 terminal 行为与旧 runtime 完全一致。
+  function markSessionDetached(runtime: WindowControlRuntime, session: TerminalSession): void {
+    if (session.detachedAt !== undefined) return;
+    session.detachedAt = Date.now();
+    session.detachTimer = setTimeout(() => {
+      session.detachTimer = undefined;
+      if (runtime.terminalSessions.get(session.terminalId) !== session) return;
+      disposeTerminalSession(runtime, session);
+    }, TERMINAL_SESSION_GRACE_MS);
+  }
+
+  // pair_status_ack.terminal_ids 是权威列表：消失的 id 进宽限，重现的 id 取消宽限；
+  // 列表非空时 legacy session（官方 relay 语义）没有存在必要，立即释放。
   function reconcileTerminalIds(runtime: WindowControlRuntime, terminalIds: string[]): void {
-    void runtime;
-    void terminalIds;
+    const present = new Set(terminalIds);
+    for (const session of [...runtime.terminalSessions.values()]) {
+      if (session.terminalId === LEGACY_TERMINAL_SESSION_KEY) {
+        if (present.size > 0) disposeTerminalSession(runtime, session);
+        else markSessionDetached(runtime, session);
+        continue;
+      }
+      if (present.has(session.terminalId)) {
+        cancelSessionDetach(session);
+      } else {
+        markSessionDetached(runtime, session);
+      }
+    }
   }
 
   function clearPendingOutboundPayloadTimer(session: TerminalSession): void {
@@ -1636,6 +1668,11 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         if (previousTransportState !== "paired") requestMobileTaskView(runtime, session);
       }
       return;
+    }
+    if (state === "kicked" || state === "error") {
+      for (const session of [...runtime.terminalSessions.values()]) {
+        disposeTerminalSession(runtime, session);
+      }
     }
     if (state === "kicked") {
       if (previousTransportState !== "kicked") {

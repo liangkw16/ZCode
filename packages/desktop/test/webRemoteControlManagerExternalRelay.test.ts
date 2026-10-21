@@ -31,7 +31,7 @@ type AttachWorkspaceHost = Parameters<
   typeof createWebRemoteControlManager
 >[0]["attachWorkspaceHost"];
 
-function createManagerHarness(options?: {
+export function createManagerHarness(options?: {
   featureEnabled?: boolean;
   delayReadyMs?: number;
   canSendPayload?: () => boolean;

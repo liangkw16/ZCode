@@ -39,7 +39,7 @@ describe("RelayStore", () => {
     expect(store.claimDevice(deviceSid, {}, oldOwner)!.kicked).toBeNull();
     expect(store.claimDevice(deviceSid, {}, newOwner)!.kicked).toBe(oldOwner);
     expect(store.getDeviceOwner(deviceSid)!.owner).toBe(newOwner);
-    expect(store.claimDevice("d_unknown", "device" as never, {}, newOwner)).toBeNull();
+    expect(store.claimDevice("d_unknown", {}, newOwner)).toBeNull();
   });
 
   it("多个 terminal 共存；同 id 才替换；release 按引用身份", () => {

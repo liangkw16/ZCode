@@ -7,10 +7,33 @@ import {
   type WebRemoteControlRelayV2IncomingMessage,
   type WebRemoteControlRelayV2Role,
 } from "@zcode/shared/web-remote-relay";
+import type { WebRemoteControlRelayV2Meta } from "@zcode/shared/web-remote-relay";
 import type { SelfHostRelayStore } from "../contract.js";
 
+/** ws 网关独占的 terminal 集合端口；由 RelayStore 一并实现。 */
+export interface SelfHostRelayTerminalStore {
+  /** 设备不存在返回 null；同 terminalId 替换旧 owner（kicked），不同 id 共存。 */
+  claimTerminal(
+    deviceSid: string,
+    terminalId: string,
+    meta: WebRemoteControlRelayV2Meta,
+    owner: unknown,
+  ): { kicked: unknown | null; terminalIds: string[] } | null;
+  /** 只在 owner 引用一致时移除；返回剩余 id 列表（按插入顺序）。 */
+  releaseTerminal(
+    deviceSid: string,
+    terminalId: string,
+    owner: unknown,
+  ): { released: boolean; terminalIds: string[] };
+  getTerminalOwner(
+    deviceSid: string,
+    terminalId: string,
+  ): { owner: unknown; meta: WebRemoteControlRelayV2Meta } | undefined;
+  listTerminalIds(deviceSid: string): string[];
+}
+
 export interface SelfHostRelayWsGatewayOptions {
-  store: SelfHostRelayStore;
+  store: SelfHostRelayStore & SelfHostRelayTerminalStore;
   now?: () => number;
   /** 单设备 terminal 集合上限；超出回 KICKED，防异常客户端无限建 session。 */
   maxTerminals?: number;

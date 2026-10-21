@@ -40,10 +40,13 @@ function resolveAutoConnectSid(
   lastMid: string | null,
 ): string | undefined {
   if (!lastSid && !lastMid) return undefined;
-  const lastRecord = lastSid ? records.find((record) => record.device_sid === lastSid) : undefined;
+  const lastRecord = lastSid
+    ? records.find((record) => record.device_sid === lastSid)
+    : undefined;
   if (lastRecord?.online) return lastRecord.device_sid;
   const mid = lastMid || lastRecord?.device_mid;
-  const connections = groups.find((group) => group.deviceMid === mid)?.onlineConnections ?? [];
+  const connections =
+    groups.find((group) => group.deviceMid === mid)?.onlineConnections ?? [];
   return connections.length === 1 ? connections[0]?.device_sid : undefined;
 }
 
@@ -60,6 +63,8 @@ export class WebRemoteControlEntry {
         acceptedJwt?: string;
       }
     | undefined;
+  /** 最近一次成功的在线设备快照；selectDevice 在列表重建/竞态窗口用它兜底。 */
+  private lastOnlineDevices: WebRemoteControlRelayV2Device[] | undefined;
 
   constructor(private readonly options: WebRemoteControlEntryOptions) {}
 
@@ -87,7 +92,10 @@ export class WebRemoteControlEntry {
     }
     const params = parseWebRemoteControlExternalQrParams(url.searchParams);
     if (!params) {
-      this.options.onView({ kind: "failure", failure: { reason: "invalid-mobile-connection" } });
+      this.options.onView({
+        kind: "failure",
+        failure: { reason: "invalid-mobile-connection" },
+      });
       return;
     }
     if (!params.deviceSid) {
@@ -146,10 +154,27 @@ export class WebRemoteControlEntry {
         list.acceptedJwt = jwt;
         // 先读缓存补全离线记录的名字/平台，再把本次在线记录写回；它们只是展示偏好，不进入 admission。
         const knownDevices = readKnownDevices(this.options.storage);
-        const groups = groupWebRemoteControlDevices(devices, this.options.locale, knownDevices);
+        const groups = groupWebRemoteControlDevices(
+          devices,
+          this.options.locale,
+          knownDevices,
+        );
         rememberKnownDevices(this.options.storage, knownDevices, groups);
-        list.view = { ...list.view, devices: groups, loading: false, error: false };
-        const autoSid = resolveAutoConnectSid(devices, groups, list.lastSid, list.lastMid);
+        list.view = {
+          ...list.view,
+          devices: groups,
+          loading: false,
+          error: false,
+        };
+        // 成功快照（仅在线记录）供 selectDevice 竞态兜底：列表重建窗口（reset 后 devices
+        // 为空）里点击不应静默失效；离线记录不得进入兜底，避免连上已下线的 SID。
+        this.lastOnlineDevices = devices.filter((device) => device.online);
+        const autoSid = resolveAutoConnectSid(
+          devices,
+          groups,
+          list.lastSid,
+          list.lastMid,
+        );
         // 自动落点只消费首次成功的列表；后续刷新不能打断用户选择。
         list.lastSid = null;
         list.lastMid = null;
@@ -174,16 +199,37 @@ export class WebRemoteControlEntry {
     return list.request;
   }
 
-  selectDevice(sid: string): void {
-    if (!this.list || this.list.view.loading || this.list.view.error) return;
-    if (this.list.acceptedJwt !== this.options.auth.getZCodeJwtToken()) {
+  selectDevice(sid: string, viaRefresh = false): void {
+    // 连接已开始（reset 清空列表）后的重复点击直接忽略，不能重启入口。
+    if (!this.list) return;
+    if (
+      this.list.acceptedJwt &&
+      this.list.acceptedJwt !== this.options.auth.getZCodeJwtToken()
+    ) {
       void this.start();
       return;
     }
-    const device = this.list.view.devices
-      .flatMap((group) => group.onlineConnections)
-      .find((item) => item.device_sid === sid);
-    if (!device) return;
+    // loading/error 期间的旧列表数据不可信（"禁用旧列表"语义保留）：不直接连接，
+    // 而是自动刷新一次，只有新鲜数据确认在线才放行，避免用户点击被静默吞掉。
+    const trustworthy = !this.list.view.loading && !this.list.view.error;
+    const groups = this.list.view.devices;
+    const device = trustworthy
+      ? groups.length
+        ? groups
+            .flatMap((group) => group.onlineConnections)
+            .find((item) => item.device_sid === sid)
+        : this.lastOnlineDevices?.find((item) => item.device_sid === sid)
+      : undefined;
+    if (!device) {
+      // Bug 原因：列表处于 loading/error 或 reset 重建窗口（devices 为空）时旧逻辑直接
+      // return，点击无任何反馈；设备列表刷新一旦偶发失败（限流/网络抖动），之后每次
+      // 点击都无效，页面看似正常却进不去（IAB 真机验收实测复现）。仅在数据不可信或
+      // 为空的窗口自动刷新重试一次；可信数据里确实离线的 SID 保持静默（旧语义）。
+      if (!viaRefresh && (!trustworthy || !groups.length)) {
+        void this.refreshDevices().then(() => this.selectDevice(sid, true));
+      }
+      return;
+    }
     const url = new URL(this.options.getHref());
     url.searchParams.set("sid", device.device_sid);
     url.searchParams.set("mid", device.device_mid);
@@ -203,7 +249,8 @@ export class WebRemoteControlEntry {
   async chooseOtherDevice(): Promise<void> {
     this.reset();
     const url = new URL(this.options.getHref());
-    for (const key of ["sid", "mid", "name", "hash", "t"]) url.searchParams.delete(key);
+    for (const key of ["sid", "mid", "name", "hash", "t"])
+      url.searchParams.delete(key);
     this.options.replaceHref(url.href);
     await this.openDevices(false);
   }
@@ -225,11 +272,15 @@ export class WebRemoteControlEntry {
       signal,
       getToken: (tokenSignal) => {
         const jwt = this.options.auth.getZCodeJwtToken();
-        if (!jwt) return Promise.reject(new WebRemoteControlV2ConnectionError("auth-required"));
+        if (!jwt)
+          return Promise.reject(
+            new WebRemoteControlV2ConnectionError("auth-required"),
+          );
         return this.options.token(jwt, tokenSignal);
       },
       onPaired: () => {
-        if (!signal.aborted) this.rememberDevice(params.deviceSid, params.deviceMid);
+        if (!signal.aborted)
+          this.rememberDevice(params.deviceSid, params.deviceMid);
       },
       onFailure: (failure) => {
         if (signal.aborted) return;

@@ -25,7 +25,10 @@ function setup(
   const connect = vi.fn();
   const onView = vi.fn();
   const devices = vi.fn<
-    (jwt: string, signal: AbortSignal) => Promise<WebRemoteControlRelayV2Device[]>
+    (
+      jwt: string,
+      signal: AbortSignal,
+    ) => Promise<WebRemoteControlRelayV2Device[]>
   >(async () => []);
   const storage = new Map<string, string>();
   let visible: (() => void) | undefined;
@@ -89,7 +92,10 @@ describe("V2 手机入口", () => {
       const h = setup();
       await h.entry.start();
       h.entry.startLogin(provider);
-      expect(h.auth.startLogin).toHaveBeenCalledWith({ provider, appReturnTo: h.href });
+      expect(h.auth.startLogin).toHaveBeenCalledWith({
+        provider,
+        appReturnTo: h.href,
+      });
       expect(h.connect).not.toHaveBeenCalled();
       expect(h.token).not.toHaveBeenCalled();
     },
@@ -133,7 +139,9 @@ describe("V2 手机入口", () => {
     expect(await connection.getToken(signal)).toBe("one-use-token");
     expect(h.token).toHaveBeenCalledWith("jwt", signal);
     await h.auth.logout();
-    await expect(connection.getToken(signal)).rejects.toMatchObject({ reason: "auth-required" });
+    await expect(connection.getToken(signal)).rejects.toMatchObject({
+      reason: "auth-required",
+    });
   });
 
   it("401 清会话回登录；账号不匹配保留失败页直至用户切换账号", async () => {
@@ -156,7 +164,10 @@ describe("V2 手机入口", () => {
   });
 
   it("拒绝 V1 hash/t，不能继续尝试连接", async () => {
-    const h = setup("jwt", "https://zcode.z.ai/remote/v4?sid=device-1&hash=secret&t=1");
+    const h = setup(
+      "jwt",
+      "https://zcode.z.ai/remote/v4?sid=device-1&hash=secret&t=1",
+    );
     await h.entry.start();
     expect(h.onView).toHaveBeenCalledWith({
       kind: "failure",
@@ -229,7 +240,11 @@ it("同 MID 全离线只展示一项，完整 MID 不同但前八位相同的设
 
 it("多个在线 SID 保留在同一设备项内，任意连接都可被明确选择且刷新后旧连接失效", async () => {
   const h = setup("jwt", "https://zcode.z.ai/remote/v4?app_version=3.13.0");
-  const other = { ...onlineDevice, device_sid: "other", meta: { name: "ZCode Dev" } };
+  const other = {
+    ...onlineDevice,
+    device_sid: "other",
+    meta: { name: "ZCode Dev" },
+  };
   h.devices.mockResolvedValue([other, onlineDevice]);
   await h.entry.start();
   expect(h.onView.mock.lastCall[0].devices).toEqual([
@@ -242,8 +257,14 @@ it("多个在线 SID 保留在同一设备项内，任意连接都可被明确�
   expect(h.connect).not.toHaveBeenCalled();
   h.devices.mockResolvedValue([onlineDevice, other]);
   await h.entry.refreshDevices();
-  expect(h.onView.mock.lastCall[0].devices[0].onlineConnections).toEqual([onlineDevice, other]);
-  h.devices.mockResolvedValue([{ ...onlineDevice, online: false, meta: {} }, other]);
+  expect(h.onView.mock.lastCall[0].devices[0].onlineConnections).toEqual([
+    onlineDevice,
+    other,
+  ]);
+  h.devices.mockResolvedValue([
+    { ...onlineDevice, online: false, meta: {} },
+    other,
+  ]);
   await h.entry.refreshDevices();
   h.entry.selectDevice("last-device");
   expect(h.connect).not.toHaveBeenCalled();
@@ -255,12 +276,18 @@ it("多个在线 SID 保留在同一设备项内，任意连接都可被明确�
     name: "ZCode Dev",
   });
   expect(h.storage.get("zcode-web-remote-last-device-sid")).toBe("other");
-  expect(h.storage.get("zcode-web-remote-last-device-mid")).toBe(onlineDevice.device_mid);
+  expect(h.storage.get("zcode-web-remote-last-device-mid")).toBe(
+    onlineDevice.device_mid,
+  );
 });
 
 it("最近 SID 在线时优先连接原 SID，即使同 MID 还有其他在线连接", async () => {
   const h = setup("jwt", "https://zcode.z.ai/remote/v4");
-  const preferred = { ...onlineDevice, device_sid: "preferred", meta: { name: "ZCode Dev" } };
+  const preferred = {
+    ...onlineDevice,
+    device_sid: "preferred",
+    meta: { name: "ZCode Dev" },
+  };
   h.storage.set("zcode-web-remote-last-device-sid", "preferred");
   h.devices.mockResolvedValue([onlineDevice, preferred]);
   await h.entry.start();
@@ -270,7 +297,12 @@ it("最近 SID 在线时优先连接原 SID，即使同 MID 还有其他在线�
 
 it("最近 SID 离线时，同一台电脑恰好一个在线连接则自动接上；MID 取自列表中的离线记录", async () => {
   const h = setup("jwt", "https://zcode.z.ai/remote/v4");
-  const preferred = { ...onlineDevice, device_sid: "preferred", online: false, meta: {} };
+  const preferred = {
+    ...onlineDevice,
+    device_sid: "preferred",
+    online: false,
+    meta: {},
+  };
   h.storage.set("zcode-web-remote-last-device-sid", "preferred");
   h.devices.mockResolvedValue([onlineDevice, preferred]);
   await h.entry.start();
@@ -280,14 +312,20 @@ it("最近 SID 离线时，同一台电脑恰好一个在线连接则自动接�
     deviceMid: onlineDevice.device_mid,
   });
   expect(h.storage.get("zcode-web-remote-last-device-sid")).toBe("last-device");
-  expect(h.storage.get("zcode-web-remote-last-device-mid")).toBe(onlineDevice.device_mid);
+  expect(h.storage.get("zcode-web-remote-last-device-mid")).toBe(
+    onlineDevice.device_mid,
+  );
 });
 
 it("最近 SID 已被删除时按记住的最近 MID 接上唯一在线连接", async () => {
   const h = setup("jwt", "https://zcode.z.ai/remote/v4");
   h.storage.set("zcode-web-remote-last-device-sid", "deleted-sid");
   h.storage.set("zcode-web-remote-last-device-mid", onlineDevice.device_mid);
-  const otherMachine = { ...onlineDevice, device_mid: "mid-other", device_sid: "other-sid" };
+  const otherMachine = {
+    ...onlineDevice,
+    device_mid: "mid-other",
+    device_sid: "other-sid",
+  };
   h.devices.mockResolvedValue([otherMachine, onlineDevice]);
   await h.entry.start();
   expect(h.connect).toHaveBeenCalledOnce();
@@ -295,9 +333,15 @@ it("最近 SID 已被删除时按记住的最近 MID 接上唯一在线连接", 
 });
 
 it.each([
-  ["同 MID 有多个在线连接", [onlineDevice, { ...onlineDevice, device_sid: "second" }]],
+  [
+    "同 MID 有多个在线连接",
+    [onlineDevice, { ...onlineDevice, device_sid: "second" }],
+  ],
   ["同 MID 全离线", [{ ...onlineDevice, online: false, meta: {} }]],
-  ["只有其他电脑在线", [{ ...onlineDevice, device_mid: "mid-other", device_sid: "other-sid" }]],
+  [
+    "只有其他电脑在线",
+    [{ ...onlineDevice, device_mid: "mid-other", device_sid: "other-sid" }],
+  ],
 ])("最近 SID 不在线且%s时展示列表，不猜测连接目标", async (_case, records) => {
   const h = setup("jwt", "https://zcode.z.ai/remote/v4");
   h.storage.set("zcode-web-remote-last-device-sid", "deleted-sid");
@@ -311,7 +355,9 @@ it.each([
 it("列表视图携带当前账号展示资料，刷新后保持", async () => {
   const account = { displayName: "Ada", provider: "zai" as const };
   const h = setup("jwt", "https://zcode.z.ai/remote/v4", account);
-  h.devices.mockResolvedValue([{ ...onlineDevice, meta: { name: "Mac", platform: "darwin" } }]);
+  h.devices.mockResolvedValue([
+    { ...onlineDevice, meta: { name: "Mac", platform: "darwin" } },
+  ]);
   await h.entry.start();
   expect(h.onView.mock.lastCall[0]).toMatchObject({
     account,
@@ -322,7 +368,10 @@ it("列表视图携带当前账号展示资料，刷新后保持", async () => {
 });
 
 it("无码入口自动连接当前账号在线的最近设备，并回写可恢复 URL", async () => {
-  const h = setup("jwt", "https://zcode.z.ai/remote/v4?app_version=3.13.0&name=stale");
+  const h = setup(
+    "jwt",
+    "https://zcode.z.ai/remote/v4?app_version=3.13.0&name=stale",
+  );
   h.storage.set("zcode-web-remote-last-device-sid", "last-device");
   h.devices.mockResolvedValue([onlineDevice]);
   await h.entry.start();
@@ -343,7 +392,10 @@ it("无码入口自动连接当前账号在线的最近设备，并回写可恢�
 });
 
 it("最近设备离线时在线置顶按名字排序；手动/回前台刷新不自动连接，选择后只接纳一次", async () => {
-  const h = setup("jwt", "https://zcode.z.ai/remote/v4?app_version=3.13.0&name=stale");
+  const h = setup(
+    "jwt",
+    "https://zcode.z.ai/remote/v4?app_version=3.13.0&name=stale",
+  );
   h.storage.set("zcode-web-remote-last-device-sid", "last-device");
   const offline = { ...onlineDevice, online: false, meta: {} };
   const beta = {
@@ -358,7 +410,12 @@ it("最近设备离线时在线置顶按名字排序；手动/回前台刷新不
     device_sid: "alpha",
     meta: { name: "Alpha" },
   };
-  const unnamed = { ...onlineDevice, device_mid: "mid-unnamed", device_sid: "unnamed", meta: {} };
+  const unnamed = {
+    ...onlineDevice,
+    device_mid: "mid-unnamed",
+    device_sid: "unnamed",
+    meta: {},
+  };
   h.devices.mockResolvedValue([offline, beta, unnamed, alpha]);
   await h.entry.start();
   expect(h.onView).toHaveBeenLastCalledWith({
@@ -431,14 +488,21 @@ it("列表刷新失败显示错误且禁用旧列表，401 则回登录并保留
     loading: false,
     error: true,
   });
+  // 错误态点击不再静默失效：自动刷新一次，新鲜数据确认在线即放行（2026-10-21 修复）。
   h.entry.selectDevice("last-device");
-  expect(h.connect).not.toHaveBeenCalled();
-  h.devices.mockRejectedValueOnce(new WebRemoteControlV2ConnectionError("auth-required"));
-  await h.entry.refreshDevices();
-  expect(h.onView).toHaveBeenLastCalledWith({ kind: "login" });
-  expect(h.auth.logout).toHaveBeenCalledOnce();
-  h.entry.startLogin();
-  expect(h.auth.startLogin).toHaveBeenCalledWith({ appReturnTo: h.href });
+  await vi.waitFor(() => expect(h.connect).toHaveBeenCalledOnce());
+  // 401 回登录链路用干净入口验证，避免与已连接状态相互干扰。
+  const h2 = setup("jwt", "https://zcode.z.ai/remote/v4?app_version=3.13.0");
+  h2.devices.mockResolvedValue([onlineDevice]);
+  await h2.entry.start();
+  h2.devices.mockRejectedValueOnce(
+    new WebRemoteControlV2ConnectionError("auth-required"),
+  );
+  await h2.entry.refreshDevices();
+  expect(h2.onView).toHaveBeenLastCalledWith({ kind: "login" });
+  expect(h2.auth.logout).toHaveBeenCalledOnce();
+  h2.entry.startLogin();
+  expect(h2.auth.startLogin).toHaveBeenCalledWith({ appReturnTo: h2.href });
 });
 
 it("选择其他设备释放连接、移除目标参数并跳过最近设备；旧连接事件无效", async () => {
@@ -451,7 +515,9 @@ it("选择其他设备释放连接、移除目标参数并跳过最近设备；�
   h.devices.mockResolvedValue([{ ...onlineDevice, device_sid: "device-1" }]);
   await h.entry.chooseOtherDevice();
   expect(old.signal.aborted).toBe(true);
-  expect(Object.fromEntries(new URL(h.href).searchParams)).toEqual({ app_version: "3.13.0" });
+  expect(Object.fromEntries(new URL(h.href).searchParams)).toEqual({
+    app_version: "3.13.0",
+  });
   expect(h.connect).toHaveBeenCalledOnce();
   old.onFailure({ reason: "auth-required" });
   old.onPaired();
@@ -484,11 +550,15 @@ it("存储不可用不阻断手动选择；已有 SID 业务状态保持原样",
   });
   h.devices.mockResolvedValue([onlineDevice]);
   await h.entry.start();
-  expect(h.onView.mock.lastCall[0].devices).toEqual([singleOnlineGroup(onlineDevice)]);
+  expect(h.onView.mock.lastCall[0].devices).toEqual([
+    singleOnlineGroup(onlineDevice),
+  ]);
   h.entry.selectDevice("last-device");
   expect(h.connect).toHaveBeenCalledOnce();
   h.connect.mock.calls[0][0].onPaired();
-  expect(h.storage.get("zcode-web-remote-client-id:last-device")).toBe("existing-client");
+  expect(h.storage.get("zcode-web-remote-client-id:last-device")).toBe(
+    "existing-client",
+  );
 });
 
 it("最近 SID 不属于当前账号时不连接；同名按 MID/SID 排序且没有轮询", async () => {
@@ -502,7 +572,11 @@ it("最近 SID 不属于当前账号时不连接；同名按 MID/SID 排序且�
     h.devices.mockResolvedValue([b, a2, a1]);
     await h.entry.start();
     expect(h.onView.mock.lastCall[0].devices).toEqual([
-      { deviceMid: "mid-a", name: "Alice’s MacBook", onlineConnections: [a1, a2] },
+      {
+        deviceMid: "mid-a",
+        name: "Alice’s MacBook",
+        onlineConnections: [a1, a2],
+      },
       singleOnlineGroup(b),
     ]);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -527,10 +601,20 @@ it("聚合列表刷新期间拒绝所有 SID，刷新成全离线后保留记住
   h.entry.selectDevice("last-device");
   h.entry.selectDevice("other");
   expect(h.connect).not.toHaveBeenCalled();
-  pending.resolve([onlineDevice, other].map((device) => ({ ...device, online: false, meta: {} })));
+  pending.resolve(
+    [onlineDevice, other].map((device) => ({
+      ...device,
+      online: false,
+      meta: {},
+    })),
+  );
   await refreshed;
   expect(h.onView.mock.lastCall[0].devices).toEqual([
-    { deviceMid: onlineDevice.device_mid, name: "Alice’s MacBook", onlineConnections: [] },
+    {
+      deviceMid: onlineDevice.device_mid,
+      name: "Alice’s MacBook",
+      onlineConnections: [],
+    },
   ]);
   h.entry.selectDevice("other");
   expect(h.connect).not.toHaveBeenCalled();
@@ -542,7 +626,10 @@ describe("本地记住的设备名与平台", () => {
   it("在线平台写入缓存，下次该设备离线时仍显示记住的平台", async () => {
     const h = setup("jwt", "https://zcode.z.ai/remote/v4");
     h.devices.mockResolvedValue([
-      { ...onlineDevice, meta: { name: "Alice’s MacBook", platform: "darwin" } },
+      {
+        ...onlineDevice,
+        meta: { name: "Alice’s MacBook", platform: "darwin" },
+      },
     ]);
     await h.entry.start();
     expect(JSON.parse(h.storage.get(DEVICE_NAMES_KEY)!)).toEqual([
@@ -550,7 +637,9 @@ describe("本地记住的设备名与平台", () => {
     ]);
     const next = setup("jwt", "https://zcode.z.ai/remote/v4");
     next.storage.set(DEVICE_NAMES_KEY, h.storage.get(DEVICE_NAMES_KEY)!);
-    next.devices.mockResolvedValue([{ ...onlineDevice, online: false, meta: {} }]);
+    next.devices.mockResolvedValue([
+      { ...onlineDevice, online: false, meta: {} },
+    ]);
     await next.entry.start();
     expect(next.onView.mock.lastCall[0].devices).toEqual([
       {
@@ -578,7 +667,13 @@ describe("本地记住的设备名与平台", () => {
     await next.entry.start();
     expect(next.onView).toHaveBeenLastCalledWith({
       kind: "devices",
-      devices: [{ deviceMid: "abcdefgh-1234", name: "Alice’s MacBook", onlineConnections: [] }],
+      devices: [
+        {
+          deviceMid: "abcdefgh-1234",
+          name: "Alice’s MacBook",
+          onlineConnections: [],
+        },
+      ],
       loading: false,
       error: false,
     });
@@ -588,14 +683,21 @@ describe("本地记住的设备名与平台", () => {
 
   it("在线记录无名字时回退到记住的名字；电脑改名后上线刷新覆盖旧名字", async () => {
     const h = setup("jwt", "https://zcode.z.ai/remote/v4");
-    h.storage.set(DEVICE_NAMES_KEY, JSON.stringify([["abcdefgh-1234", "Old Name"]]));
+    h.storage.set(
+      DEVICE_NAMES_KEY,
+      JSON.stringify([["abcdefgh-1234", "Old Name"]]),
+    );
     h.devices.mockResolvedValue([{ ...onlineDevice, meta: {} }]);
     await h.entry.start();
     expect(h.onView.mock.lastCall[0].devices[0].name).toBe("Old Name");
-    h.devices.mockResolvedValue([{ ...onlineDevice, meta: { name: "  New Name  " } }]);
+    h.devices.mockResolvedValue([
+      { ...onlineDevice, meta: { name: "  New Name  " } },
+    ]);
     await h.entry.refreshDevices();
     expect(h.onView.mock.lastCall[0].devices[0].name).toBe("New Name");
-    expect(JSON.parse(h.storage.get(DEVICE_NAMES_KEY)!)).toEqual([["abcdefgh-1234", "New Name"]]);
+    expect(JSON.parse(h.storage.get(DEVICE_NAMES_KEY)!)).toEqual([
+      ["abcdefgh-1234", "New Name"],
+    ]);
   });
 
   it("离线设备按记住的名字排序，没有名字的离线设备排最后；全离线刷新不写缓存", async () => {
@@ -612,7 +714,11 @@ describe("本地记住的设备名与平台", () => {
       online: false,
       meta: {},
     });
-    h.devices.mockResolvedValue([offline("mid-c"), offline("mid-b"), offline("mid-a")]);
+    h.devices.mockResolvedValue([
+      offline("mid-c"),
+      offline("mid-b"),
+      offline("mid-a"),
+    ]);
     await h.entry.start();
     expect(h.onView.mock.lastCall[0].devices).toEqual([
       { deviceMid: "mid-a", name: "Alpha", onlineConnections: [] },
@@ -627,7 +733,13 @@ describe("本地记住的设备名与平台", () => {
     h.storage.set(DEVICE_NAMES_KEY, "{not json");
     h.devices.mockResolvedValue([
       onlineDevice,
-      { ...onlineDevice, device_mid: "mid-x", device_sid: "sid-x", online: false, meta: {} },
+      {
+        ...onlineDevice,
+        device_mid: "mid-x",
+        device_sid: "sid-x",
+        online: false,
+        meta: {},
+      },
     ]);
     await h.entry.start();
     expect(h.onView.mock.lastCall[0].devices).toEqual([
@@ -637,6 +749,20 @@ describe("本地记住的设备名与平台", () => {
     expect(JSON.parse(h.storage.get(DEVICE_NAMES_KEY)!)).toEqual([
       ["abcdefgh-1234", "Alice’s MacBook"],
     ]);
+  });
+
+  it("设备列表刷新失败后的点击自动重试一次并接通，不再静默失效", async () => {
+    const h = setup("jwt", "https://zcode.z.ai/remote/v4?app_version=3.13.0");
+    // 首次 start 拉列表失败：页面进入错误态，但用户仍会点击可见的设备卡片。
+    h.devices.mockRejectedValueOnce(new Error("network blip"));
+    await h.entry.start();
+    expect(h.onView.mock.lastCall[0].error).toBe(true);
+    h.devices.mockResolvedValue([onlineDevice]);
+    h.entry.selectDevice(onlineDevice.device_sid);
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalled());
+    expect(h.connect.mock.lastCall[0].params.deviceSid).toBe(
+      onlineDevice.device_sid,
+    );
   });
 
   it("切换账号不清除设备名缓存", async () => {

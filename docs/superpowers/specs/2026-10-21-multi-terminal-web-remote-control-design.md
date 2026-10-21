@@ -507,17 +507,19 @@ device 断开
 
 真机验收（KCode 内置浏览器双标签页 + ECS relay 日志/`ss` + 桌面 `~/.kcode/v2/logs`）：
 
-| #    | 场景                    | 结果                                                                                                                                                           |
-| ---- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MT01 | 同一链接两个标签页      | ✅ 双页同时 paired 进任务首页；relay 2 terminal + 1 device 连接；全程 0 KICKED                                                                                 |
-| MT02 | 两页独立导航            | ✅ B 进入「今天金价」会话，A 保持首页，互不串扰                                                                                                                |
-| MT08 | 两页同任务流式          | ✅ A 发送"多页面验收测试"，B 未刷新实时收到用户消息与模型回复「收到」；桌面日志证实两个 terminal（t_31b1…/t_99c8…）各自独立 bridge/attachment                  |
-| MT03 | 关闭一页                | ✅ B 关闭后 A 持续在线、内容保留，无终态页                                                                                                                     |
-| MT05 | relay 重启              | ✅ device ~10s 内重连（waiting_terminal→paired），页面 A 自动恢复且保留上下文                                                                                  |
-| MT06 | 桌面重启                | ✅ 按既有语义走 DEVICE_OFFLINE：自动恢复成功（restoring previous enabled state），页面超 15s 宽限进 Desktop Offline 终态页（既有单页行为一致），刷新后重新配对 |
-| MT04 | 同 terminal_id 断网重连 | 未执行（内置浏览器无法模拟断网；行为由 Task 8/10 单测覆盖）                                                                                                    |
-| MT07 | 官方 relay 回归         | 未执行（无官方 relay 环境；legacy 路径由 manager 全量既有测试覆盖）                                                                                            |
-| MT09 | 重复 terminal_id        | 真机未模拟（由 relay wsGateway 同 id 重连单测覆盖）                                                                                                            |
-| MT10 | 32 terminal 上限        | 真机未触发（实现含 maxTerminals=32 + KICKED 拒绝；无独立单测，留作后续补充）                                                                                   |
+| #    | 场景                    | 结果                                                                                                                                                                   |
+| ---- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MT01 | 同一链接两个标签页      | ✅ 双页同时 paired 进任务首页；relay 2 terminal + 1 device 连接；全程 0 KICKED                                                                                         |
+| MT02 | 两页独立导航            | ✅ B 进入「今天金价」会话，A 保持首页，互不串扰                                                                                                                        |
+| MT08 | 两页同任务流式          | ✅ A 发送"多页面验收测试"，B 未刷新实时收到用户消息与模型回复「收到」；桌面日志证实两个 terminal（t_31b1…/t_99c8…）各自独立 bridge/attachment                          |
+| MT03 | 关闭一页                | ✅ B 关闭后 A 持续在线、内容保留，无终态页                                                                                                                             |
+| MT05 | relay 重启              | ✅ device ~10s 内重连（waiting_terminal→paired），页面 A 自动恢复且保留上下文                                                                                          |
+| MT06 | 桌面重启                | ✅ 按既有语义走 DEVICE_OFFLINE：自动恢复成功（restoring previous enabled state），页面超 15s 宽限进 Desktop Offline 终态页（既有单页行为一致），刷新后重新配对         |
+| MT04 | 同 terminal_id 断网重连 | ✅ 生产 relay 实测（node 直连脚本）：同 id 断开后 <30s 重连，desktop 保留 session、bootstrap 定向回包正常；断开 35s（宽限过期、session 释放）后重连重建 session 亦正常 |
+| MT07 | 官方 relay 回归         | ✅ 等效验证：ECS 临时切回旧版 relay（main.js.pre-mt）+ 旧 web（web.pre-mt），新 KCode 干净 runtime 下配对、进入任务首页，legacy 路径零回归；验证后已切回新部署         |
+| MT09 | 重复 terminal_id        | ✅ 生产 relay 实测：同 id 第二条连接接入后旧连接收 KICKED 关闭，新连接存活可收定向数据                                                                                 |
+| MT10 | 32 terminal 上限        | ✅ 单测（gateway 上限拒绝 + 存量连接不受影响）+ 生产 relay 实测：31 个测试连接填满（含页面共 32），第 33 个收 KICKED；测试连接全部关闭后集合回落                       |
+
+补充发现（边缘缺陷，记录不修）：desktop 同一 runtime 生命周期内把 relay 从新版切回旧版（手动回滚 relay 且不重启桌面）时，切换前残留的带 `target_terminal_id` 缓冲 payload 会在重新 paired 后 flush 给旧 relay，被旧 schema 以 WRONG_PARAM 拒绝并使 device 连接进入 relay-unavailable 终态。自愈路径：重启桌面或重新开启远控（新 runtime 空 session map）即恢复；正常发布顺序（desktop 先行、relay 不单独回滚到旧版）不会触发。官方 relay（Go 解码忽略未知字段）不受影响。
 
 已知边界：桌面重启的 15s DEVICE_OFFLINE 宽限对完整冷启动不够，页面进终态页需刷新——与单页时代一致，非多 terminal 引入的回归。

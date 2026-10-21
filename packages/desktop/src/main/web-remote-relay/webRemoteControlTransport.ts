@@ -72,16 +72,27 @@ export class WebRemoteControlDeviceTransport {
     this.setState("idle");
   }
 
-  measurePayloadBytes(payload: WebRemoteControlAppPayload): number {
-    return this.serializer.prepare(payload, Math.floor(Date.now() / 1000)).bytes;
+  measurePayloadBytes(payload: WebRemoteControlAppPayload, targetTerminalId?: string): number {
+    return this.serializer.prepare(
+      payload,
+      Math.floor(Date.now() / 1000),
+      targetTerminalId,
+    ).bytes;
   }
 
   sendPayload(payload: WebRemoteControlAppPayload): boolean {
     return this.sendPayloadResult(payload).kind === "sent";
   }
 
-  sendPayloadResult(payload: WebRemoteControlAppPayload): WebRemoteControlPayloadSendResult {
-    const prepared = this.serializer.prepare(payload, Math.floor(Date.now() / 1000));
+  sendPayloadResult(
+    payload: WebRemoteControlAppPayload,
+    targetTerminalId?: string,
+  ): WebRemoteControlPayloadSendResult {
+    const prepared = this.serializer.prepare(
+      payload,
+      Math.floor(Date.now() / 1000),
+      targetTerminalId,
+    );
     if (this.serializer.isOversize(prepared)) {
       return {
         kind: "oversize",
@@ -202,6 +213,12 @@ export class WebRemoteControlDeviceTransport {
       this.authenticated = true;
       this.retry.acknowledged();
     }
+    if (
+      (message.type === "auth_ack" || message.type === "pair_status_ack") &&
+      message.terminal_ids
+    ) {
+      this.options.onTerminalIdsChange?.(message.terminal_ids);
+    }
     if (!this.authenticated) return;
     if (message.type === "auth_ack" || message.type === "pair_status_ack") {
       const previousGeneration = this.pairedGeneration;
@@ -221,11 +238,11 @@ export class WebRemoteControlDeviceTransport {
         typeof value === "object" &&
         "zcode_type" in value &&
         (value.zcode_type === "rpc-frame" || value.zcode_type === "rpc-frame-ack") &&
-        this.options.onRawTransportPayload?.(value)
+        this.options.onRawTransportPayload?.(value, message.from_terminal_id)
       )
         return;
       const payload = parseWebRemoteControlAppPayload(value);
-      if (payload) this.options.onPayload(payload);
+      if (payload) this.options.onPayload(payload, message.from_terminal_id);
     }
   }
 

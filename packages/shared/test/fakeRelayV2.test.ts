@@ -113,6 +113,7 @@ it("pairs both roles, reports online meta and forwards opaque payloads with serv
       type: "pair_status_ack",
       pair_status: "matched",
       terminal_sid: "",
+      terminal_ids: [expect.stringMatching(/^t_/)],
       server_ts: 1_600_000_000,
     });
   expect((await (await request(relay, "device")).json()).data[0]).toMatchObject({
@@ -126,7 +127,12 @@ it("pairs both roles, reports online meta and forwards opaque payloads with serv
   terminal.send({ type: "data", payload, client_ts: 1 });
   await expect
     .poll(() => device.messages)
-    .toContainEqual({ type: "data", payload, server_ts: 1_600_000_000 });
+    .toContainEqual({
+      type: "data",
+      payload,
+      from_terminal_id: expect.stringMatching(/^t_/),
+      server_ts: 1_600_000_000,
+    });
   device.send({ type: "data", payload: "reply", client_ts: 2 });
   await expect
     .poll(() => terminal.messages)
@@ -138,6 +144,7 @@ it("pairs both roles, reports online meta and forwards opaque payloads with serv
       type: "pair_status_ack",
       pair_status: "matched",
       terminal_sid: expect.stringMatching(/^t_/),
+      terminal_ids: [expect.stringMatching(/^t_/)],
       server_ts: 1_600_000_000,
     });
   expect(relay.messages).toEqual(
@@ -168,7 +175,17 @@ it.each(["device", "terminal"] as const)(
     other.send({ type: "data", payload: "new owner" });
     await expect
       .poll(() => replacement.messages)
-      .toContainEqual({ type: "data", payload: "new owner", server_ts: 1_600_000_000 });
+      // device 接收方向带 from_terminal_id；terminal 接收方向剥离路由字段。
+      .toContainEqual(
+        role === "device"
+          ? {
+              type: "data",
+              payload: "new owner",
+              from_terminal_id: expect.stringMatching(/^t_/),
+              server_ts: 1_600_000_000,
+            }
+          : { type: "data", payload: "new owner", server_ts: 1_600_000_000 },
+      );
     expect(other.ws.readyState).toBe(WebSocket.OPEN);
   },
 );
@@ -240,6 +257,7 @@ it("orchestrates ACK state and suppresses replies without creating a phantom pee
       type: "pair_status_ack",
       pair_status: "matched",
       terminal_sid: "",
+      terminal_ids: [],
       server_ts: 1_600_000_000,
     });
   drop = true;

@@ -275,3 +275,78 @@ describe("desktop relay V2 transport", () => {
     expect(f.relay.httpCalls.filter((call) => call.path.endsWith("/token"))).toHaveLength(2);
   });
 });
+
+describe("desktop relay V2 transport multi-terminal routing", () => {
+  it("透传 from_terminal_id、发送 target_terminal_id、上报 terminal_ids", async () => {
+    const relay = await createFakeRelayV2({ users: { jwt: "user" } });
+    cleanups.push(() => relay.close());
+    const terminalId = "t_page";
+    const onPayload = vi.fn();
+    const onTerminalIdsChange = vi.fn();
+    const request = async (path: string, body: unknown) => {
+      const response = await fetch(`${relay.httpUrl}/api/v1/remote/${path}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer jwt", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return (await response.json()) as { data: { device_sid?: string; token?: string } };
+    };
+    const { data: device } = await request("device", { device_mid: "mid-1" });
+    const transport = new WebRemoteControlDeviceTransport({
+      relayWsUrl: relay.wsUrl,
+      deviceMid: "mid-1",
+      getToken: (signal) => createWebRemoteControlV2Http(relay.httpUrl).token("jwt", signal),
+      resolveDeviceSid: async () => device.device_sid!,
+      meta: { name: "desktop" },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      onStateChange: vi.fn(),
+      onPayload,
+      onTerminalIdsChange,
+      onError: vi.fn(),
+    });
+    cleanups.push(() => transport.dispose());
+    transport.start();
+    await vi.waitFor(() =>
+      expect(relay.messages.some((entry) => entry.role === "device")).toBe(true),
+    );
+
+    const { data: tokenData } = await request("token", { role: "terminal" });
+    const terminal = new WebSocket(`${relay.wsUrl}?token=${tokenData.token}`);
+    cleanups.push(() => terminal.close());
+    await new Promise<void>((resolve) =>
+      terminal.addEventListener("open", () => resolve(), { once: true }),
+    );
+    terminal.send(
+      JSON.stringify({
+        type: "auth_init",
+        device_sid: device.device_sid,
+        terminal_id: terminalId,
+      }),
+    );
+
+    await vi.waitFor(() => expect(onTerminalIdsChange).toHaveBeenCalledWith([terminalId]));
+    const appPayload = { zcode_type: "bootstrap-request", requestId: "from-terminal" };
+    terminal.send(JSON.stringify({ type: "data", payload: appPayload }));
+    await vi.waitFor(() =>
+      expect(onPayload).toHaveBeenCalledWith(expect.objectContaining(appPayload), terminalId),
+    );
+
+    transport.sendPayloadResult(
+      {
+        zcode_type: "bootstrap-response",
+        requestId: "from-terminal",
+        success: true,
+        result: {} as never,
+      },
+      terminalId,
+    );
+    await vi.waitFor(() =>
+      expect(relay.messages).toContainEqual(
+        expect.objectContaining({
+          role: "device",
+          message: expect.objectContaining({ target_terminal_id: terminalId }),
+        }),
+      ),
+    );
+  });
+});

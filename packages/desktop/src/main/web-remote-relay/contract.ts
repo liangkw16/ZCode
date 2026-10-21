@@ -36,9 +36,12 @@ export interface WebRemoteControlDeviceTransportOptions {
     error: (...args: unknown[]) => void;
   };
   onStateChange(state: WebRemoteControlDeviceTransportState): void;
-  onPayload(payload: WebRemoteControlAppPayload): void;
-  onRawTransportPayload?(payload: unknown): boolean;
+  /** terminalId 来自 relay 附加的 from_terminal_id；官方 relay 无该字段（undefined）。 */
+  onPayload(payload: WebRemoteControlAppPayload, terminalId?: string): void;
+  onRawTransportPayload?(payload: unknown, terminalId?: string): boolean;
   onRawTransportFault?(reasonCode: string): void;
   onError(error: Error): void;
   onSendReady?(event: { kind: "same-socket" | "reconnected-socket" }): void;
+  /** relay 的权威 terminal 集合（auth_ack.terminal_ids / pair_status_ack.terminal_ids）。 */
+  onTerminalIdsChange?(terminalIds: string[]): void;
 }

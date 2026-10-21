@@ -21,6 +21,7 @@ interface Connection {
   role: WebRemoteControlRelayV2Role;
   deviceSid?: string;
   terminalSid: string;
+  terminalId?: string;
   meta: WebRemoteControlRelayV2Meta;
 }
 export interface FakeRelayV2Message {
@@ -85,6 +86,15 @@ export async function createFakeRelayV2(options: FakeRelayV2Options) {
   };
   const peer = (connection: Connection) =>
     owners.get(connection.deviceSid ?? "")?.[connection.role === "device" ? "terminal" : "device"];
+  const terminalConnectionsOf = (deviceSid: string): Connection[] => {
+    const roles = owners.get(deviceSid);
+    if (!roles?.terminal) return [];
+    return [roles.terminal];
+  };
+  const terminalIdsOf = (deviceSid: string): string[] => {
+    const terminal = owners.get(deviceSid)?.terminal;
+    return terminal?.terminalId ? [terminal.terminalId] : [];
+  };
   const view = (device: WebRemoteControlRelayV2Device) => {
     const connection = owners.get(device.device_sid)?.device;
     return { ...device, online: !!connection, meta: connection?.meta ?? {} };
@@ -249,6 +259,9 @@ export async function createFakeRelayV2(options: FakeRelayV2Options) {
           }
           connection.deviceSid = parsed.device_sid;
           connection.meta = parsed.meta ?? {};
+          if (connection.role === "terminal") {
+            connection.terminalId = parsed.terminal_id ?? connection.terminalSid;
+          }
           const roles = owners.get(parsed.device_sid) ?? {};
           const old = roles[connection.role];
           roles[connection.role] = connection;
@@ -259,11 +272,25 @@ export async function createFakeRelayV2(options: FakeRelayV2Options) {
           owners.set(parsed.device_sid, roles);
           const other = peer(connection);
           const pair_status = override ?? (other ? "matched" : "waiting");
-          if (other) send(other, { type: "pair_status_ack", pair_status, terminal_sid: "" });
+          if (other)
+            send(other, {
+              type: "pair_status_ack",
+              pair_status,
+              terminal_sid: "",
+              // terminal 认证后 device 的权威集合推送（desktop onTerminalIdsChange 的来源）。
+              ...(connection.role === "terminal"
+                ? { terminal_ids: terminalIdsOf(parsed.device_sid) }
+                : {}),
+            });
           send(connection, {
             type: "auth_ack",
             device_sid: parsed.device_sid,
             terminal_sid: connection.terminalSid,
+            // 兼容开关：仅当 terminal 声明了 terminal_id 时回显（对齐自托管 relay 行为）。
+            ...(connection.role === "terminal" && parsed.terminal_id
+              ? { terminal_id: connection.terminalId }
+              : {}),
+            ...(connection.role === "device" ? { terminal_ids: terminalIdsOf(parsed.device_sid) } : {}),
             pair_status,
           });
         } else if (!connection.deviceSid) {
@@ -275,11 +302,39 @@ export async function createFakeRelayV2(options: FakeRelayV2Options) {
             type: "pair_status_ack",
             pair_status: override ?? (other ? "matched" : "waiting"),
             terminal_sid: other?.terminalSid ?? "",
+            ...(connection.role === "device"
+              ? { terminal_ids: terminalIdsOf(connection.deviceSid ?? "") }
+              : {}),
           });
         } else {
           const other = peer(connection);
-          if (other) send(other, { type: "data", payload: parsed.payload });
-          else send(connection, { type: "error", code: "INTERNAL" });
+          if (connection.role === "terminal") {
+            if (other) {
+              send(other, {
+                type: "data",
+                payload: parsed.payload,
+                from_terminal_id: connection.terminalId ?? "",
+              });
+            } else send(connection, { type: "error", code: "INTERNAL" });
+          } else {
+            const targetId = parsed.target_terminal_id;
+            if (targetId) {
+              const target = terminalConnectionsOf(connection.deviceSid ?? "").find(
+                (entry) => entry.terminalId === targetId,
+              );
+              if (target) send(target, { type: "data", payload: parsed.payload });
+              return;
+            }
+            const terminals = terminalConnectionsOf(connection.deviceSid ?? "");
+            if (terminals.length === 0) {
+              send(connection, { type: "error", code: "INTERNAL" });
+              return;
+            }
+            for (const terminal of terminals) {
+              send(terminal, { type: "data", payload: parsed.payload });
+            }
+            return;
+          }
         }
       });
       ws.on("close", () => {
@@ -290,7 +345,12 @@ export async function createFakeRelayV2(options: FakeRelayV2Options) {
         delete roles[connection.role];
         const other = peer(connection);
         if (other) {
-          send(other, { type: "pair_status_ack", pair_status: "waiting", terminal_sid: "" });
+          send(other, {
+            type: "pair_status_ack",
+            pair_status: "waiting",
+            terminal_sid: "",
+            ...(connection.role === "terminal" ? { terminal_ids: [] } : {}),
+          });
           if (connection.role === "device") {
             send(other, { type: "error", code: "DEVICE_OFFLINE" });
             other.socket.close();

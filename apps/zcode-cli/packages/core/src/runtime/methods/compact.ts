@@ -226,10 +226,12 @@ export async function autoCompactIfNeeded(
       event: "compact.auto.skipped",
       module: "core.runtime",
       compactReason: context.compactReason,
+      modelId: context.model.modelId,
       modelOverrideMatched: compactModelOverrideMatched,
       modelStepIndex: context.modelStepIndex,
       phase: context.phase,
       policySource: compactPolicySource,
+      providerId: context.model.providerId,
       reason: decision.reason,
       ...autoCompactDecisionLogContext(decision),
     });
@@ -259,11 +261,13 @@ export async function autoCompactIfNeeded(
     ...traceContextToLogContext(turnTraceContext),
     event: "compact.auto.started",
     compactReason: context.compactReason,
+    modelId: context.model.modelId,
     modelOverrideMatched: compactModelOverrideMatched,
     modelStepIndex: context.modelStepIndex,
     module: "core.runtime",
     phase: context.phase,
     policySource: compactPolicySource,
+    providerId: context.model.providerId,
     ...autoCompactDecisionLogContext(decision),
   });
 

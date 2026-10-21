@@ -3166,6 +3166,15 @@ describe("AgentRuntime manual compact", () => {
     const buildRuntime = (sessionId: SessionId, selection: string) => {
       const eventStore = createTestSessionEventStore();
       const requests: string[] = [];
+      const debug = vi.fn();
+      const info = vi.fn();
+      const logger = {
+        child: () => logger,
+        debug,
+        error: vi.fn(),
+        info,
+        warn: vi.fn(),
+      };
       let normalResponseCount = 0;
       const runtime = createTestAgentRuntime(
         sessionId,
@@ -3177,6 +3186,7 @@ describe("AgentRuntime manual compact", () => {
         },
         {
           eventStore,
+          logger,
           modelFactory: createTestModelFactory(
             withStreamTextFromGenerateText({
               async generateText(request) {
@@ -3204,7 +3214,7 @@ describe("AgentRuntime manual compact", () => {
           ),
         },
       );
-      return { eventStore, requests, runtime, sessionId };
+      return { eventStore, requests, runtime, sessionId, debug };
     };
 
     const hit = buildRuntime(
@@ -3226,6 +3236,21 @@ describe("AgentRuntime manual compact", () => {
       true,
     );
     expect(hitResult.response).toBe("normal response 3");
+    // 判定日志必须带模型身份与策略来源：父子并行/同名跨 provider 场景只能靠它诊断。
+    const hitSkipLog = hit.debug.mock.calls
+      .map((call) => call[1])
+      .find(
+        (context) =>
+          context?.event === "compact.auto.skipped" && context?.modelId === "GLM-5.3",
+      );
+    expect(hitSkipLog).toMatchObject({
+      providerId: "test",
+      modelId: "GLM-5.3",
+      policySource: "model-override",
+      modelOverrideMatched: true,
+      contextWindow: 240,
+      threshold: 229,
+    });
 
     // 未命中的模型：同配置下不压缩，三轮请求全部是普通响应。
     const miss = buildRuntime(
@@ -3245,6 +3270,18 @@ describe("AgentRuntime manual compact", () => {
       false,
     );
     expect(missResult.response).toBe("normal response 3");
+    const missSkipLog = miss.debug.mock.calls
+      .map((call) => call[1])
+      .find(
+        (context) =>
+          context?.event === "compact.auto.skipped" && context?.modelId === "other-model",
+      );
+    expect(missSkipLog).toMatchObject({
+      providerId: "test",
+      modelId: "other-model",
+      policySource: "global",
+      modelOverrideMatched: false,
+    });
   });
 
   it("derives the microcompact threshold from the model-scoped auto threshold", async () => {
@@ -3253,6 +3290,15 @@ describe("AgentRuntime manual compact", () => {
     // 未命中：模型窗口 200K → micro 阈值 179_990，不触发。
     const buildMicroRuntime = (sessionId: SessionId, selection: string) => {
       const eventStore = createTestSessionEventStore();
+      const debug = vi.fn();
+      const info = vi.fn();
+      const logger = {
+        child: () => logger,
+        debug,
+        error: vi.fn(),
+        info,
+        warn: vi.fn(),
+      };
       const toolRegistry = createToolRegistry();
       const oldToolOutput = "old-tool-result-token ".repeat(120);
       const latestToolOutput = "latest-tool-result-token ".repeat(80);
@@ -3296,6 +3342,7 @@ describe("AgentRuntime manual compact", () => {
         },
         {
           eventStore,
+          logger,
           modelFactory: createTestModelFactory({
             async generateText() {
               normalRequestCount++;
@@ -3330,7 +3377,7 @@ describe("AgentRuntime manual compact", () => {
           toolRegistry,
         },
       );
-      return { eventStore, runtime, sessionId };
+      return { eventStore, runtime, sessionId, debug, info };
     };
 
     const hit = buildMicroRuntime(
@@ -3351,6 +3398,18 @@ describe("AgentRuntime manual compact", () => {
     // micro 阈值 999 < auto 阈值 2999：只触发本地裁剪，不触发全量摘要。
     expect(hitEvents.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
     expect(hitResult.response).toBe("done after local microcompact");
+    // micro 判定日志同样必须带模型身份与策略来源，且不丢失派生阈值。
+    // applied 日志是 info 级；skipped 是 debug 级。
+    const hitAppliedLog = hit.info.mock.calls
+      .map((call) => call[1])
+      .find((context) => context?.event === "compact.micro.applied");
+    expect(hitAppliedLog).toMatchObject({
+      providerId: "test",
+      modelId: "GLM-5.3",
+      policySource: "model-override",
+      modelOverrideMatched: true,
+      thresholdTokens: 999,
+    });
 
     const miss = buildMicroRuntime(
       createSessionId("runtime-microcompact-model-override-miss"),
@@ -3363,6 +3422,18 @@ describe("AgentRuntime manual compact", () => {
       missEvents.some((event) => event.type === SessionEventType.MicrocompactBoundary),
     ).toBe(false);
     expect(missResult.response).toBe("done after local microcompact");
+    const missSkipLog = miss.debug.mock.calls
+      .map((call) => call[1])
+      .find(
+        (context) =>
+          context?.event === "compact.micro.skipped" && context?.modelId === "other-model",
+      );
+    expect(missSkipLog).toMatchObject({
+      providerId: "test",
+      modelId: "other-model",
+      policySource: "global",
+      modelOverrideMatched: false,
+    });
   });
 
   it("retries auto compact up to three attempts before continuing the turn", async () => {

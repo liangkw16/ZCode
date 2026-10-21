@@ -236,8 +236,13 @@ function resolveCompactPolicyConfig(
 ): AutoCompactPolicyConfig {
   const microcompact = fileConfig?.microcompact;
   // 程序化 runtimeOverride 是嵌入方对压缩行为的整体接管：modelOverrides 不在此解析
-  // （此处无模型身份，必须延迟到组装点按实际执行模型挑选），且程序化 override 存在时
-  // 一并剔除——否则组装点的模型覆盖会反超程序化值，违反优先级链。
+  // （此处无模型身份，必须延迟到组装点按实际执行模型挑选）。程序化 override 存在时
+  // 文件级与程序化对象自带的覆盖表一并剔除——后者若不剥离，末尾展开会把它重新带回，
+  // 让组装点的模型覆盖反超程序化值，违反优先级链。
+  const {
+    modelOverrides: _programmaticModelOverridesIgnored,
+    ...programmaticOverrideWithoutModelOverrides
+  } = runtimeOverride ?? {};
   return omitUndefinedKeys({
     ...(microcompact
       ? {
@@ -264,7 +269,7 @@ function resolveCompactPolicyConfig(
     summaryProvider: fileConfig?.summaryProvider,
     thresholdRatio: fileConfig?.thresholdRatio,
     enabled: fileConfig?.enabled ?? featuresCompact,
-    ...(runtimeOverride ?? {}),
+    ...programmaticOverrideWithoutModelOverrides,
   });
 }
 

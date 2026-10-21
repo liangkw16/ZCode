@@ -833,6 +833,33 @@ describe("resolveAppRuntimeConfig：compact 策略接线", () => {
     expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "modelOverrides")).toBe(false);
   });
 
+  it("strips modelOverrides carried inside the programmatic runtime override itself", () => {
+    // 程序化对象自带的覆盖表若在末尾展开时保留，会重新带回覆盖表并反超程序化标量值。
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          thresholdRatio: 0.76,
+          modelOverrides: { p: { m: { contextWindowTokens: 400_000 } } },
+        },
+      }),
+      options: {
+        runtimeConfig: {
+          compact: {
+            contextWindow: 600_000,
+            modelOverrides: { p: { m: { contextWindowTokens: 400_000 } } },
+          },
+        },
+      },
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toMatchObject({ contextWindow: 600_000 });
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "modelOverrides")).toBe(false);
+  });
+
   it("keeps unset keys absent so model-resolved windows keep driving thresholds by default", () => {
     // autoCompactIfNeeded 以 `{ contextWindow: 模型窗口, ...compact }` 构造策略：
     // 显式 undefined 的 contextWindow/maxOutputTokens 键会覆盖模型窗口并让阈值

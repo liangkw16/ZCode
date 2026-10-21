@@ -65,7 +65,9 @@ describe("external relay QR helpers", () => {
     };
     expect(parseWebRemoteControlAppPayload(response)).not.toBeNull();
     const result = { ...response.result, desktopAppVersion: "3.12.2" };
-    expect(parseWebRemoteControlAppPayload({ ...response, result })).toMatchObject({ result });
+    expect(
+      parseWebRemoteControlAppPayload({ ...response, result }),
+    ).toMatchObject({ result });
     for (const desktopAppVersion of ["", "   ", 123]) {
       expect(
         parseWebRemoteControlAppPayload({
@@ -84,19 +86,25 @@ describe("external relay QR helpers", () => {
         deviceName: "MacBook",
         appVersion: "1.5.0",
       }),
-    ).toBe("https://zcode.z.ai/remote?sid=sid-1&mid=mid-1&name=MacBook&app_version=1.5.0");
+    ).toBe(
+      "https://zcode.z.ai/remote?sid=sid-1&mid=mid-1&name=MacBook&app_version=1.5.0",
+    );
   });
 
   it("parses V2 routing hints without carrying theme state", () => {
     expect(
-      parseWebRemoteControlExternalQrParams(new URLSearchParams("sid=sid-1&mid=mid-1&theme=light")),
+      parseWebRemoteControlExternalQrParams(
+        new URLSearchParams("sid=sid-1&mid=mid-1&theme=light"),
+      ),
     ).toEqual({ deviceSid: "sid-1", deviceMid: "mid-1" });
   });
 });
 
 describe("resolveWebRemoteControlRoutePathFromBaseUrl", () => {
   it("resolves the v4 QR route from the Vite remote v4 base", () => {
-    expect(resolveWebRemoteControlRoutePathFromBaseUrl("/remote/v4/")).toBe("/remote/v4");
+    expect(resolveWebRemoteControlRoutePathFromBaseUrl("/remote/v4/")).toBe(
+      "/remote/v4",
+    );
   });
 
   it("keeps the existing dev QR route when Vite uses the root base", () => {
@@ -111,7 +119,9 @@ describe("matchesWebRemoteControlRoutePath", () => {
   });
 
   it("does not accept nested static asset paths as the app route", () => {
-    expect(matchesWebRemoteControlRoutePath("/remote/favicon.ico", "/remote")).toBe(false);
+    expect(
+      matchesWebRemoteControlRoutePath("/remote/favicon.ico", "/remote"),
+    ).toBe(false);
   });
 });
 
@@ -267,7 +277,9 @@ describe("parseWebRemoteControlAppPayload", () => {
     ).toMatchObject({
       zcode_type: "workspace-list-updated",
       result: {
-        workspaces: [expect.objectContaining({ workspacePath: "/workspace/app" })],
+        workspaces: [
+          expect.objectContaining({ workspacePath: "/workspace/app" }),
+        ],
       },
     });
   });
@@ -355,13 +367,16 @@ describe("parseWebRemoteControlAppPayload", () => {
   });
 
   it("accepts strict acknowledged rpc fragments and cumulative ACKs in the production app parser", () => {
-    const [fragment] = encodeWebRemoteControlRpcTransportMessage(new Uint8Array([1, 2, 3]), {
-      bridgeSessionId: "bridge-1",
-      bridgeGeneration: 2,
-      recoveryId: "recovery-1",
-      firstPhysicalSeq: 1,
-      messageSeq: 1,
-    });
+    const [fragment] = encodeWebRemoteControlRpcTransportMessage(
+      new Uint8Array([1, 2, 3]),
+      {
+        bridgeSessionId: "bridge-1",
+        bridgeGeneration: 2,
+        recoveryId: "recovery-1",
+        firstPhysicalSeq: 1,
+        messageSeq: 1,
+      },
+    );
     expect(parseWebRemoteControlAppPayload(fragment)).toEqual(fragment);
     expect(
       parseWebRemoteControlAppPayload({
@@ -393,14 +408,19 @@ describe("parseWebRemoteControlAppPayload", () => {
     // 生成器使用 prefix + UUID / Date / Math.random，只产生这组 JSON-safe ASCII。
     // 所有合法字符均为单字节且无需 JSON escaping；`~` 覆盖字符集边界。
     const boundary = "~".repeat(256);
-    const [boundaryFrame] = encodeWebRemoteControlRpcTransportMessage(new Uint8Array([1, 2, 3]), {
-      bridgeSessionId: boundary,
-      recoveryId: boundary,
-      bridgeGeneration: Number.MAX_SAFE_INTEGER,
-      firstPhysicalSeq: Number.MAX_SAFE_INTEGER,
-      messageSeq: Number.MAX_SAFE_INTEGER,
-    });
-    expect(parseWebRemoteControlAppPayload(boundaryFrame)).toEqual(boundaryFrame);
+    const [boundaryFrame] = encodeWebRemoteControlRpcTransportMessage(
+      new Uint8Array([1, 2, 3]),
+      {
+        bridgeSessionId: boundary,
+        recoveryId: boundary,
+        bridgeGeneration: Number.MAX_SAFE_INTEGER,
+        firstPhysicalSeq: Number.MAX_SAFE_INTEGER,
+        messageSeq: Number.MAX_SAFE_INTEGER,
+      },
+    );
+    expect(parseWebRemoteControlAppPayload(boundaryFrame)).toEqual(
+      boundaryFrame,
+    );
     expect(
       parseWebRemoteControlAppPayload({
         ...boundaryFrame,
@@ -592,14 +612,18 @@ describe("project bridge intent validation", () => {
     project: { projectId: null, hostId: "local" },
   };
   it("preserves the project intent and rejects arbitrary directory injection", () => {
-    expect(parseWebRemoteControlAppPayload(request)).toMatchObject({ project: request.project });
+    expect(parseWebRemoteControlAppPayload(request)).toMatchObject({
+      project: request.project,
+    });
     expect(
       parseWebRemoteControlAppPayload({
         ...request,
         project: { ...request.project, workspacePath: "/injected" },
       }),
     ).toBeNull();
-    expect(parseWebRemoteControlAppPayload({ ...request, taskId: "task" })).toBeNull();
+    expect(
+      parseWebRemoteControlAppPayload({ ...request, taskId: "task" }),
+    ).toBeNull();
   });
 });
 
@@ -613,7 +637,10 @@ it("accepts a task address for Host admission and rejects mixed draft/task inten
   };
   expect(hostIncomingMessageSchema.safeParse(request).success).toBe(true);
   expect(
-    hostIncomingMessageSchema.safeParse({ ...request, projectId: "different-project" }).success,
+    hostIncomingMessageSchema.safeParse({
+      ...request,
+      projectId: "different-project",
+    }).success,
   ).toBe(false);
   expect(
     hostIncomingMessageSchema.safeParse({
@@ -650,7 +677,10 @@ it("MRO02：远端 bridge 保留可选窗口目录能力，旧 bridge 不虚构�
   expect(
     parseWebRemoteControlAppPayload({
       ...payload,
-      bridge: { ...payload.bridge, capabilities: { windowProjectDirectory: "true" } },
+      bridge: {
+        ...payload.bridge,
+        capabilities: { windowProjectDirectory: "true" },
+      },
     }),
   ).toBeNull();
 });
@@ -673,19 +703,28 @@ it("MRO03：可见任务报告包含完整地址和传输代际，离开必须�
     ...report,
     view: null,
   });
-  expect(parseWebRemoteControlAppPayload({ ...report, view: { taskId: "task" } })).toBeNull();
+  expect(
+    parseWebRemoteControlAppPayload({ ...report, view: { taskId: "task" } }),
+  ).toBeNull();
   for (const seq of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1])
     expect(parseWebRemoteControlAppPayload({ ...report, seq })).toBeNull();
   expect(parseWebRemoteControlAppPayload({ ...report, epoch: "" })).toBeNull();
   expect(
-    parseWebRemoteControlAppPayload({ zcode_type: "mobile-task-view-request", epoch: "pair-1" }),
+    parseWebRemoteControlAppPayload({
+      zcode_type: "mobile-task-view-request",
+      epoch: "pair-1",
+    }),
   ).toEqual({ zcode_type: "mobile-task-view-request", epoch: "pair-1" });
   expect(
     parseWebRemoteControlAppPayload({
       zcode_type: "bootstrap-response",
       requestId: "b",
       success: true,
-      result: { windowControlSessionId: "session", workspaces: [], mobileTaskViewEpoch: "pair-1" },
+      result: {
+        windowControlSessionId: "session",
+        workspaces: [],
+        mobileTaskViewEpoch: "pair-1",
+      },
     }),
   ).toMatchObject({ result: { mobileTaskViewEpoch: "pair-1" } });
 });
@@ -705,5 +744,21 @@ it("MRO03：客户端不能在可见任务报告中伪造远端 session", () => 
         remoteSessionId: "forged-session",
       },
     }),
+  ).toBeNull();
+});
+
+// 回归：新增 app payload 类型必须同步登记运行时 union（mobile-task-view-preempted
+// 曾只进 TS 联合而被 parseWebRemoteControlAppPayload 静默丢弃，真机被踢页收不到通知）。
+it("解析 mobile-task-view-preempted 通知", () => {
+  const payload = {
+    zcode_type: "mobile-task-view-preempted",
+    bridgeSessionId: "bridge-1",
+    workspaceKey: "/repo",
+    taskId: "task-1",
+    reason: "opened-by-other-terminal",
+  };
+  expect(parseWebRemoteControlAppPayload(payload)).toEqual(payload);
+  expect(
+    parseWebRemoteControlAppPayload({ ...payload, reason: "unknown-reason" }),
   ).toBeNull();
 });

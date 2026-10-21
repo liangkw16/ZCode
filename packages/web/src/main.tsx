@@ -1609,9 +1609,11 @@ async function bootstrapExternalRelayWebRemoteControl(
         // 任务视图独占：另一页面打开了同一任务。只退出任务视图，bridge/attachment
         // 与桌面侧执行不动；窄屏复用 mobile shell 的 history 协议回任务列表，
         // 随后 Reporter 因不可见自动上报 view=null，正好解除桌面侧的抢占抑制。
+        // Bugfix：桌面先发本通知再断 bridge，页面侧断桥处置（markDegraded/dispose）可能
+        // 先于本通知执行，bridgeSessionId 严格匹配会失配导致被踢页不导航、停在死桥
+        // 聊天页直至恢复超时失败页（真机验收实测）。任务地址（taskId+workspaceKey）
+        // 才是本通知的归属依据，bridge 标识仅作参考不再强校验。
         if (
-          payload.bridgeSessionId ===
-            activeRelayProtocol?.getBridgeSessionId() &&
           payload.taskId === currentTaskId &&
           payload.workspaceKey === currentWorkspaceKey
         ) {

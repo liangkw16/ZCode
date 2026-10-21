@@ -13,7 +13,7 @@ import {
   DefaultRuntimeConfig as DefaultConfig,
 } from "@zcode/contracts";
 
-import { mergeCompactModelOverrides } from "./compact-model-overrides-merge.js";
+import { mergeCompactModelOverrides } from "./config-merger.js";
 
 type Handler<K extends ConfigKey> = (value: ConfigValue<K>, prev: ConfigValue<K>) => void;
 type AllHandler = (key: ConfigKey, value: unknown, prev: unknown) => void;

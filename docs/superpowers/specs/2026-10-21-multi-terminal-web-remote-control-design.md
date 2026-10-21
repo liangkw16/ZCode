@@ -645,6 +645,14 @@ workspace-bridge-open→"workspace bridge active"（桌面日志实证），抢�
 同一二进制连续运行（journalctl 无后续重启，亦可排除）。裸 node 终端驱动被 relay 401 拒（非浏览器
 握手差异，未能用于绕过 UI 复现）。
 
-**下一步（二分定位）**：worktree 检出 `779d0560` 构建旧桌面复测页面入口；若正常则逐批回退
-（batch-2 client 协议 routing reserve → batch-3 manager）定位破坏 bridge RPC 的改动。在此之前
-MT08/11/13 的视觉级真机验收标记为 blocked（协议级与单测级已通过）。
+**二分结果（2026-10-21 20:10）**：已用 `779d0560` 版 manager（本批改动前）重建桌面复测——
+**同样复现**设备列表回退，桌面代码嫌疑排除（git diff 显示 779d..HEAD 仅 manager.ts 与
+shared 类型两个源文件变更，shared 为纯类型）。relay 重启（清运行时状态）后同样复现。
+观察到的稳定模式：页面点击设备 → paired → bootstrap → bridge attach/active（桌面日志）→
+约 60s 后 terminal 连接消失、设备回 waiting_terminal，页面停留在设备列表；"attaching
+workspace bridge" 以数秒间隔反复出现（疑似页面侧 bridge 恢复重试循环）。
+结论：回归与桌面构建版本无关，指向环境/运行态因素——首要怀疑是**冷启动恢复后的窗口/
+draft 工作区 host 状态**（14:04 版当天连续运行时页面正常，当天所有重启后的构建均复现）。
+待办：在桌面 UI 手动打开 draft 工作区（或新建任务）后重测页面；给 web 入口加临时诊断
+日志（IAB 无 devtools，需借 mobile-diagnostic 通道）定位页面放弃连接的确切原因。
+MT08/11/13 视觉级真机验收维持 blocked（协议级与单测级已通过）。

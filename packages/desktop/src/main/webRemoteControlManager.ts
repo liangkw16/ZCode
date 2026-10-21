@@ -112,6 +112,12 @@ export interface WebRemoteControlStartAuthorization {
 const WEB_REMOTE_CONTROL_START_AUTHORIZATION_TTL_MS = 30_000;
 // terminal 断开后的 session 宽限：页面短暂掉线重连复用原 bridge，超时才释放 attachment。
 const TERMINAL_SESSION_GRACE_MS = 30_000;
+// 活跃度时间戳单调化：同步到达的多次更新会落在同一毫秒，投影按">"比较会退化为插入序。
+let lastActivityTick = 0;
+function bumpActivityAt(): number {
+  lastActivityTick = Math.max(Date.now(), lastActivityTick + 1);
+  return lastActivityTick;
+}
 
 interface WindowControlLifecycle {
   controller: AbortController;
@@ -173,6 +179,8 @@ interface WindowControlRuntime {
   /** 跨页共享的"最近手机视图"偏好；当前各页视图在 session 上。 */
   mobileViewState?: WebRemoteControlMobileViewState;
   terminalSessions: Map<string, TerminalSession>;
+  /** 上次向 renderer 发布的状态快照（JSON），用于投影切换时的变更去重。 */
+  lastEmittedStatusJson?: string;
   mobileDisconnectGraceTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -535,7 +543,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
       }
     }
     cancelSessionDetach(session);
-    session.lastActivityAt = Date.now();
+    session.lastActivityAt = bumpActivityAt();
     return session;
   }
 
@@ -598,6 +606,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
         markSessionDetached(runtime, session);
       }
     }
+    emitRuntimeStatus(runtime);
   }
 
   function clearPendingOutboundPayloadTimer(session: TerminalSession): void {
@@ -640,7 +649,13 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
 
   function emitRuntimeStatus(runtime: WindowControlRuntime): void {
     if (runtimes.get(runtime.windowId) !== runtime) return;
-    dependencies.onStatusChanged?.(runtime.windowId, buildRuntimeStatus(runtime));
+    const status = buildRuntimeStatus(runtime);
+    const snapshot = JSON.stringify(status);
+    // 投影可能随 session 活跃度/断开变化；订阅者（未读标记等）按事件驱动，
+    // 必须在最终投影变化时发布，同值事件按快照去重防抖动。
+    if (runtime.lastEmittedStatusJson === snapshot) return;
+    runtime.lastEmittedStatusJson = snapshot;
+    dependencies.onStatusChanged?.(runtime.windowId, status);
   }
 
   function clearMobileTaskView(runtime: WindowControlRuntime, session: TerminalSession): void {
@@ -991,18 +1006,19 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
   ): WebRemoteControlWorkspaceListResult {
     const activeTarget = getSessionWorkspaceTarget(runtime, session);
     const initialViewState = getRuntimeInitialViewState(runtime, session);
+    // 视图按整对象选择（本 session → 共享偏好），不做字段级混搭：
+    // B 停在 B 首页时不能因共享偏好带上 A 的 activeTaskId。
+    const chosenView = session.mobileViewState ?? runtime.mobileViewState;
     return {
       workspaces: getAvailableWorkspaces(runtime, session),
       activeWorkspaceKey:
-        session.mobileViewState?.activeWorkspaceKey ??
-        runtime.mobileViewState?.activeWorkspaceKey ??
+        chosenView?.activeWorkspaceKey ??
         initialViewState?.activeWorkspaceKey ??
         resolveWebRemoteControlWorkspaceKey(activeTarget),
       activeTaskId:
-        session.mobileViewState?.activeTaskId ??
+        chosenView?.activeTaskId ??
         session.currentBridge?.initialTaskId ??
-        runtime.mobileViewState?.activeTaskId ??
-        initialViewState?.activeTaskId,
+        (chosenView ? undefined : initialViewState?.activeTaskId),
     };
   }
 
@@ -1443,7 +1459,7 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
     if (deviceInfo) {
       session.mobileDeviceInfo = deviceInfo;
     }
-    session.lastActivityAt = Date.now();
+    session.lastActivityAt = bumpActivityAt();
   }
 
   function applyMobileTaskViewUpdate(
@@ -1475,16 +1491,12 @@ export function createWebRemoteControlManager(dependencies: WebRemoteControlMana
           ...(bridge.kind === "remote" ? { remoteSessionId: bridge.remoteSessionId } : {}),
         }
       : undefined;
+    session.lastActivityAt = bumpActivityAt();
     const previous = session.mobileTaskView;
-    if (
-      previous?.taskId === trustedView?.taskId &&
-      previous?.workspacePath === trustedView?.workspacePath &&
-      previous?.workspaceIdentity === trustedView?.workspaceIdentity &&
-      previous?.remoteSessionId === trustedView?.remoteSessionId
-    )
-      return;
     session.mobileTaskView = trustedView;
+    // 同值视图也发布：投影取最近活跃 session，值没变但活跃页可能切换。
     emitRuntimeStatus(runtime);
+    void previous;
   }
 
   function routeRpcTransportPayload(

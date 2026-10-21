@@ -447,6 +447,28 @@ describe("ws2 网关：terminal 接管与设备契约", () => {
     second.socket.close();
   });
 
+  it("terminal 发送 target_terminal_id 属于非法方向，回 WRONG_PARAM 并关闭", async () => {
+    const sid = freshSid();
+    const device = await auth2("device", sid);
+    await device.messages.next();
+    const a = await auth2("terminal", sid, "tA");
+    await a.messages.next();
+    await device.messages.next();
+
+    a.socket.send(
+      JSON.stringify({ type: "data", payload: { hi: 1 }, target_terminal_id: "tB" }),
+    );
+    expect(await a.messages.next()).toMatchObject({ type: "error", code: "WRONG_PARAM" });
+    await waitClosed(a.socket);
+    // device 只收到集合更新，不收到该 payload。
+    expect(await device.messages.next()).toMatchObject({
+      type: "pair_status_ack",
+      pair_status: "waiting",
+      terminal_ids: [],
+    });
+    device.socket.close();
+  });
+
   it("未提供 terminal_id 的旧客户端不收到新字段，且以连接级 sid 作为生效 id", async () => {
     const sid = freshSid();
     const device = await auth2("device", sid);

@@ -240,6 +240,12 @@ export function attachSelfHostRelayWsGateway(
         }
         if (message.type === "data") {
           if (connection.role === "terminal") {
+            // target_terminal_id 是 device → relay 专属方向；terminal 发送按契约回 WRONG_PARAM。
+            if (message.target_terminal_id) {
+              send(connection, { type: "error", code: "WRONG_PARAM" });
+              ws.close();
+              return;
+            }
             const device = deviceConnectionOf(connection.deviceSid);
             if (!device) {
               send(connection, { type: "error", code: "INTERNAL" });

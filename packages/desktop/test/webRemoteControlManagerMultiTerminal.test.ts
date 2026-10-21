@@ -138,6 +138,99 @@ describe("web remote control multi-terminal sessions", () => {
     await h.manager.stop(1);
   });
 
+  it("活跃页面断开后状态事件切到剩余页面，订阅者不保留旧查看", async () => {
+    const events: { mobileTaskView?: { taskId?: string } | null }[] = [];
+    const h = createManagerHarness({
+      onStatusChanged: (_windowId, status) => {
+        events.push({ mobileTaskView: status.mobileTaskView });
+      },
+    });
+    await h.manager.start(1, { workspacePath });
+    h.emitTransportState("paired");
+    for (const id of ["tA", "tB"]) {
+      h.deliverPayload(await bridgeOpenPayload(id), id);
+    }
+    await vi.waitFor(() =>
+      expect(
+        h.sentPayloads.filter((p) => p.zcode_type === "workspace-bridge-ready"),
+      ).toHaveLength(2),
+    );
+    const epochs = new Map<string, string>();
+    for (const id of ["tA", "tB"]) {
+      h.sentPayloads.length = 0;
+      h.sentTargets.length = 0;
+      h.deliverPayload({ zcode_type: "bootstrap-request", requestId: `boot-${id}` }, id);
+      const response = h.sentPayloads.find(
+        (payload) =>
+          payload.zcode_type === "bootstrap-response" && payload.requestId === `boot-${id}`,
+      ) as unknown as { result: { mobileTaskViewEpoch?: string } };
+      epochs.set(id, response.result.mobileTaskViewEpoch!);
+    }
+
+    for (const id of ["tA", "tB"]) {
+      h.deliverPayload(
+        {
+          zcode_type: "mobile-task-view-update",
+          bridgeSessionId: `bridge-${id}`,
+          epoch: epochs.get(id),
+          seq: 1,
+          view: { workspacePath, taskId: `task-${id}` },
+        },
+        id,
+      );
+    }
+    expect(h.manager.getStatus(1).mobileTaskView).toMatchObject({ taskId: "task-tB" });
+
+    h.emitTerminalIds(["tA"]);
+    await vi.waitFor(() =>
+      expect(h.manager.getStatus(1).mobileTaskView).toMatchObject({ taskId: "task-tA" }),
+    );
+    const lastEvent = events.at(-1);
+    expect(lastEvent?.mobileTaskView).toMatchObject({ taskId: "task-tA" });
+    await h.manager.stop(1);
+  });
+
+  it("未选任务的页面不被共享偏好串入其它页面的 taskId", async () => {
+    const h = createManagerHarness();
+    await h.manager.start(1, { workspacePath });
+    h.emitTransportState("paired");
+    h.manager.syncAvailableWorkspaces(1, [
+      { workspacePath: "/workspace/A", label: "A", kind: "local" },
+      { workspacePath: "/workspace/B", label: "B", kind: "local" },
+    ]);
+    // B 停留在 B 首页（无 activeTaskId）；A 随后在 A 打开 taskA 并写入共享偏好。
+    h.deliverPayload(
+      {
+        zcode_type: "mobile-view-state-update",
+        viewState: { activeWorkspaceKey: "/workspace/B", updatedAt: 1 },
+      },
+      "tB",
+    );
+    h.deliverPayload(
+      {
+        zcode_type: "mobile-view-state-update",
+        viewState: { activeWorkspaceKey: "/workspace/A", activeTaskId: "taskA", updatedAt: 2 },
+      },
+      "tA",
+    );
+    h.sentPayloads.length = 0;
+    h.sentTargets.length = 0;
+    h.deliverPayload({ zcode_type: "workspace-list-request", requestId: "b-list" }, "tB");
+    const response = await vi.waitFor(() => {
+      const found = h.sentPayloads.find(
+        (payload) =>
+          payload.zcode_type === "workspace-list-response" && payload.requestId === "b-list",
+      );
+      expect(found).toBeDefined();
+      return found as unknown as {
+        result: { activeWorkspaceKey?: string; activeTaskId?: string };
+      };
+    });
+    expect(response.result.activeWorkspaceKey).toBe("/workspace/B");
+    expect(response.result.activeTaskId).toBeUndefined();
+    await h.manager.stop(1);
+  });
+
   it("停止窗口立即释放全部 session", async () => {
     const h = createManagerHarness();
     await h.manager.start(1, { workspacePath });

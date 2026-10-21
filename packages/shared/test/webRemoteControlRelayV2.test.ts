@@ -148,3 +148,44 @@ it("rejects blank or malformed terminal ids", () => {
     }),
   ).toBeNull();
 });
+
+it("enforces the 128-byte UTF-8 cap on terminal ids in every direction", () => {
+  // identifier 只限字符数；多字节字符可到 384 字节，超限身份不能进入认证与路由集合。
+  expect(
+    parseWebRemoteControlRelayV2OutgoingMessage({
+      type: "auth_init",
+      device_sid: "d_1",
+      terminal_id: "中".repeat(128),
+    }),
+  ).toBeNull();
+  expect(
+    parseWebRemoteControlRelayV2OutgoingMessage({
+      type: "data",
+      payload: {},
+      target_terminal_id: "中".repeat(128),
+    }),
+  ).toBeNull();
+  expect(
+    parseWebRemoteControlRelayV2IncomingMessage({
+      type: "data",
+      payload: {},
+      from_terminal_id: "中".repeat(128),
+    }),
+  ).toBeNull();
+  expect(
+    parseWebRemoteControlRelayV2IncomingMessage({
+      type: "pair_status_ack",
+      pair_status: "matched",
+      terminal_ids: ["ok", "中".repeat(128)],
+    }),
+  ).toBeNull();
+
+  // 42 个三字节字符 = 126 字节，仍在限内。
+  expect(
+    parseWebRemoteControlRelayV2OutgoingMessage({
+      type: "auth_init",
+      device_sid: "d_1",
+      terminal_id: "中".repeat(42),
+    }),
+  ).toMatchObject({ terminal_id: "中".repeat(42) });
+});

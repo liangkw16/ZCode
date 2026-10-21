@@ -17,8 +17,9 @@ const role = z.enum(["device", "terminal"]);
 const pairStatus = z.enum(["waiting", "matched"]);
 const errorCode = z.enum(["AUTH_FAILED", "WRONG_PARAM", "KICKED", "INTERNAL", "DEVICE_OFFLINE"]);
 // 多 terminal 路由：逻辑 terminal 身份与集合，全部可选，旧链路不发送即不受影响。
-const terminalId = identifier;
-const terminalIdList = z.array(identifier).max(64);
+// identifier 只限字符数；身份必须同时限 UTF-8 字节数（"中".repeat(128)=384 字节不能进集合）。
+const terminalId = identifier.refine((value) => new TextEncoder().encode(value).length <= 128);
+const terminalIdList = z.array(terminalId).max(64);
 const authInit = z.strictObject({
   type: z.literal("auth_init"),
   device_sid: deviceSid,

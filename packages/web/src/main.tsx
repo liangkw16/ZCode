@@ -8,6 +8,7 @@ import {
   matchesWebRemoteControlRoutePath,
   resolveWebRemoteControlInitialWorkspaceSelection,
   resolveWebRemoteControlWorkspaceKey,
+  createUuid,
 } from "@zcode/shared";
 /* eslint-disable max-lines -- Web 远程控制启动、错误页和 web 平台桥接暂时集中在入口编排。 */
 import type { ComponentProps } from "react";
@@ -751,6 +752,10 @@ function isWebRemoteControlRoute(): boolean {
   );
 }
 
+// 页面级稳定 terminal 身份：同一页面重连复用，刷新或新标签生成新值。
+// 不写 localStorage——复制标签页共享存储会拿到新页面上下文，天然不应共享身份。
+const webRemoteControlTerminalId = `t_${createUuid()}`;
+
 function createWebRemoteControlRequestId(prefix: string): string {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`;
 }
@@ -1391,6 +1396,7 @@ async function bootstrapExternalRelayWebRemoteControl(
     deviceSid: relayParams.deviceSid,
     deviceMid: relayParams.deviceMid,
     appVersion: relayParams.appVersion,
+    terminalId: webRemoteControlTerminalId,
     getToken,
     onRawTransportPayload: (payload) =>
       pendingRelayProtocol?.acceptPayload(payload) ||

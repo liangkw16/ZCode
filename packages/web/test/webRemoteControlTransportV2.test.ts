@@ -18,6 +18,7 @@ async function fixture(
   options: Parameters<typeof createFakeRelayV2>[0] = { users: { jwt: "user-1" } },
   terminalJwt = "jwt",
   tokenFetcher = fetch,
+  terminalId?: string,
 ) {
   const relay = await createFakeRelayV2(options);
   cleanup.push(() => relay.close());
@@ -53,6 +54,7 @@ async function fixture(
     relayWsUrl: relay.wsUrl,
     deviceSid: sid,
     deviceMid: "desktop-mid",
+    ...(terminalId ? { terminalId } : {}),
     getToken: (signal) =>
       createWebRemoteControlV2TokenClient(relay.httpUrl, tokenFetcher)(terminalJwt, signal),
     onPayload: vi.fn(),
@@ -106,6 +108,42 @@ function controlledTransport() {
 }
 
 describe("terminal 与 V2 假 relay 的线级契约", () => {
+  it("auth_init 携带页面级 terminal_id，重连复用同一个值", async () => {
+    const h = await fixture({ users: { jwt: "user-1" } }, "jwt", fetch, "t_page-1");
+    h.terminal.start();
+    await vi.waitFor(() => expect(h.states.at(-1)).toBe("paired"));
+
+    const terminalAuths = () =>
+      h.relay.messages.filter(
+        (entry) =>
+          entry.role === "terminal" &&
+          (entry.message as { type?: string }).type === "auth_init",
+      );
+    expect(terminalAuths()).toHaveLength(1);
+    expect(terminalAuths()[0]!.message).toMatchObject({ terminal_id: "t_page-1" });
+
+    h.relay.disconnect({ role: "terminal" });
+    await vi.waitFor(
+      () => {
+        expect(terminalAuths().length).toBeGreaterThanOrEqual(2);
+      },
+      { timeout: 5000 },
+    );
+    expect(terminalAuths().at(-1)!.message).toMatchObject({ terminal_id: "t_page-1" });
+  });
+
+  it("未提供 terminalId 时 auth_init 不带该字段", async () => {
+    const h = await fixture();
+    h.terminal.start();
+    await vi.waitFor(() => expect(h.states.at(-1)).toBe("paired"));
+    const auth = h.relay.messages.find(
+      (entry) =>
+        entry.role === "terminal" &&
+        (entry.message as { type?: string }).type === "auth_init",
+    )!;
+    expect(auth.message).not.toHaveProperty("terminal_id");
+  });
+
   it("缺少 AbortSignal 静态 API 仍只取一次 token 并实际配对、透传 bootstrap", async () => {
     const h = await fixture();
     const descriptors = Object.getOwnPropertyDescriptors(AbortSignal);

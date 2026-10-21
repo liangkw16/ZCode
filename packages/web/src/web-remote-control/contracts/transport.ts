@@ -80,6 +80,8 @@ export interface WebRemoteControlTerminalTransportOptions {
   getToken(signal: AbortSignal): Promise<string>;
   deviceMid?: string;
   appVersion?: string;
+  /** 页面级稳定逻辑身份：同一页面重连复用，刷新/新标签生成新值；缺省不发送（旧 relay 兼容）。 */
+  terminalId?: string;
   WebSocketCtor?: typeof globalThis.WebSocket;
   heartbeatIntervalMs?: number;
   heartbeatJitterMs?: number;

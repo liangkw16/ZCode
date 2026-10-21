@@ -133,6 +133,7 @@ export class WebRemoteControlTerminalTransport {
         this.send({
           type: "auth_init",
           device_sid: this.options.deviceSid,
+          ...(this.options.terminalId ? { terminal_id: this.options.terminalId } : {}),
           meta: {
             platform: "web",
             version: this.options.appVersion ?? "web",

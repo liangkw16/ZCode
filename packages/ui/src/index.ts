@@ -4,6 +4,7 @@ export type { ScopedErrorBoundaryVariant } from "./ErrorBoundary.js";
 export { Button, buttonVariants } from "./components/ui/button.js";
 export { DesktopWindowFrame } from "./DesktopWindowFrame.js";
 export { WebRemoteControlDialog } from "@/web-remote-control/index.js";
+export { isWebRemoteControlMobileChatHistoryState } from "@/WebRemoteControlMobileShell.js";
 export {
   WebRemoteControlFeatureProvider,
   useWebRemoteControlFeatureEnabled,
@@ -77,7 +78,11 @@ export {
   useGitActions,
 } from "./hooks/index.js";
 
-export { ZCodeIntlProvider, useZCodeIntl, LocaleSwitcher } from "./i18n/index.js";
+export {
+  ZCodeIntlProvider,
+  useZCodeIntl,
+  LocaleSwitcher,
+} from "./i18n/index.js";
 export { ResourceManagerApp } from "./resource-manager/ResourceManagerApp.js";
 export type {
   ResourceManagerAppProps,
@@ -91,7 +96,10 @@ export {
   resolveFileDisplayDescriptor,
   setDefaultFileDisplayBasePath,
 } from "./lib/fileDisplay.js";
-export type { FileDisplayDescriptor, FileDisplayOptions } from "./lib/fileDisplay.js";
+export type {
+  FileDisplayDescriptor,
+  FileDisplayOptions,
+} from "./lib/fileDisplay.js";
 export { playTaskNotificationSound } from "./lib/taskNotificationSound.js";
 export { installDocumentHiddenMotionPause } from "./lib/documentHiddenMotionPause.js";
 export {
@@ -114,8 +122,14 @@ export {
 } from "./lib/userActionTraceCatalog.js";
 export { setReactErrorArmsReporter } from "./lib/reactErrorArmsTelemetry.js";
 export { recordArmsCustomEventForE2E } from "./lib/armsCustomEventObservability.js";
-export { generateMobileDeviceFingerprint, setStreamClientId } from "./lib/streamClientId.js";
+export {
+  generateMobileDeviceFingerprint,
+  setStreamClientId,
+} from "./lib/streamClientId.js";
 export { GlobalDatabaseStartupLoading } from "./root/GlobalDatabaseStartupLoading.js";
 
-export { LocalTtftObserver, setLocalTtftObserver } from "@/v4/telemetry/localTtftObserver.js";
+export {
+  LocalTtftObserver,
+  setLocalTtftObserver,
+} from "@/v4/telemetry/localTtftObserver.js";
 export { ensurePendingTaskDraft } from "@/v4/composer/composerDraftStore.js";

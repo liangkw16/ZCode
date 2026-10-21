@@ -339,6 +339,23 @@ const TERMINAL_SESSION_GRACE_MS = 30_000;
   同样生成 epoch 并定向请求一次。
 - `applyMobileTaskViewUpdate` 用该 session 的 bridge/epoch 校验，更新
   `session.mobileTaskView`。
+- **任务视图独占（2026-10-21 变更）**：同一 `(workspaceKey, taskId)` 在同一时刻只归属一个
+  terminal session。收口在 `applyMobileTaskViewUpdate`——唯一把"正在查看某任务"写成事实的
+  入口：
+  - **声明即抢占**：某 session 声明查看任务 X 成功时，遍历其他 session，凡
+    `mobileTaskView` 指向同一 `(workspaceKey, taskId)` 的旧持有者被抢占——清除其
+    `mobileTaskView` 并定向发送新 payload
+    `{ zcode_type: "mobile-task-view-preempted", bridgeSessionId, workspaceKey, taskId, reason: "opened-by-other-terminal" }`。
+  - **不中断执行状态**：抢占只清除视图事实并通知，**不 dispose 被踢 session 的 bridge、
+    不释放 host attachment**；workspace host/agent 运行与该 terminal 的其他能力不受影响。
+  - **抑制重报（防乒乓）**：被踢 session 记录 `preemptedTaskViewKey`；此后它对同一任务的
+    上报一律拒绝（不重设视图、不触发反向抢占）。记录在以下时机清除：该 session 上报
+    `view=null` 或其他任务（页面确认离开）、新 bridge open（`disposeRuntimeBridgeResources`
+    重建路径）、transport 离开 paired（全部视图与 epoch 本就重置）。旧 web 不认识
+    preempted payload 也不会导航，其 visibilitychange/pageshow 周期性重报由该抑制挡住；
+    旧页面刷新即新建 bridge，可重新打开该任务。
+  - **对称语义**：被踢页回到任务列表（上报 null 清除抑制）后再次点入同一任务，视为
+    "新开"，反向抢占当前持有者。
 - 桌面状态投影：`mobileConnected` 仍取 device transport 是否 paired（至少一个页面在线）；
   `mobileViewState` 取 `runtime.mobileViewState`；`mobileTaskView` / `mobileDeviceInfo` 取
   最近活跃 session 的值。`WebRemoteControlStatus` 类型不变。
@@ -373,6 +390,15 @@ session 宽限期结束后，页面可能仍持有旧 bridge 并继续发 rpc-fr
 - KICKED 处理不变：首次 2~5s 重连，60s 内第二次进 `session-conflict`。多页正常使用时
   不会触发；只有同一 `terminal_id` 被另一条连接替换时才发生。
 - 新页面初始落点由 desktop 的共享 `mobileViewState` 决定；web 不新增 UI。
+- **preempted 处理（2026-10-21 变更）**：`onPayload` 收到 `mobile-task-view-preempted` 且
+  `taskId`/`workspaceKey` 与当前 bridge 的 `currentTaskId`/`currentWorkspaceKey` 匹配时：
+  - 窄屏：复用 mobile shell 的 history 协议（`window.history.state.zcodeMobilePage ===
+"chat"` 时 `history.back()`）退回任务首页；随后 `WebRemoteControlTaskViewReporter`
+    因不再可见自动上报 `view=null`，正好清除桌面侧抑制记录。
+  - 展示一次性提示（该会话已在其他页面打开）。宽屏布局没有任务首页，仅提示不导航；
+    桌面侧抑制记录仍保证其旧上报不会抢占新持有者。
+  - 不 dispose bridge、不重连、不清草稿。旧 web（不认识该 payload）静默忽略，行为由
+    桌面侧抑制记录兜底。
 
 ## 事件顺序与生命周期
 
@@ -428,6 +454,12 @@ device 断开
 | 新 relay + 新 web     | 稳定 `terminal_id`，重连复用 session                                                                          |
 | 官方 relay + 任意 web | 官方单 terminal 语义不变；新 web 的 `terminal_id` 被 Go 解码忽略                                              |
 
+任务视图独占变更（2026-10-21）的兼容补充：`mobile-task-view-preempted` 是 app payload
+（relay 透明转发，不涉及 relay schema），因此该变更只涉及 desktop 与 web，**relay 不动**；
+新旧 desktop/web 任意组合都不会断链——旧 web 收到新 payload 静默忽略，新 web 连旧 desktop
+不会收到该 payload（无人发送）。生效需要新 desktop（抢占与抑制）+ 新 web（导航与提示）同时
+就位；只有一方就位时行为退化为"多页仍可同看"，无破坏。
+
 发布顺序：
 
 1. 构建并发布新 desktop（Mac app）。
@@ -466,18 +498,20 @@ device 断开
 
 ### 验收矩阵
 
-| #    | 场景                        | 预期                                                   |
-| ---- | --------------------------- | ------------------------------------------------------ |
-| MT01 | 同一链接开两个标签页        | 都 paired，relay 日志无 KICKED                         |
-| MT02 | 两页打开不同 workspace/task | 各自 bridge/attachment，输入与 RPC 不串台              |
-| MT03 | 关闭页面 A                  | B 不受影响；A 的 attachment 在 30s 宽限后释放          |
-| MT04 | A 断网重连                  | 复用 terminal_id，不重建 bridge，草稿保留              |
-| MT05 | relay 重启                  | 双页重连；desktop 按 `terminal_ids` 对账，session 不丢 |
-| MT06 | 桌面重启                    | 双页走既有 DEVICE_OFFLINE/恢复链路                     |
-| MT07 | 官方 relay + 旧页面         | 与现状完全一致                                         |
-| MT08 | 两页打开同一个 task         | 都能收到流式帧                                         |
-| MT09 | 同一 terminal_id 重复连接   | 只踢旧连接，不影响其他页面                             |
-| MT10 | 32 个 terminal 上限         | 第 33 个收 KICKED 并关闭，其余不受影响                 |
+| #    | 场景                        | 预期                                                                                                                       |
+| ---- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| MT01 | 同一链接开两个标签页        | 都 paired，relay 日志无 KICKED                                                                                             |
+| MT02 | 两页打开不同 workspace/task | 各自 bridge/attachment，输入与 RPC 不串台                                                                                  |
+| MT03 | 关闭页面 A                  | B 不受影响；A 的 attachment 在 30s 宽限后释放                                                                              |
+| MT04 | A 断网重连                  | 复用 terminal_id，不重建 bridge，草稿保留                                                                                  |
+| MT05 | relay 重启                  | 双页重连；desktop 按 `terminal_ids` 对账，session 不丢                                                                     |
+| MT06 | 桌面重启                    | 双页走既有 DEVICE_OFFLINE/恢复链路                                                                                         |
+| MT07 | 官方 relay + 旧页面         | 与现状完全一致                                                                                                             |
+| MT08 | 两页打开同一个 task         | 后开者接管任务视图；先开者退出到任务列表并收到提示；bridge/agent 执行不中断（2026-10-21 变更，原语义"都能收到流式帧"作废） |
+| MT09 | 同一 terminal_id 重复连接   | 只踢旧连接，不影响其他页面                                                                                                 |
+| MT10 | 32 个 terminal 上限         | 第 33 个收 KICKED 并关闭，其余不受影响                                                                                     |
+| MT11 | 被踢页重新进入同一 task     | 接管回来（对称的"新开踢旧开"），原持有者收到提示                                                                           |
+| MT12 | 被踢页后台切回重报该 task   | 桌面抑制记录拒绝重报，持有者不被反向抢占（防乒乓）                                                                         |
 
 真机验证需要：KCode 桌面构建产物、ECS relay 与新 web 静态产物、同一链接的两个浏览器页面。
 本地单测与假 relay 不替代真机、OAuth、线上部署验收。
@@ -498,8 +532,34 @@ device 断开
   attachment，这是有界且可接受的。
 - 多个桌面窗口共用同一 deviceSid 的互踢问题保持现状。
 - relay 设备离线但仍有 waiting terminal 时删除 SID 的边界保持现状。
-- 若未来需要“只读观察页”或“踢出某页”，在 `terminal_ids` 与 session map 之上扩展，不改变
-  本次的 wire 语义。
+- 若未来需要“只读观察页”或 terminal 级“踢出某页”，在 `terminal_ids` 与 session map 之上扩展；
+  本次 2026-10-21 变更已实现任务视图级踢出（同任务单开），terminal 级踢出仍未做。
+
+## 变更：任务视图独占（2026-10-21）
+
+用户裁决：同一会话（任务）同一时刻只允许一个 web 页面打开，新开者踢掉旧开者，且不得中断
+该会话在桌面侧的执行状态。据此把 MT08 的原语义（两页同任务共看直播）改为任务视图独占：
+
+```mermaid
+sequenceDiagram
+    participant A as 页面 A（旧持有者）
+    participant B as 页面 B（新开者）
+    participant M as Main manager（视图唯一 owner）
+    participant H as workspace Host/agent
+
+    A->>M: task-view-update(view=X)（已持有 X）
+    B->>M: task-view-update(view=X)
+    M->>M: 校验 B 的 bridge/epoch/seq 通过
+    M->>M: B.mobileTaskView=X；A.preemptedTaskViewKey=X
+    M-->>A: 定向 mobile-task-view-preempted(X)
+    M->>M: A.mobileTaskView=undefined（投影事件）
+    Note over H: bridge/attachment/agent 均不动，执行不中断
+    A->>A: 退回任务列表，Reporter 上报 view=null
+    M->>M: A.preemptedTaskViewKey 清除（可再次进入）
+```
+
+不做的部分：不在 relay 层做（app payload 对 relay 透明）；不踢 terminal 连接（与
+MT09 的同 id 替换正交）；不阻止两页打开同一 workspace 的不同任务（MT02 语义不变）。
 
 ## 实现与验收记录（2026-10-21）
 

@@ -26,7 +26,12 @@ import type { WorkspacePurpose } from "./workspacePurpose.js";
 export const WEB_REMOTE_CONTROL_WORKSPACE_RECONNECT_TIMEOUT_MS = 120_000;
 export const WEB_REMOTE_CONTROL_OUTBOUND_PAYLOAD_BUFFER_TIMEOUT_MS = 5_000;
 
-export type WebRemoteControlThemeSeed = "light" | "dark" | "zai-light" | "zai-dark" | "system";
+export type WebRemoteControlThemeSeed =
+  | "light"
+  | "dark"
+  | "zai-light"
+  | "zai-dark"
+  | "system";
 
 export interface WebRemoteControlContext {
   workspacePath: string;
@@ -42,7 +47,9 @@ export const webRemoteControlAuthStateChangeSchema = z
     state: z.enum(["signed-in", "signed-out"]),
   })
   .strict();
-export type WebRemoteControlAuthStateChange = z.infer<typeof webRemoteControlAuthStateChangeSchema>;
+export type WebRemoteControlAuthStateChange = z.infer<
+  typeof webRemoteControlAuthStateChangeSchema
+>;
 
 export type WebRemoteControlStatusKind =
   | "auth-required"
@@ -120,22 +127,28 @@ export interface WebRemoteControlV2QrParams {
   appVersion?: string;
 }
 
-export type BuildWebRemoteControlExternalQrUrlOptions = WebRemoteControlV2QrParams & {
-  baseUrl: string;
-  /**
-   * kcode 自托管：非空时把 relay 密钥写入 `#k=` fragment（fragment 不发往服务端），
-   * 手机页 readSelfHostKey 解析后持久化并摘除。缺省必须保持无 hash 的官方现状；
-   * 调用方（desktop 门控）负责校验最终 URL 指向自建 origin 才传入。
-   */
-  selfHostKey?: string | null;
-};
+export type BuildWebRemoteControlExternalQrUrlOptions =
+  WebRemoteControlV2QrParams & {
+    baseUrl: string;
+    /**
+     * kcode 自托管：非空时把 relay 密钥写入 `#k=` fragment（fragment 不发往服务端），
+     * 手机页 readSelfHostKey 解析后持久化并摘除。缺省必须保持无 hash 的官方现状；
+     * 调用方（desktop 门控）负责校验最终 URL 指向自建 origin 才传入。
+     */
+    selfHostKey?: string | null;
+  };
 
-function readNonEmptySearchParam(params: URLSearchParams, name: string): string | undefined {
+function readNonEmptySearchParam(
+  params: URLSearchParams,
+  name: string,
+): string | undefined {
   const value = params.get(name)?.trim();
   return value ? value : undefined;
 }
 
-export function isWebRemoteControlThemeSeed(value: unknown): value is WebRemoteControlThemeSeed {
+export function isWebRemoteControlThemeSeed(
+  value: unknown,
+): value is WebRemoteControlThemeSeed {
   return (
     value === "light" ||
     value === "dark" ||
@@ -145,7 +158,9 @@ export function isWebRemoteControlThemeSeed(value: unknown): value is WebRemoteC
   );
 }
 
-export function resolveWebRemoteControlRoutePathFromBaseUrl(baseUrl: string): string {
+export function resolveWebRemoteControlRoutePathFromBaseUrl(
+  baseUrl: string,
+): string {
   const rawBaseUrl = baseUrl.trim() || "/";
   let pathname = "/";
 
@@ -162,10 +177,14 @@ export function resolveWebRemoteControlRoutePathFromBaseUrl(baseUrl: string): st
   return normalizedPathname;
 }
 
-export function matchesWebRemoteControlRoutePath(pathname: string, routePath: string): boolean {
+export function matchesWebRemoteControlRoutePath(
+  pathname: string,
+  routePath: string,
+): boolean {
   // Bugfix: dev / production 入口可能带 /remote/ 尾斜杠；
   // 路由判断需要接受 /remote 与 /remote/，但不能把 /remote/favicon.ico 当成应用入口。
-  const normalizeRoutePath = (value: string) => value.replace(/\/+$/, "") || "/";
+  const normalizeRoutePath = (value: string) =>
+    value.replace(/\/+$/, "") || "/";
   return normalizeRoutePath(pathname) === normalizeRoutePath(routePath);
 }
 
@@ -251,7 +270,10 @@ export function resolveWebRemoteControlFailureReasonFromCloseCode(
 }
 
 export interface WebRemoteControlStartResult {
-  status: Extract<WebRemoteControlStatusKind, "running" | "connecting" | "active">;
+  status: Extract<
+    WebRemoteControlStatusKind,
+    "running" | "connecting" | "active"
+  >;
   sessionId: string;
   windowControlSessionId?: string;
   deviceToken?: string;
@@ -284,7 +306,9 @@ export interface WebRemoteControlStatus {
   mobileConnected?: boolean;
   mobileViewState?: WebRemoteControlMobileViewState;
   /** Main 校验后的瞬时可见任务；remoteSessionId 仅由所属 bridge 注入，不接受 Web 自报。 */
-  mobileTaskView?: (WebRemoteControlMobileTaskView & { remoteSessionId?: string }) | null;
+  mobileTaskView?:
+    | (WebRemoteControlMobileTaskView & { remoteSessionId?: string })
+    | null;
   mobileDeviceInfo?: WebRemoteControlMobileDeviceInfo;
   qrUrl?: string;
   connectUrl?: string;
@@ -353,7 +377,8 @@ export interface WebRemoteControlPlatformMethodResultMap {
   migrateLegacyCommonMcp: MigrateLegacyCommonMcpResult;
 }
 
-export type WebRemoteControlPlatformMethod = keyof WebRemoteControlPlatformMethodResultMap;
+export type WebRemoteControlPlatformMethod =
+  keyof WebRemoteControlPlatformMethodResultMap;
 
 export type WebRemoteControlPlatformRequest = {
   [K in WebRemoteControlPlatformMethod]: {
@@ -451,7 +476,12 @@ export interface WebRemoteControlWorkspaceBridgeOpenPayload {
   recoveryId?: string;
   workspaceKey: string;
   taskId?: string;
-  project?: { projectId: string | null; hostId?: string; draftId?: string; reuseDraft?: boolean };
+  project?: {
+    projectId: string | null;
+    hostId?: string;
+    draftId?: string;
+    reuseDraft?: boolean;
+  };
   taskHostId?: string;
   /** 仅解析任务目录供文件树使用，不选择任务或标记已读。 */
   fileTreeTaskId?: string;
@@ -521,6 +551,19 @@ export interface WebRemoteControlMobileTaskViewUpdatePayload {
 export interface WebRemoteControlMobileTaskViewRequestPayload {
   zcode_type: "mobile-task-view-request";
   epoch: string;
+}
+
+/**
+ * 任务视图独占：另一 terminal 声明查看同一任务后，desktop 定向通知旧持有者退出该任务视图。
+ * 只清视图事实，不触碰 bridge/host attachment，不中断会话执行。
+ */
+export interface WebRemoteControlMobileTaskViewPreemptedPayload {
+  zcode_type: "mobile-task-view-preempted";
+  /** 被踢页当前 bridge 的会话标识，供页面确认通知属于自己。 */
+  bridgeSessionId: string;
+  workspaceKey: string;
+  taskId: string;
+  reason: "opened-by-other-terminal";
 }
 
 export type WebRemoteControlPlatformRequestPayload = {
@@ -629,6 +672,7 @@ export type WebRemoteControlAppPayload =
   | WebRemoteControlMobileViewStatePayload
   | WebRemoteControlMobileTaskViewUpdatePayload
   | WebRemoteControlMobileTaskViewRequestPayload
+  | WebRemoteControlMobileTaskViewPreemptedPayload
   | WebRemoteControlPlatformRequestPayload
   | WebRemoteControlPlatformResponsePayload
   | WebRemoteControlRpcTransportPayload
@@ -753,7 +797,10 @@ export interface WebRemoteControlWindowControlReadyEvent {
 }
 
 export function resolveWebRemoteControlWorkspaceKey(
-  target: Pick<WebRemoteControlWorkspaceTarget, "workspacePath" | "workspaceIdentity">,
+  target: Pick<
+    WebRemoteControlWorkspaceTarget,
+    "workspacePath" | "workspaceIdentity"
+  >,
 ): string {
   return target.workspaceIdentity?.trim() || target.workspacePath;
 }
@@ -762,7 +809,8 @@ export function isWebRemoteControlBridgeableWorkspaceTarget(
   workspace: WebRemoteControlWorkspaceTarget,
 ): boolean {
   return (
-    workspace.kind !== "remote" || Boolean(workspace.workspaceIdentity && workspace.remoteSessionId)
+    workspace.kind !== "remote" ||
+    Boolean(workspace.workspaceIdentity && workspace.remoteSessionId)
   );
 }
 
@@ -775,12 +823,18 @@ export function resolveWebRemoteControlInitialWorkspaceSelection({
   mobileViewState?: WebRemoteControlMobileViewState;
   initialViewState?: WebRemoteControlMobileViewState;
 }): { workspaceKey: string; taskId?: string; canBridge: boolean } | null {
-  const bridgeableWorkspaces = workspaces.filter(isWebRemoteControlBridgeableWorkspaceTarget);
+  const bridgeableWorkspaces = workspaces.filter(
+    isWebRemoteControlBridgeableWorkspaceTarget,
+  );
   const workspaceKeys = new Set(
-    bridgeableWorkspaces.map((workspace) => resolveWebRemoteControlWorkspaceKey(workspace)),
+    bridgeableWorkspaces.map((workspace) =>
+      resolveWebRemoteControlWorkspaceKey(workspace),
+    ),
   );
   const allWorkspaceKeys = new Set(
-    workspaces.map((workspace) => resolveWebRemoteControlWorkspaceKey(workspace)),
+    workspaces.map((workspace) =>
+      resolveWebRemoteControlWorkspaceKey(workspace),
+    ),
   );
   const selectedViewState = mobileViewState ?? initialViewState;
   const selectedWorkspaceKey = selectedViewState?.activeWorkspaceKey;
@@ -788,7 +842,9 @@ export function resolveWebRemoteControlInitialWorkspaceSelection({
   if (selectedWorkspaceKey && workspaceKeys.has(selectedWorkspaceKey)) {
     return {
       workspaceKey: selectedWorkspaceKey,
-      ...(selectedViewState.activeTaskId ? { taskId: selectedViewState.activeTaskId } : {}),
+      ...(selectedViewState.activeTaskId
+        ? { taskId: selectedViewState.activeTaskId }
+        : {}),
       canBridge: true,
     };
   }
@@ -800,7 +856,9 @@ export function resolveWebRemoteControlInitialWorkspaceSelection({
     if (selectedWorkspaceKey && allWorkspaceKeys.has(selectedWorkspaceKey)) {
       return {
         workspaceKey: selectedWorkspaceKey,
-        ...(selectedViewState?.activeTaskId ? { taskId: selectedViewState.activeTaskId } : {}),
+        ...(selectedViewState?.activeTaskId
+          ? { taskId: selectedViewState.activeTaskId }
+          : {}),
         canBridge: false,
       };
     }
@@ -811,7 +869,9 @@ export function resolveWebRemoteControlInitialWorkspaceSelection({
     }
 
     return {
-      workspaceKey: resolveWebRemoteControlWorkspaceKey(firstDisconnectedWorkspace),
+      workspaceKey: resolveWebRemoteControlWorkspaceKey(
+        firstDisconnectedWorkspace,
+      ),
       canBridge: false,
     };
   }

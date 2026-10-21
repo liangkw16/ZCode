@@ -34,6 +34,7 @@ import {
   type ModelStreamEvent,
   type PermissionRuleset,
   type SessionEvent,
+  type SessionId,
   type SessionInfo,
   type SessionStorePort,
   type TodoItem,
@@ -3149,6 +3150,219 @@ describe("AgentRuntime manual compact", () => {
     expect(postCompactRequest).toContain("continue with enough context to trigger auto compact");
     expect(postCompactRequest).not.toContain("Recent messages are preserved verbatim.");
     expect(postCompactRequest).not.toContain(longPrompt);
+  });
+
+  it("resolves compact.modelOverrides for the executing model at the auto compact assembly point", async () => {
+    // 命中 override：窗口 240、reserve 1、buffer 10 → 阈值 229；
+    // 未命中：模型窗口 200K → 阈值 199_989。第二轮 usage 230 只在命中侧越线。
+    const compactConfig = {
+      bufferTokens: 10,
+      summaryReserveTokens: 0,
+      modelOverrides: {
+        test: { "GLM-5.3": { contextWindowTokens: 240, outputReserveTokens: 1 } },
+      },
+    };
+
+    const buildRuntime = (sessionId: SessionId, selection: string) => {
+      const eventStore = createTestSessionEventStore();
+      const requests: string[] = [];
+      let normalResponseCount = 0;
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          compact: compactConfig,
+          maxOutputTokens: 1,
+          modelSelection: createTestModelSelection(selection),
+          systemPrompt: "You are a model override compact test agent.",
+        },
+        {
+          eventStore,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                requests.push(providerContentToText(request.messages.at(-1)?.content));
+                const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                if (lastContent.includes("create a detailed summary")) {
+                  return {
+                    finishReason: "stop",
+                    text: "<summary>Model override summary.</summary>",
+                    usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+                  };
+                }
+                normalResponseCount++;
+                return {
+                  finishReason: "stop",
+                  text: `normal response ${normalResponseCount}`,
+                  usage: {
+                    inputTokens: normalResponseCount === 2 ? 230 : 3,
+                    outputTokens: 1,
+                    totalTokens: normalResponseCount === 2 ? 231 : 4,
+                  },
+                };
+              },
+            }) as never,
+          ),
+        },
+      );
+      return { eventStore, requests, runtime, sessionId };
+    };
+
+    const hit = buildRuntime(
+      createSessionId("runtime-compact-model-override-hit"),
+      "test/GLM-5.3",
+    );
+    await hit.runtime.executeTurn("warmup");
+    await hit.runtime.executeTurn("old context ".repeat(80));
+    const hitResult = await hit.runtime.executeTurn("continue enough to trigger");
+
+    const hitBoundary = (await hit.eventStore.getEvents(hit.sessionId)).find(
+      (event) => event.type === SessionEventType.CompactBoundary,
+    )?.payload as CompactBoundaryPayload | undefined;
+    expect(hitBoundary).toMatchObject({
+      autoCompactThreshold: 229,
+      trigger: CompactTrigger.Auto,
+    });
+    expect(hit.requests.some((content) => content.includes("create a detailed summary"))).toBe(
+      true,
+    );
+    expect(hitResult.response).toBe("normal response 3");
+
+    // 未命中的模型：同配置下不压缩，三轮请求全部是普通响应。
+    const miss = buildRuntime(
+      createSessionId("runtime-compact-model-override-miss"),
+      "test/other-model",
+    );
+    await miss.runtime.executeTurn("warmup");
+    await miss.runtime.executeTurn("old context ".repeat(80));
+    const missResult = await miss.runtime.executeTurn("continue enough to trigger");
+
+    const missEvents = await miss.eventStore.getEvents(miss.sessionId);
+    expect(missEvents.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(
+      false,
+    );
+    expect(miss.requests).toHaveLength(3);
+    expect(miss.requests.some((content) => content.includes("create a detailed summary"))).toBe(
+      false,
+    );
+    expect(missResult.response).toBe("normal response 3");
+  });
+
+  it("derives the microcompact threshold from the model-scoped auto threshold", async () => {
+    // 命中 override：auto 阈值 2999（4K−1−1K）→ micro 默认阈值
+    // max(0, min(⌊2999×0.9⌋, 2999−2000)) = 999；两个工具结果合计 ≈1.5K token 触发。
+    // 未命中：模型窗口 200K → micro 阈值 179_990，不触发。
+    const buildMicroRuntime = (sessionId: SessionId, selection: string) => {
+      const eventStore = createTestSessionEventStore();
+      const toolRegistry = createToolRegistry();
+      const oldToolOutput = "old-tool-result-token ".repeat(120);
+      const latestToolOutput = "latest-tool-result-token ".repeat(80);
+      toolRegistry.register({
+        inputSchema: {},
+        metadata: {
+          concurrentSafe: true,
+          destructive: false,
+          name: "LargeRead",
+          needsApproval: false,
+          readOnly: true,
+          riskLevel: "low",
+          sideEffectScope: "none",
+        },
+        handler: async (input) =>
+          (input as { slot?: string }).slot === "old" ? oldToolOutput : latestToolOutput,
+      });
+
+      let normalRequestCount = 0;
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          compact: {
+            bufferTokens: 1_000,
+            summaryReserveTokens: 0,
+            modelOverrides: {
+              test: { "GLM-5.3": { contextWindowTokens: 4_000, outputReserveTokens: 1 } },
+            },
+            // 不设 thresholdTokens：micro 阈值必须由模型级 auto 阈值派生。
+            microcompact: {
+              compactableToolNames: ["LargeRead"],
+              enabled: true,
+              keepRecentToolResults: 1,
+              minTokenSavings: 1,
+            },
+          },
+          maxOutputTokens: 1,
+          mode: "yolo",
+          modelSelection: createTestModelSelection(selection),
+          systemPrompt: "You are a model override microcompact test agent.",
+        },
+        {
+          eventStore,
+          modelFactory: createTestModelFactory({
+            async generateText() {
+              normalRequestCount++;
+              if (normalRequestCount === 1) {
+                return {
+                  finishReason: "tool-calls",
+                  providerMetadata: undefined,
+                  text: "",
+                  toolCalls: [{ id: "large-read-old", name: "LargeRead", input: { slot: "old" } }],
+                  usage: { inputTokens: 10, outputTokens: 1, totalTokens: 11 },
+                };
+              }
+              if (normalRequestCount === 2) {
+                return {
+                  finishReason: "tool-calls",
+                  providerMetadata: undefined,
+                  text: "",
+                  toolCalls: [
+                    { id: "large-read-latest", name: "LargeRead", input: { slot: "latest" } },
+                  ],
+                  usage: { inputTokens: 12, outputTokens: 1, totalTokens: 13 },
+                };
+              }
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "done after local microcompact",
+                usage: { inputTokens: 4, outputTokens: 4, totalTokens: 8 },
+              };
+            },
+          }),
+          toolRegistry,
+        },
+      );
+      return { eventStore, runtime, sessionId };
+    };
+
+    const hit = buildMicroRuntime(
+      createSessionId("runtime-microcompact-model-override-hit"),
+      "test/GLM-5.3",
+    );
+    const hitResult = await hit.runtime.executeTurn("read two large files");
+
+    const hitEvents = await hit.eventStore.getEvents(hit.sessionId);
+    const hitMicroBoundary = hitEvents.find(
+      (event) => event.type === SessionEventType.MicrocompactBoundary,
+    )?.payload as MicrocompactBoundaryPayload | undefined;
+    expect(hitMicroBoundary).toMatchObject({
+      clearedToolCallIds: ["large-read-old"],
+      keptToolCallIds: ["large-read-latest"],
+      trigger: MicrocompactTrigger.TokenPressure,
+    });
+    // micro 阈值 999 < auto 阈值 2999：只触发本地裁剪，不触发全量摘要。
+    expect(hitEvents.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+    expect(hitResult.response).toBe("done after local microcompact");
+
+    const miss = buildMicroRuntime(
+      createSessionId("runtime-microcompact-model-override-miss"),
+      "test/other-model",
+    );
+    const missResult = await miss.runtime.executeTurn("read two large files");
+
+    const missEvents = await miss.eventStore.getEvents(miss.sessionId);
+    expect(
+      missEvents.some((event) => event.type === SessionEventType.MicrocompactBoundary),
+    ).toBe(false);
+    expect(missResult.response).toBe("done after local microcompact");
   });
 
   it("retries auto compact up to three attempts before continuing the turn", async () => {

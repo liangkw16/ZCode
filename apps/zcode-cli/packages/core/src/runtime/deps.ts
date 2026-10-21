@@ -295,6 +295,7 @@ export {
   buildCompactSummaryMessage,
   buildManualCompactBoundary,
   createCompactBoundaryId,
+  applyCompactModelOverrides,
   estimateMessageTokens,
   formatCompactSummary,
   getAutoCompactThreshold,

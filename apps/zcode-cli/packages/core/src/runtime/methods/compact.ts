@@ -5,6 +5,7 @@ import {
   CoreErrorType,
   DEFAULT_COMPACT_CONTEXT_WINDOW,
   SessionEventType,
+  applyCompactModelOverrides,
   createModelUsageSummaryFromEvents,
   runWithContextAsync,
   traceContextToLogContext,
@@ -190,14 +191,20 @@ export async function autoCompactIfNeeded(
 ): Promise<AutoCompactOutcome> {
   throwIfTurnAborted(abortSignal);
 
-  const config: AutoCompactPolicyConfig = {
-    contextWindow: context.model.properties.contextWindow,
-    ...this.config.compact,
-    maxOutputTokens: resolveNormalRequestMaxOutputTokens({
-      modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
-    }),
-    modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
-  };
+  // 组装点按实际执行模型解析 modelOverrides（子代理用自己的身份走同一路径）；
+  // 未设置字段剔除、结果剥离覆盖表，公式不变。
+  const { config, source: compactPolicySource, matched: compactModelOverrideMatched } =
+    applyCompactModelOverrides(
+      {
+        contextWindow: context.model.properties.contextWindow,
+        ...this.config.compact,
+        maxOutputTokens: resolveNormalRequestMaxOutputTokens({
+          modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
+        }),
+        modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
+      },
+      { providerId: context.model.providerId, modelId: context.model.modelId },
+    );
   const activeEntries = context.turnRequestState.entries;
   const activeProjection = buildRuntimeProviderRequestMessages(this, {
     entries: activeEntries,
@@ -219,8 +226,10 @@ export async function autoCompactIfNeeded(
       event: "compact.auto.skipped",
       module: "core.runtime",
       compactReason: context.compactReason,
+      modelOverrideMatched: compactModelOverrideMatched,
       modelStepIndex: context.modelStepIndex,
       phase: context.phase,
+      policySource: compactPolicySource,
       reason: decision.reason,
       ...autoCompactDecisionLogContext(decision),
     });
@@ -250,9 +259,11 @@ export async function autoCompactIfNeeded(
     ...traceContextToLogContext(turnTraceContext),
     event: "compact.auto.started",
     compactReason: context.compactReason,
+    modelOverrideMatched: compactModelOverrideMatched,
     modelStepIndex: context.modelStepIndex,
     module: "core.runtime",
     phase: context.phase,
+    policySource: compactPolicySource,
     ...autoCompactDecisionLogContext(decision),
   });
 

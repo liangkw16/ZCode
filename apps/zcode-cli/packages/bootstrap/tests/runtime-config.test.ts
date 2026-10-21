@@ -776,6 +776,63 @@ describe("resolveAppRuntimeConfig：compact 策略接线", () => {
     });
   });
 
+  it("passes compact.modelOverrides through for per-model resolution at assembly time", () => {
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          thresholdRatio: 0.76,
+          modelOverrides: {
+            "account:bigmodel-individual-coding-plan": {
+              "GLM-5.3": { contextWindowTokens: 400_000 },
+            },
+          },
+        },
+      }),
+      options: {},
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toMatchObject({
+      thresholdRatio: 0.76,
+      modelOverrides: {
+        "account:bigmodel-individual-coding-plan": {
+          "GLM-5.3": { contextWindowTokens: 400_000 },
+        },
+      },
+    });
+  });
+
+  it("drops compact.modelOverrides when a programmatic runtime override takes over", () => {
+    // 程序化 runtimeOverride 是嵌入方对压缩行为的整体接管，优先级最高；
+    // 文件级按模型例外不得反超（组装点的覆盖会盖过程序化值），直接剔除。
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          thresholdRatio: 0.76,
+          modelOverrides: { p: { m: { contextWindowTokens: 400_000 } } },
+        },
+      }),
+      options: {
+        runtimeConfig: {
+          compact: { contextWindow: 600_000, bufferTokens: 1_000 },
+        },
+      },
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toMatchObject({
+      contextWindow: 600_000,
+      bufferTokens: 1_000,
+    });
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "modelOverrides")).toBe(false);
+  });
+
   it("keeps unset keys absent so model-resolved windows keep driving thresholds by default", () => {
     // autoCompactIfNeeded 以 `{ contextWindow: 模型窗口, ...compact }` 构造策略：
     // 显式 undefined 的 contextWindow/maxOutputTokens 键会覆盖模型窗口并让阈值

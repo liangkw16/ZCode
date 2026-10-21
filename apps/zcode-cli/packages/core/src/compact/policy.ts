@@ -1,3 +1,4 @@
+import type { CompactModelOverride } from "@zcode/contracts";
 import { DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY as DEFAULT_BUDGET_STRATEGY } from "@zcode/shared";
 import type { CompactModelMessage } from "./manual.js";
 import { estimateMessageTokens, hasEnoughMessagesToCompact } from "./manual.js";
@@ -35,6 +36,8 @@ export interface AutoCompactPolicyConfig {
   summaryProvider?: string;
   summaryModel?: string;
   maxConsecutiveFailures?: number;
+  /** providerId → modelId → 覆盖字段；由组装点按实际执行模型解析（applyCompactModelOverrides）。 */
+  modelOverrides?: Record<string, Record<string, CompactModelOverride>>;
   microcompact?: LocalMicrocompactPolicyConfig;
 }
 

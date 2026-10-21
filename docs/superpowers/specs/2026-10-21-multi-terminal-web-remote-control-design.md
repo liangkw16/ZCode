@@ -648,6 +648,15 @@ workspace-bridge-open→"workspace bridge active"（桌面日志实证），抢�
 **二分结果（2026-10-21 20:10）**：已用 `779d0560` 版 manager（本批改动前）重建桌面复测——
 **同样复现**设备列表回退，桌面代码嫌疑排除（git diff 显示 779d..HEAD 仅 manager.ts 与
 shared 类型两个源文件变更，shared 为纯类型）。relay 重启（清运行时状态）后同样复现。
+
+**根因定位与修复（2026-10-21 21:00，已修）**："冷启动回归"实为 **IAB 环境专属的 web 入口缺陷**，
+真实浏览器（用户手机/桌面浏览器）不受影响。根因：`WebRemoteControlEntry.selectDevice` 在
+`loading/error` 态或列表重建竞态窗口（devices 为空）静默 return，点击被吞且无反馈；设备列表
+API 偶发失败（高频刷新触发限流/网络抖动）后页面进入 error 态，之后所有点击失效。IAB 实测
+DOM click 直达 React 也无法进入，而 auto-connect 路径（单一在线设备）可进——与该缺陷吻合。
+修复：error/空窗点击自动 refresh 一次并重试选择（新鲜数据确认在线才放行，"禁用旧列表"语义
+保留；可信数据里确实离线的 SID 仍静默）；新增 lastOnlineDevices 在线快照兜底空窗。回归测试
+`设备列表刷新失败后的点击自动重试一次并接通` + 旧语义测试同步更新，entry 套件 36/36。
 观察到的稳定模式：页面点击设备 → paired → bootstrap → bridge attach/active（桌面日志）→
 约 60s 后 terminal 连接消失、设备回 waiting_terminal，页面停留在设备列表；"attaching
 workspace bridge" 以数秒间隔反复出现（疑似页面侧 bridge 恢复重试循环）。

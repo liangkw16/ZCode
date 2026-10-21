@@ -51,11 +51,11 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 
 三块改动：
 
-| 组件 | 位置 | 改动 |
-| ---- | ---- | ---- |
-| relay server | 新包 `apps/self-host-relay`（新受管模块） | 单实例单用户 Node 服务，复用 shared 契约解析 |
-| 手机页 | `packages/web`（受管模块内新增 adapter + 构建脚本） | 构建期 self-host 模式：stub auth 免登录 |
-| KCode 桌面 | `packages/desktop/src/main/web-remote-relay`（受管模块内） | kcode 门控的远控端点覆盖，来源 setting |
+| 组件         | 位置                                                       | 改动                                         |
+| ------------ | ---------------------------------------------------------- | -------------------------------------------- |
+| relay server | 新包 `apps/self-host-relay`（新受管模块）                  | 单实例单用户 Node 服务，复用 shared 契约解析 |
+| 手机页       | `packages/web`（受管模块内新增 adapter + 构建脚本）        | 构建期 self-host 模式：stub auth 免登录      |
+| KCode 桌面   | `packages/desktop/src/main/web-remote-relay`（受管模块内） | kcode 门控的远控端点覆盖，来源 setting       |
 
 ## 详细设计
 
@@ -79,12 +79,12 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
 成功信封 `{code: 0, msg, data}`；失败 `{code: 非零, msg}`，参数非法返回 HTTP 400 +
 `code: 3001`；删除在线设备 HTTP 400 + `code: 3005`；删除不存在的 SID 幂等成功。
 
-| 端点 | Bearer 要求 | 行为 |
-| ---- | ---- | ---- |
-| `POST /api/v1/remote/device` `{device_mid}` | 任意非空 | 校验 device_mid 非空白 ≤128 字符；同 MID 每次注册产生新 SID（16 随机字节 base64url）；记录 `{device_sid, device_mid, online, created_at, meta:{}}` |
-| `GET /api/v1/remote/device` | **必须等于密钥** | 返回全部设备记录（单用户）；在线设备 `meta` 取自 device 连接的 `auth_init.meta`，离线为 `{}` |
-| `POST /api/v1/remote/device/delete` `{device_sid}` | 任意非空 | 仅允许删除离线设备（在线返回 3005）；SID 不可猜测即天然防滥用 |
-| `POST /api/v1/remote/token` `{role}` | `role=terminal` **必须等于密钥**；`role=device` 任意非空 | 签发 22 字符 base64url 一次性 token（16 随机字节，无填充），有效期 60 秒，绑定角色；响应带 `Cache-Control: no-store` |
+| 端点                                               | Bearer 要求                                              | 行为                                                                                                                                               |
+| -------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/v1/remote/device` `{device_mid}`        | 任意非空                                                 | 校验 device_mid 非空白 ≤128 字符；同 MID 每次注册产生新 SID（16 随机字节 base64url）；记录 `{device_sid, device_mid, online, created_at, meta:{}}` |
+| `GET /api/v1/remote/device`                        | **必须等于密钥**                                         | 返回全部设备记录（单用户）；在线设备 `meta` 取自 device 连接的 `auth_init.meta`，离线为 `{}`                                                       |
+| `POST /api/v1/remote/device/delete` `{device_sid}` | 任意非空                                                 | 仅允许删除离线设备（在线返回 3005）；SID 不可猜测即天然防滥用                                                                                      |
+| `POST /api/v1/remote/token` `{role}`               | `role=terminal` **必须等于密钥**；`role=device` 任意非空 | 签发 22 字符 base64url 一次性 token（16 随机字节，无填充），有效期 60 秒，绑定角色；响应带 `Cache-Control: no-store`                               |
 
 密钥错误/缺失返回 HTTP 401（手机端映射 auth-required；正常部署下密钥正确不会触达）。
 所有 bearer 映射到固定单用户 `self`；设备表、token 表按该用户隔离（无跨用户分支）。
@@ -147,7 +147,7 @@ HTTP/WS），照契约实现单用户 relay 即可；手机端 HTTP/WS 地址全
   fragment（fragment 不发送到服务端）。未注入 env 时产物与现状等价，官方部署不受影响。
 - `packages/web/src/web-remote-control/adapters/` 新增 `selfHostAuth.ts`：实现与
   `WebAuthService` 相同的 auth 端口——`getZCodeJwtToken() → localStorage 密钥（缺失为
-  null）`、`getActiveAccount() → {displayName: "Self-host"}`、
+null）`、`getActiveAccount() → {displayName: "Self-host"}`、
   `startLogin()/logout()` 渲染 reason 为 `relay-unavailable` 的失败页。
 - 登录页在该模式不可达：`main.tsx` 的 `onView` 拦截 `kind: "login"`，未携带/失效密钥、
   relay 401（`switchAccount` 的 `logout` + 登录视图）一律渲染 `relay-unavailable` 失败页。
@@ -255,14 +255,14 @@ QR / 复制链接成为主密钥载体——与原书签 URL **同一暴露面�
 
 ### 验收
 
-| # | 场景 | 预期 |
-| --- | --- | --- |
-| Q1 | shared builder：带 key | URL 追加 `#k=<encoded>`，query 参数不变 |
-| Q2 | shared builder：无 key / 空串 | 与现状完全一致（无 hash） |
-| Q3 | manager 注入 getter | `qrUrl`/`connectUrl` 含 `#k=` 且 search 不变；未注入时存量断言不变 |
-| Q4 | 门控：最终手机页 URL 指向其它域（env 覆盖组合）/ flavor 非 kcode / key 空 | key 一律不进 URL（纯函数单测覆盖） |
-| Q5 | 真机：写入 setting → KCode 开远控 → 手机扫码 | 不出现登录/缺钥失败页，直接配对进入 |
-| Q6 | settings 清洗 | 非字符串/空白/超长值整键丢弃，不拖垮 settings 读取 |
+| #   | 场景                                                                      | 预期                                                               |
+| --- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Q1  | shared builder：带 key                                                    | URL 追加 `#k=<encoded>`，query 参数不变                            |
+| Q2  | shared builder：无 key / 空串                                             | 与现状完全一致（无 hash）                                          |
+| Q3  | manager 注入 getter                                                       | `qrUrl`/`connectUrl` 含 `#k=` 且 search 不变；未注入时存量断言不变 |
+| Q4  | 门控：最终手机页 URL 指向其它域（env 覆盖组合）/ flavor 非 kcode / key 空 | key 一律不进 URL（纯函数单测覆盖）                                 |
+| Q5  | 真机：写入 setting → KCode 开远控 → 手机扫码                              | 不出现登录/缺钥失败页，直接配对进入                                |
+| Q6  | settings 清洗                                                             | 非字符串/空白/超长值整键丢弃，不拖垮 settings 读取                 |
 
 ## 追记 2026-10-20（三）：现任优先独占 + 静态预压缩
 

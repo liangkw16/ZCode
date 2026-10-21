@@ -39,6 +39,10 @@ Token 是 16 随机字节的 22 字符 Base64URL 无填充编码，绑定用户�
 
 `terminal_sid` 允许空字符串或缺省：device 的 auth ACK 为空，terminal 的 auth ACK 是分配的 SID；查询 ACK 是对端 terminal SID，推送 ACK 为空。`pair_status` 仅 `waiting | matched`。错误码仅 `AUTH_FAILED | WRONG_PARAM | KICKED | INTERNAL | DEVICE_OFFLINE`。
 
+### 自托管多 terminal 扩展（2026-10-21，仅自建 relay）
+
+自托管 relay 在本契约之上追加全部可选的路由字段：terminal 的 `auth_init.terminal_id?`（页面级稳定身份，缺省以连接级 `terminal_sid` 为生效 id）、`auth_ack.terminal_id?`（仅回显给声明了该字段的客户端）、device 方向的 `data.from_terminal_id?` / `auth_ack.terminal_ids?` / `pair_status_ack.terminal_ids?`，以及 device → relay `data.target_terminal_id?`（缺省广播）。同 `terminal_id` 重连只替换旧连接；单个 terminal 断开只更新 device 的集合，device 断开才关闭全部 terminal。官方 relay 仍是单 terminal 语义，新字段被其 Go 解码忽略，旧客户端不发送也不接收新字段。完整设计见 [multi-terminal spec](../superpowers/specs/2026-10-21-multi-terminal-web-remote-control-design.md)。
+
 时间戳为非负整数 Unix 秒（不超过公元 9999 年末，拒绝毫秒值），不参与授权。V2 心跳基准 5,000ms、jitter ±1,000ms、ACK deadline 15,000ms；心跳 delay helper 默认即为 V2 常量，不再保留 V1 默认值。
 
 ```mermaid
@@ -610,11 +614,11 @@ Docker 镜像构建不在本轮验证范围。分享镜像验证本地 COPY 源�
 
 以下沿用父 spec 的依赖记录，尚未在本次任务重新取得生产验收证据；不能据此宣布生产可发布。
 
-| 外部依赖                                                   | 归属         | 放行证据                                                                                                      |
-| ---------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------- |
-| 生产 zcode-server 部署 V2 HTTP/WS                          | 服务端维护方 | token 接口无 JWT 返回 401，合法账号完成设备注册与一次性 token 配对                                            |
-| `/api/v1/remote/ws2` 精确路由，同 MID 双端落同一实例       | 网关维护方   | 无 token 返回 401，同 MID 稳定配对，滚动后恢复                                                                |
-| `/remote/v4` 按 `app_version` 取 OSS index，资源按目录路由 | 网关维护方   | 两个版本加载各自资源，release-manifest 返回 JSON，不能是 SPA HTML                                             |
+| 外部依赖                                                   | 归属         | 放行证据                                                                                              |
+| ---------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------- |
+| 生产 zcode-server 部署 V2 HTTP/WS                          | 服务端维护方 | token 接口无 JWT 返回 401，合法账号完成设备注册与一次性 token 配对                                    |
+| `/api/v1/remote/ws2` 精确路由，同 MID 双端落同一实例       | 网关维护方   | 无 token 返回 401，同 MID 稳定配对，滚动后恢复                                                        |
+| `/remote/v4` 按 `app_version` 取 OSS index，资源按目录路由 | 网关维护方   | 两个版本加载各自资源，release-manifest 返回 JSON，不能是 SPA HTML                                     |
 | ZAI/BigModel OAuth 回调白名单                              | OAuth 提供方 | `https://zcode.z.ai/remote/v4` 与 `https://zcode.z.ai/remote/v4` 已登记，测试环境真实登录后回跳原 URL |
 
 发布顺序：生产服务端 V2 → 网关 WS 与 OSS 规则 → OAuth 白名单 → 手机页面新版本目录 → 同版本桌面 App。网关支持版本目录前不运行手动 latest job。当前根版本为 `3.13.0`，覆盖测试 OSS 的同版本目录前必须知会仍使用该版本 V1 桌面的同事。

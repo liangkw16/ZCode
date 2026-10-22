@@ -6,7 +6,7 @@ import {
   createInMemorySessionEventStore,
   createNodeToolArtifactStore,
 } from "@zcode/adapters/storage";
-import { createNodeLoggerFactory } from "@zcode/adapters/logging";
+import { createNodeLoggerFactory, resolveFileLoggerMinLevel } from "@zcode/adapters/logging";
 import { createConfig, resolvePath } from "@zcode/adapters/config";
 import {
   createNodeExecutionAdapter,
@@ -181,7 +181,17 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     }),
     options,
   );
-  const loggerFactory = options.loggerFactory ?? createNodeLoggerFactory({ env: options.env });
+  // logging.level 在此接线：configResult 先于 logger 创建，显式配置的落盘级别
+  // （如 debug）优先于环境默认，否则该配置键没有消费方。
+  const loggerFactory =
+    options.loggerFactory ??
+    createNodeLoggerFactory({
+      env: options.env,
+      minLevel: resolveFileLoggerMinLevel({
+        configLevel: configResult.config.logging?.level,
+        env: options.env,
+      }),
+    });
   const logger = loggerFactory.createLogger("zcode").child({
     ...traceContextToLogContext(traceContext),
     module: "bootstrap",

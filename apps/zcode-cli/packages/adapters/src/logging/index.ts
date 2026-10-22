@@ -228,6 +228,28 @@ function getDefaultMinLevel(env: NodeJS.ProcessEnv | undefined): LogLevel {
   return isDevelopmentMode(env ?? process.env) ? LogLevel.Debug : LogLevel.Info;
 }
 
+const LOG_LEVEL_BY_CONFIG_NAME: Record<"debug" | "info" | "warn" | "error", LogLevel> = {
+  debug: LogLevel.Debug,
+  info: LogLevel.Info,
+  warn: LogLevel.Warn,
+  error: LogLevel.Error,
+};
+
+/**
+ * 配置文件 logging.level 的落盘级别：此前该键只有 schema 定义、没有消费方，
+ * 打包运行时 debug 判定日志（如 compact.auto.skipped）永远不落盘。显式配置
+ * 优先于环境默认（开发模式 Debug / 生产 Info），让用户可自行开启诊断观测。
+ */
+export function resolveFileLoggerMinLevel(input: {
+  configLevel?: "debug" | "info" | "warn" | "error";
+  env?: NodeJS.ProcessEnv;
+}): LogLevel {
+  if (input.configLevel !== undefined) {
+    return LOG_LEVEL_BY_CONFIG_NAME[input.configLevel];
+  }
+  return getDefaultMinLevel(input.env);
+}
+
 function isDevelopmentMode(env: NodeJS.ProcessEnv): boolean {
   const runtimeEnv = normalizeZCodeRuntimeEnv(env[ZCODE_RUNTIME_ENV_KEY]);
   if (runtimeEnv === "development") return true;

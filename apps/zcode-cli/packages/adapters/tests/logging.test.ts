@@ -8,6 +8,7 @@ import {
   cleanupLogRetention,
   createNodeLoggerFactory,
   formatLocalLogDate,
+  resolveFileLoggerMinLevel,
 } from "../src/logging/index.js";
 import {
   createStorageFsFaultInjector,
@@ -327,5 +328,21 @@ describe("Node logging adapter", () => {
     } finally {
       await rm(logDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolveFileLoggerMinLevel", () => {
+  it("配置文件的 logging.level 优先于环境默认", () => {
+    // 配置显式声明的级别必须生效：生产模式下 debug 也应落盘（否则用户无法
+    // 观测 compact.auto.skipped 等诊断日志，config 键沦为死配置）。
+    expect(resolveFileLoggerMinLevel({ configLevel: "debug", env: {} })).toBe(LogLevel.Debug);
+    expect(resolveFileLoggerMinLevel({ configLevel: "warn", env: {} })).toBe(LogLevel.Warn);
+  });
+
+  it("未配置时维持原默认：仅开发模式 Debug，生产/未知 Info", () => {
+    expect(resolveFileLoggerMinLevel({ env: {} })).toBe(LogLevel.Info);
+    expect(
+      resolveFileLoggerMinLevel({ env: { ZCODE_RUNTIME_ENV: "development" } }),
+    ).toBe(LogLevel.Debug);
   });
 });

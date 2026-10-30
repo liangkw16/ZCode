@@ -149,10 +149,14 @@ describe("V2 手机入口", () => {
     await h.entry.start();
     const connection = h.connect.mock.calls[0][0];
     connection.onFailure({ reason: "device-not-owned" });
-    expect(h.onView).toHaveBeenLastCalledWith({
-      kind: "failure",
-      failure: { reason: "device-not-owned" },
-    });
+    // 上游语义：device-not-owned 先异步 resolveLostTarget（查同 MID 在线 SID 接续），
+    // 空列表接续失败后才落 failure 视图。
+    await vi.waitFor(() =>
+      expect(h.onView).toHaveBeenLastCalledWith({
+        kind: "failure",
+        failure: { reason: "device-not-owned" },
+      }),
+    );
     expect(h.auth.logout).not.toHaveBeenCalled();
     await h.entry.switchAccount();
     expect(h.onView).toHaveBeenLastCalledWith({ kind: "login" });

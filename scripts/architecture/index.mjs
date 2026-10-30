@@ -15,11 +15,17 @@ import {
   resolveImport,
 } from "./policy.mjs";
 import { loadWorkspace } from "./resolver.mjs";
-import { cycleViolations, unmanagedNewFileViolations, violation } from "./violations.mjs";
+import {
+  cycleViolations,
+  unmanagedNewFileViolations,
+  violation,
+} from "./violations.mjs";
 
 async function readBaseline(cwd) {
   try {
-    return JSON.parse(await fs.readFile(path.join(cwd, ".architecture-baseline.json"), "utf8"));
+    return JSON.parse(
+      await fs.readFile(path.join(cwd, ".architecture-baseline.json"), "utf8"),
+    );
   } catch {
     return { version: 1, violations: [] };
   }
@@ -34,7 +40,9 @@ export async function checkArchitecture({
   const workspace = await loadWorkspace(cwd);
   const files = await discoverFiles(policy);
   const knownFiles = new Set(files);
-  const modulesByFile = new Map(files.map((file) => [file, moduleForFile(file, policy)]));
+  const modulesByFile = new Map(
+    files.map((file) => [file, moduleForFile(file, policy)]),
+  );
   const edges = new Map(files.map((file) => [file, []]));
   const violations = [];
   const manifestRequiresByModule = new Map();
@@ -57,21 +65,31 @@ export async function checkArchitecture({
   }
 
   for (const module of policy.modules.filter((item) => item.managed)) {
-    const moduleFiles = files.filter((file) => modulesByFile.get(file)?.id === module.id);
-    const manifest = moduleFiles.find((file) => path.basename(file) === "module.ts");
+    const moduleFiles = files.filter(
+      (file) => modulesByFile.get(file)?.id === module.id,
+    );
+    const manifest = moduleFiles.find(
+      (file) => path.basename(file) === "module.ts",
+    );
     if (manifest) {
       const declared = manifestRequires(await fs.readFile(manifest, "utf8"));
       if (declared) {
         manifestRequiresByModule.set(module.id, declared);
         // manifest-policy-mismatch：文档写"策略与模块声明必须互相校验"，首版只是优先读 module.ts。
         const unknown = declared.filter((id) => !moduleIds.has(id));
-        const onlyInManifest = declared.filter((id) => !module.requires.includes(id));
-        const onlyInPolicy = module.requires.filter((id) => !declared.includes(id));
+        const onlyInManifest = declared.filter(
+          (id) => !module.requires.includes(id),
+        );
+        const onlyInPolicy = module.requires.filter(
+          (id) => !declared.includes(id),
+        );
         if (unknown.length || onlyInManifest.length || onlyInPolicy.length) {
           const parts = [];
           if (unknown.length) parts.push(`未知模块 ${unknown.join(", ")}`);
-          if (onlyInManifest.length) parts.push(`仅 module.ts 声明 ${onlyInManifest.join(", ")}`);
-          if (onlyInPolicy.length) parts.push(`仅 policy 声明 ${onlyInPolicy.join(", ")}`);
+          if (onlyInManifest.length)
+            parts.push(`仅 module.ts 声明 ${onlyInManifest.join(", ")}`);
+          if (onlyInPolicy.length)
+            parts.push(`仅 policy 声明 ${onlyInPolicy.join(", ")}`);
           violations.push(
             violation({
               cwd,
@@ -85,11 +103,11 @@ export async function checkArchitecture({
         }
       }
     }
+    // App 单测已退役；模块边界依靠契约、示例和文档，不再强制测试骨架。
     const required = [
       "module.ts",
       "contract.ts",
       "contract.example.ts",
-      "contract.test.ts",
       "CONTRACT.md",
     ];
     for (const artifact of required) {
@@ -135,7 +153,10 @@ export async function checkArchitecture({
     if (policy.global.managedOnly && !module.managed) continue;
 
     const lines = source.split(/\r?\n/).length;
-    if (lines > policy.global.maxFileLines && !isException(policy, "max-file-lines", file, cwd)) {
+    if (
+      lines > policy.global.maxFileLines &&
+      !isException(policy, "max-file-lines", file, cwd)
+    ) {
       violations.push(
         violation({
           cwd,
@@ -147,7 +168,10 @@ export async function checkArchitecture({
         }),
       );
     }
-    if (path.basename(file).startsWith("contract.") && lines > policy.global.maxContractLines) {
+    if (
+      path.basename(file).startsWith("contract.") &&
+      lines > policy.global.maxContractLines
+    ) {
       violations.push(
         violation({
           cwd,
@@ -176,7 +200,8 @@ export async function checkArchitecture({
     }
     if (
       path.basename(file) === "contract.ts" &&
-      countPublicMethods(source) > policy.global.maxPublicMethods
+      countPublicMethods(source) > policy.global.maxPublicMethods &&
+      !isException(policy, "max-public-methods", file, cwd)
     ) {
       violations.push(
         violation({
@@ -254,7 +279,8 @@ export async function checkArchitecture({
         );
       }
       if (!targetModule || targetModule.id === module.id) continue;
-      const declaredRequires = manifestRequiresByModule.get(module.id) ?? module.requires;
+      const declaredRequires =
+        manifestRequiresByModule.get(module.id) ?? module.requires;
       if (!declaredRequires.includes(targetModule.id)) {
         violations.push(
           violation({
@@ -267,7 +293,10 @@ export async function checkArchitecture({
           }),
         );
       }
-      if (policy.global.forbidDeepImports && targetModule.publicEntrypoints.length > 0) {
+      if (
+        policy.global.forbidDeepImports &&
+        targetModule.publicEntrypoints.length > 0
+      ) {
         if (!publicEntrypointMatches(target, targetModule, cwd)) {
           violations.push(
             violation({
@@ -282,7 +311,10 @@ export async function checkArchitecture({
         }
       }
     }
-    if (importerLayer === "domain" && /\b(fetch|setTimeout|setInterval)\s*\(/.test(source)) {
+    if (
+      importerLayer === "domain" &&
+      /\b(fetch|setTimeout|setInterval)\s*\(/.test(source)
+    ) {
       violations.push(
         violation({
           cwd,
@@ -298,10 +330,13 @@ export async function checkArchitecture({
 
   if (policy.global.forbidCycles)
     violations.push(...cycleViolations(edges, policy, modulesByFile, cwd));
-  if (addedFiles) violations.push(...unmanagedNewFileViolations(addedFiles, policy, cwd));
+  if (addedFiles)
+    violations.push(...unmanagedNewFileViolations(addedFiles, policy, cwd));
 
   const baseline = await readBaseline(cwd);
-  const baselineFingerprints = new Set(baseline.violations.map((item) => item.fingerprint));
+  const baselineFingerprints = new Set(
+    baseline.violations.map((item) => item.fingerprint),
+  );
   const changed = changedFiles
     ? new Set(changedFiles.map((file) => path.resolve(cwd, file)))
     : null;
@@ -321,10 +356,16 @@ export async function checkArchitecture({
     }
   }
   const scoped = changed
-    ? violations.filter((item) => item.global || changed.has(path.resolve(cwd, item.file)))
+    ? violations.filter(
+        (item) => item.global || changed.has(path.resolve(cwd, item.file)),
+      )
     : violations;
-  const baselineViolations = scoped.filter((item) => baselineFingerprints.has(item.fingerprint));
-  const newViolations = scoped.filter((item) => !baselineFingerprints.has(item.fingerprint));
+  const baselineViolations = scoped.filter((item) =>
+    baselineFingerprints.has(item.fingerprint),
+  );
+  const newViolations = scoped.filter(
+    (item) => !baselineFingerprints.has(item.fingerprint),
+  );
   return {
     policy,
     violations: scoped,
@@ -339,20 +380,36 @@ export async function checkArchitecture({
  * scope 为 --changed 的变更闭包。修复原因：首版直接用 scoped 结果覆盖整份 baseline，
  * `baseline:update -- --changed` 会把闭包之外的所有条目全部丢掉。
  */
-export async function updateBaseline({ cwd = process.cwd(), violations, scope = null }) {
+export async function updateBaseline({
+  cwd = process.cwd(),
+  violations,
+  scope = null,
+}) {
   const filename = path.join(cwd, ".architecture-baseline.json");
   const previous = scope ? (await readBaseline(cwd)).violations : [];
   const kept = scope
-    ? previous.filter((item) => !item.global && !scope.has(path.resolve(cwd, item.file)))
+    ? previous.filter(
+        (item) => !item.global && !scope.has(path.resolve(cwd, item.file)),
+      )
     : [];
   const merged = new Map();
-  for (const item of [...kept, ...violations]) merged.set(item.fingerprint, item);
-  const entries = [...merged.values()].sort((a, b) => a.fingerprint.localeCompare(b.fingerprint));
-  await fs.writeFile(filename, `${JSON.stringify({ version: 1, violations: entries }, null, 2)}\n`);
+  for (const item of [...kept, ...violations])
+    merged.set(item.fingerprint, item);
+  const entries = [...merged.values()].sort((a, b) =>
+    a.fingerprint.localeCompare(b.fingerprint),
+  );
+  await fs.writeFile(
+    filename,
+    `${JSON.stringify({ version: 1, violations: entries }, null, 2)}\n`,
+  );
   return entries;
 }
 
 export { loadPolicy };
-export { addedFilesFromGit, changedFilesFromGit, resolveDiffBase } from "./git-base.mjs";
+export {
+  addedFilesFromGit,
+  changedFilesFromGit,
+  resolveDiffBase,
+} from "./git-base.mjs";
 export { generateContext } from "./context.mjs";
 export { formatMarkdownReport, formatReport } from "./report.mjs";

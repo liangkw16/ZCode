@@ -22,12 +22,23 @@ import type {
   SettingsSyncTaskImportResult,
 } from "@zcode/shared";
 import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
-import { copyFile, cp, link, lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  cp,
+  link,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parse as parseToml } from "smol-toml";
 import { CommandFileParser } from "../commands/commandFileParser.js";
+import { updateJsonObjectFile } from "#src/fs/atomicFileUtils.js";
 import type { ISettingService } from "../setting/setting.js";
 import { createServiceLogger } from "../logger/serviceLogger.js";
 import { walkSkillMarkdownPaths } from "../skills/skillDiscoveryWalk.js";
@@ -137,33 +148,81 @@ interface ExternalAgentMcpPathSource {
 }
 
 const SUPPORTED_SKILL_AGENT_SOURCES: ExternalAgentPathSource[] = [
-  { agent: "claudeCode", projectPath: [".claude", "skills"], globalPath: [".claude", "skills"] },
-  { agent: "codexCli", projectPath: [".codex", "skills"], globalPath: [".codex", "skills"] },
+  {
+    agent: "claudeCode",
+    projectPath: [".claude", "skills"],
+    globalPath: [".claude", "skills"],
+  },
+  {
+    agent: "codexCli",
+    projectPath: [".codex", "skills"],
+    globalPath: [".codex", "skills"],
+  },
   {
     agent: "openCode",
     projectPath: [".opencode", "skills"],
     globalPath: [".config", "opencode", "skills"],
   },
-  { agent: "openClaw", projectPath: ["skills"], globalPath: [".openclaw", "skills"] },
-  { agent: "augment", projectPath: [".augment", "skills"], globalPath: [".augment", "skills"] },
+  {
+    agent: "openClaw",
+    projectPath: ["skills"],
+    globalPath: [".openclaw", "skills"],
+  },
+  {
+    agent: "augment",
+    projectPath: [".augment", "skills"],
+    globalPath: [".augment", "skills"],
+  },
   {
     agent: "continue",
     projectPath: [".continue", "skills"],
     globalPath: [".continue", "skills"],
   },
-  { agent: "goose", projectPath: [".goose", "skills"], globalPath: [".config", "goose", "skills"] },
-  { agent: "qwenCode", projectPath: [".qwen", "skills"], globalPath: [".qwen", "skills"] },
-  { agent: "qode", projectPath: [".qoder", "skills"], globalPath: [".qoder", "skills"] },
-  { agent: "qodeCn", projectPath: [".qoder", "skills"], globalPath: [".qoder-cn", "skills"] },
+  {
+    agent: "goose",
+    projectPath: [".goose", "skills"],
+    globalPath: [".config", "goose", "skills"],
+  },
+  {
+    agent: "qwenCode",
+    projectPath: [".qwen", "skills"],
+    globalPath: [".qwen", "skills"],
+  },
+  {
+    agent: "qode",
+    projectPath: [".qoder", "skills"],
+    globalPath: [".qoder", "skills"],
+  },
+  {
+    agent: "qodeCn",
+    projectPath: [".qoder", "skills"],
+    globalPath: [".qoder-cn", "skills"],
+  },
   {
     agent: "windsurf",
     projectPath: [".windsurf", "skills"],
     globalPath: [".codeium", "windsurf", "skills"],
   },
-  { agent: "trae", projectPath: [".trae", "skills"], globalPath: [".trae", "skills"] },
-  { agent: "traeCn", projectPath: [".trae", "skills"], globalPath: [".trae-cn", "skills"] },
-  { agent: "kiroCli", projectPath: [".kiro", "skills"], globalPath: [".kiro", "skills"] },
-  { agent: "roo", projectPath: [".roo", "skills"], globalPath: [".roo", "skills"] },
+  {
+    agent: "trae",
+    projectPath: [".trae", "skills"],
+    globalPath: [".trae", "skills"],
+  },
+  {
+    agent: "traeCn",
+    projectPath: [".trae", "skills"],
+    globalPath: [".trae-cn", "skills"],
+  },
+  {
+    agent: "kiroCli",
+    projectPath: [".kiro", "skills"],
+    globalPath: [".kiro", "skills"],
+  },
+  {
+    agent: "roo",
+    projectPath: [".roo", "skills"],
+    globalPath: [".roo", "skills"],
+  },
   {
     agent: "codeBuddy",
     projectPath: [".codebuddy", "skills"],
@@ -437,7 +496,12 @@ function getUserZcodePluginRoot(): string {
 }
 
 function getUserZcodeCliConfigPath(): string {
-  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
+  return join(
+    resolveUserHomeDir(),
+    ZCODE_DATA_DIR_SEGMENT,
+    "cli",
+    "config.json",
+  );
 }
 
 function getWorkspaceZcodeConfigPath(workspacePath: string): string {
@@ -467,7 +531,9 @@ function resolveCandidateTargetRoot(
   workspacePath: string | undefined,
 ): string | null {
   return sourceScope === "workspace"
-    ? workspacePath ? getWorkspaceZcodeSkillRoot(workspacePath) : null
+    ? workspacePath
+      ? getWorkspaceZcodeSkillRoot(workspacePath)
+      : null
     : getUserZcodeSkillRoot();
 }
 
@@ -486,7 +552,9 @@ function resolveCommandCandidateTargetRoot(
   workspacePath: string | undefined,
 ): string | null {
   return sourceScope === "workspace"
-    ? workspacePath ? getWorkspaceZcodeCommandRoot(workspacePath) : null
+    ? workspacePath
+      ? getWorkspaceZcodeCommandRoot(workspacePath)
+      : null
     : getUserZcodeCommandRoot();
 }
 
@@ -505,7 +573,9 @@ function resolvePluginCandidateTargetRoot(
   workspacePath: string | undefined,
 ): string | null {
   return sourceScope === "workspace"
-    ? workspacePath ? getWorkspaceZcodePluginRoot(workspacePath) : null
+    ? workspacePath
+      ? getWorkspaceZcodePluginRoot(workspacePath)
+      : null
     : getUserZcodePluginRoot();
 }
 
@@ -555,10 +625,17 @@ export function getCommandFileSymlinkType(): "file" {
   return "file";
 }
 
-async function createDirectorySymlink(sourcePath: string, targetPath: string): Promise<void> {
+async function createDirectorySymlink(
+  sourcePath: string,
+  targetPath: string,
+): Promise<void> {
   // Windows 创建目录软链需要 junction；其它平台使用 dir。source 使用绝对路径，避免 junction
   // 在不同 cwd 下解析目标不一致。
-  await symlink(resolve(sourcePath), targetPath, getSkillDirectorySymlinkType());
+  await symlink(
+    resolve(sourcePath),
+    targetPath,
+    getSkillDirectorySymlinkType(),
+  );
 }
 
 async function importCommandFile(
@@ -581,16 +658,24 @@ async function importCommandFile(
       } catch (linkError) {
         // 记录硬链接失败原因（EXDEV 跨分区 / EACCES 权限等），便于排查
         const linkErrorCode = (linkError as NodeJS.ErrnoException)?.code;
-        log.warn(undefined, "[importCommandFile] Windows 硬链接失败，回退到复制模式", {
-          sourcePath,
-          targetPath,
-          linkErrorCode,
-          linkErrorMessage: (linkError as Error)?.message,
-        });
+        log.warn(
+          undefined,
+          "[importCommandFile] Windows 硬链接失败，回退到复制模式",
+          {
+            sourcePath,
+            targetPath,
+            linkErrorCode,
+            linkErrorMessage: (linkError as Error)?.message,
+          },
+        );
       }
     } else {
       // 非 Windows 平台使用 symlink，不需要提权。
-      await symlink(resolve(sourcePath), targetPath, getCommandFileSymlinkType());
+      await symlink(
+        resolve(sourcePath),
+        targetPath,
+        getCommandFileSymlinkType(),
+      );
       return;
     }
   }
@@ -618,11 +703,13 @@ async function importPluginDirectory(
 
 function getExternalSkillRoots(workspacePath?: string): SkillSourceRoot[] {
   const home = resolveUserHomeDir();
-  const userRoots: SkillSourceRoot[] = SUPPORTED_SKILL_AGENT_SOURCES.map((source) => ({
-    agent: source.agent,
-    rootPath: join(home, ...source.globalPath),
-    scope: "user",
-  }));
+  const userRoots: SkillSourceRoot[] = SUPPORTED_SKILL_AGENT_SOURCES.map(
+    (source) => ({
+      agent: source.agent,
+      rootPath: join(home, ...source.globalPath),
+      scope: "user",
+    }),
+  );
   if (!workspacePath) {
     // 全局技能导入不应依赖当前窗口必须打开 workspace。
     return userRoots;
@@ -639,11 +726,13 @@ function getExternalSkillRoots(workspacePath?: string): SkillSourceRoot[] {
 
 function getExternalCommandRoots(workspacePath?: string): CommandSourceRoot[] {
   const home = resolveUserHomeDir();
-  const userRoots: CommandSourceRoot[] = SUPPORTED_COMMAND_AGENT_SOURCES.map((source) => ({
-    agent: source.agent,
-    rootPath: join(home, ...source.globalPath),
-    scope: "user",
-  }));
+  const userRoots: CommandSourceRoot[] = SUPPORTED_COMMAND_AGENT_SOURCES.map(
+    (source) => ({
+      agent: source.agent,
+      rootPath: join(home, ...source.globalPath),
+      scope: "user",
+    }),
+  );
   if (!workspacePath) {
     return userRoots;
   }
@@ -659,11 +748,13 @@ function getExternalCommandRoots(workspacePath?: string): CommandSourceRoot[] {
 
 function getExternalPluginRoots(workspacePath?: string): PluginSourceRoot[] {
   const home = resolveUserHomeDir();
-  const userRoots: PluginSourceRoot[] = SUPPORTED_PLUGIN_AGENT_SOURCES.map((source) => ({
-    agent: source.agent,
-    rootPath: join(home, ...source.globalPath),
-    scope: "user",
-  }));
+  const userRoots: PluginSourceRoot[] = SUPPORTED_PLUGIN_AGENT_SOURCES.map(
+    (source) => ({
+      agent: source.agent,
+      rootPath: join(home, ...source.globalPath),
+      scope: "user",
+    }),
+  );
   if (!workspacePath) {
     return userRoots;
   }
@@ -679,13 +770,14 @@ function getExternalPluginRoots(workspacePath?: string): PluginSourceRoot[] {
 
 function getExternalMcpRoots(workspacePath?: string): McpSourceRoot[] {
   const home = resolveUserHomeDir();
-  const userRoots: McpSourceRoot[] = SUPPORTED_MCP_AGENT_SOURCES.flatMap((source) =>
-    source.globalFiles.map((globalFile) => ({
-      agent: source.agent,
-      rootPath: join(home, ...globalFile),
-      scope: "user" as const,
-      format: source.format,
-    })),
+  const userRoots: McpSourceRoot[] = SUPPORTED_MCP_AGENT_SOURCES.flatMap(
+    (source) =>
+      source.globalFiles.map((globalFile) => ({
+        agent: source.agent,
+        rootPath: join(home, ...globalFile),
+        scope: "user" as const,
+        format: source.format,
+      })),
   );
   if (!workspacePath) {
     return userRoots;
@@ -731,7 +823,9 @@ async function collectSkillMarkdownPaths(rootPath: string): Promise<string[]> {
   return [...discovered].sort((left, right) => left.localeCompare(right));
 }
 
-async function collectCommandMarkdownPaths(rootPath: string): Promise<string[]> {
+async function collectCommandMarkdownPaths(
+  rootPath: string,
+): Promise<string[]> {
   const discovered = new Set<string>();
   const stack: string[] = [rootPath];
   while (stack.length > 0) {
@@ -762,7 +856,9 @@ async function collectCommandMarkdownPaths(rootPath: string): Promise<string[]> 
   return [...discovered].sort((left, right) => left.localeCompare(right));
 }
 
-async function findPluginManifestPath(pluginPath: string): Promise<string | null> {
+async function findPluginManifestPath(
+  pluginPath: string,
+): Promise<string | null> {
   const zcodeManifestPath = join(pluginPath, ...ZCODE_PLUGIN_MANIFEST_PATH);
   if (await pathExists(zcodeManifestPath)) {
     return zcodeManifestPath;
@@ -812,7 +908,7 @@ function normalizeSkillNameKey(name: string): string {
 function stripYamlScalarQuotes(value: string): string {
   const trimmed = value.trim();
   if (
-    (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
     (trimmed.startsWith("'") && trimmed.endsWith("'"))
   ) {
     return trimmed.slice(1, -1).trim();
@@ -820,7 +916,10 @@ function stripYamlScalarQuotes(value: string): string {
   return trimmed;
 }
 
-function readLooseSkillName(frontmatterText: string, fallbackName: string): string {
+function readLooseSkillName(
+  frontmatterText: string,
+  fallbackName: string,
+): string {
   const match = /^name\s*:\s*(.+)$/m.exec(frontmatterText);
   return stripYamlScalarQuotes(match?.[1] ?? fallbackName) || fallbackName;
 }
@@ -844,12 +943,14 @@ function readSkillMetadataFromMarkdown(
   try {
     const parsed = parseYaml(frontmatterText);
     if (isRecord(parsed)) {
-      const name = typeof parsed.name === "string" && parsed.name.trim()
-        ? parsed.name.trim()
-        : readLooseSkillName(frontmatterText, fallbackName);
-      const parsedVersion = typeof parsed.version === "string" || typeof parsed.version === "number"
-        ? String(parsed.version).trim()
-        : "";
+      const name =
+        typeof parsed.name === "string" && parsed.name.trim()
+          ? parsed.name.trim()
+          : readLooseSkillName(frontmatterText, fallbackName);
+      const parsedVersion =
+        typeof parsed.version === "string" || typeof parsed.version === "number"
+          ? String(parsed.version).trim()
+          : "";
       const version = parsedVersion || readLooseSkillVersion(frontmatterText);
       return {
         name,
@@ -870,10 +971,15 @@ function readSkillMetadataFromMarkdown(
   };
 }
 
-async function readSkillMetadata(skillPath: string): Promise<{ name: string; version?: string }> {
+async function readSkillMetadata(
+  skillPath: string,
+): Promise<{ name: string; version?: string }> {
   const fallbackName = basename(dirname(skillPath));
   try {
-    return readSkillMetadataFromMarkdown(await readFile(skillPath, "utf-8"), fallbackName);
+    return readSkillMetadataFromMarkdown(
+      await readFile(skillPath, "utf-8"),
+      fallbackName,
+    );
   } catch {
     return { name: fallbackName };
   }
@@ -883,7 +989,9 @@ async function readSkillNameKey(skillPath: string): Promise<string> {
   return normalizeSkillNameKey((await readSkillMetadata(skillPath)).name);
 }
 
-async function collectExistingSkillNameKeys(rootPath: string): Promise<Set<string>> {
+async function collectExistingSkillNameKeys(
+  rootPath: string,
+): Promise<Set<string>> {
   const nameKeys = new Set<string>();
   if (!(await exists(rootPath))) {
     return nameKeys;
@@ -946,9 +1054,10 @@ async function readPluginMetadata(pluginPath: string): Promise<{
     if (name.length === 0) {
       return null;
     }
-    const version = typeof parsed.version === "string" && parsed.version.trim().length > 0
-      ? parsed.version.trim()
-      : undefined;
+    const version =
+      typeof parsed.version === "string" && parsed.version.trim().length > 0
+        ? parsed.version.trim()
+        : undefined;
     return {
       id: `${name}@${INLINE_PLUGIN_MARKETPLACE}`,
       name,
@@ -959,18 +1068,24 @@ async function readPluginMetadata(pluginPath: string): Promise<{
   }
 }
 
-async function collectExistingCommandNameKeys(rootPath: string): Promise<Set<string>> {
+async function collectExistingCommandNameKeys(
+  rootPath: string,
+): Promise<Set<string>> {
   const nameKeys = new Set<string>();
   if (!(await exists(rootPath))) {
     return nameKeys;
   }
   for (const commandPath of await collectCommandMarkdownPaths(rootPath)) {
-    nameKeys.add(normalizeCommandNameKey(getCommandNameFromPath(rootPath, commandPath)));
+    nameKeys.add(
+      normalizeCommandNameKey(getCommandNameFromPath(rootPath, commandPath)),
+    );
   }
   return nameKeys;
 }
 
-async function readJsonFileOrEmpty(filePath: string): Promise<Record<string, unknown>> {
+async function readJsonFileOrEmpty(
+  filePath: string,
+): Promise<Record<string, unknown>> {
   try {
     const parsed = JSON.parse(await readFile(filePath, "utf-8")) as unknown;
     return isRecord(parsed) ? parsed : {};
@@ -983,7 +1098,9 @@ function normalizeMcpServerNameKey(name: string): string {
   return name.trim().toLowerCase();
 }
 
-function normalizeMcpServerMap(value: unknown): Record<string, McpServerConfig> {
+function normalizeMcpServerMap(
+  value: unknown,
+): Record<string, McpServerConfig> {
   if (!isRecord(value)) {
     return {};
   }
@@ -997,7 +1114,9 @@ function normalizeMcpServerMap(value: unknown): Record<string, McpServerConfig> 
   return servers;
 }
 
-function stripExternalMcpTimeoutFields(config: McpServerConfig): McpServerConfig {
+function stripExternalMcpTimeoutFields(
+  config: McpServerConfig,
+): McpServerConfig {
   const {
     timeout: _timeout,
     startup_timeout_sec: _startupTimeoutSec,
@@ -1006,21 +1125,30 @@ function stripExternalMcpTimeoutFields(config: McpServerConfig): McpServerConfig
   return rest as McpServerConfig;
 }
 
-function readZcodeMcpServers(parsed: Record<string, unknown>): Record<string, McpServerConfig> {
+function readZcodeMcpServers(
+  parsed: Record<string, unknown>,
+): Record<string, McpServerConfig> {
   if (!isRecord(parsed.mcp)) {
     return {};
   }
   return normalizeMcpServerMap(parsed.mcp.servers);
 }
 
-function readWrappedMcpServers(parsed: Record<string, unknown>): Record<string, McpServerConfig> {
+function readWrappedMcpServers(
+  parsed: Record<string, unknown>,
+): Record<string, McpServerConfig> {
   return normalizeMcpServerMap(parsed.mcpServers);
 }
 
-function readOpenCodeMcpServers(parsed: Record<string, unknown>): Record<string, McpServerConfig> {
+function readOpenCodeMcpServers(
+  parsed: Record<string, unknown>,
+): Record<string, McpServerConfig> {
   const servers = normalizeMcpServerMap(parsed.mcp);
   return Object.fromEntries(
-    Object.entries(servers).map(([name, config]) => [name, normalizeOpenCodeMcpConfig(config)]),
+    Object.entries(servers).map(([name, config]) => [
+      name,
+      normalizeOpenCodeMcpConfig(config),
+    ]),
   );
 }
 
@@ -1036,11 +1164,19 @@ function normalizeOpenCodeMcpConfig(config: McpServerConfig): McpServerConfig {
         ...rest,
         command: firstCommand,
         args,
-        ...(type === "local" ? { type: "stdio" } : type === "remote" ? { type: "http" } : {}),
+        ...(type === "local"
+          ? { type: "stdio" }
+          : type === "remote"
+            ? { type: "http" }
+            : {}),
       };
     }
   }
-  if (config.type === "local" && typeof rawCommand === "string" && rawCommand.trim()) {
+  if (
+    config.type === "local" &&
+    typeof rawCommand === "string" &&
+    rawCommand.trim()
+  ) {
     return {
       ...config,
       type: "stdio",
@@ -1050,7 +1186,9 @@ function normalizeOpenCodeMcpConfig(config: McpServerConfig): McpServerConfig {
   return config;
 }
 
-function readTomlMcpServers(parsed: Record<string, unknown>): Record<string, McpServerConfig> {
+function readTomlMcpServers(
+  parsed: Record<string, unknown>,
+): Record<string, McpServerConfig> {
   return normalizeMcpServerMap(parsed.mcp_servers ?? parsed.mcpServers);
 }
 
@@ -1080,33 +1218,42 @@ async function collectExistingMcpServerNameKeys(
   workspacePath: string | undefined,
 ): Promise<Set<string>> {
   const nameKeys = new Set<string>();
-  const targetConfigPath = resolveMcpConfigPathForScope(targetScope, workspacePath);
+  const targetConfigPath = resolveMcpConfigPathForScope(
+    targetScope,
+    workspacePath,
+  );
   if (targetConfigPath) {
-    for (const name of Object.keys(readZcodeMcpServers(await readJsonFileOrEmpty(targetConfigPath)))) {
+    for (const name of Object.keys(
+      readZcodeMcpServers(await readJsonFileOrEmpty(targetConfigPath)),
+    )) {
       nameKeys.add(normalizeMcpServerNameKey(name));
     }
   }
   return nameKeys;
 }
 
+/**
+ * 迁移导入写 config.json（MCP 的 mcp.servers、插件的 plugins.dirs）。
+ * 根因：旧实现写入前用 readJsonFileOrEmpty 读取，读失败或 JSON 损坏时返回空对象，再用 writeFile
+ * 整文件写回，config.json 里的命令、技能、钩子等其他配置会被冲掉；writeFile 也不是原子写。
+ * 修法：改用 updateJsonObjectFile——文件损坏时报错不写，写前重读，只改自己的字段，原子替换。
+ * 错误交给 importXxxForAgent 的 catch，按现有方式把该项标为 failed 显示在迁移结果里。
+ */
 async function addMcpServerToZcodeConfig(
   filePath: string,
   name: string,
   config: McpServerConfig,
 ): Promise<void> {
-  const parsed = await readJsonFileOrEmpty(filePath);
-  const currentMcp = isRecord(parsed.mcp) ? parsed.mcp : {};
-  const servers = readZcodeMcpServers(parsed);
-  await writeJsonFile(filePath, {
-    ...parsed,
+  await updateJsonObjectFile(filePath, (current) => ({
+    ...current,
     mcp: {
-      ...currentMcp,
+      ...(isRecord(current.mcp) ? current.mcp : {}),
       servers: {
-        ...servers,
+        ...readZcodeMcpServers(current),
         [name]: config,
       },
     },
-  });
+  }));
 }
 
 function readStringArray(value: unknown): string[] {
@@ -1115,29 +1262,30 @@ function readStringArray(value: unknown): string[] {
     : [];
 }
 
-async function writeJsonFile(filePath: string, value: Record<string, unknown>): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
-}
-
-async function addPluginDirToConfig(filePath: string, pluginPath: string): Promise<void> {
-  const parsed = await readJsonFileOrEmpty(filePath);
-  const plugins = isRecord(parsed.plugins) ? parsed.plugins : {};
-  const dirs = readStringArray(plugins.dirs);
+async function addPluginDirToConfig(
+  filePath: string,
+  pluginPath: string,
+): Promise<void> {
   const resolvedPluginPath = resolve(pluginPath);
-  if (dirs.map((item) => resolve(item)).includes(resolvedPluginPath)) {
-    return;
-  }
-  await writeJsonFile(filePath, {
-    ...parsed,
-    plugins: {
-      ...plugins,
-      dirs: [...dirs, resolvedPluginPath],
-    },
+  await updateJsonObjectFile(filePath, (current) => {
+    const plugins = isRecord(current.plugins) ? current.plugins : {};
+    const dirs = readStringArray(plugins.dirs);
+    if (dirs.map((item) => resolve(item)).includes(resolvedPluginPath)) {
+      return current;
+    }
+    return {
+      ...current,
+      plugins: {
+        ...plugins,
+        dirs: [...dirs, resolvedPluginPath],
+      },
+    };
   });
 }
 
-async function collectConfiguredPluginIds(configPath: string): Promise<Set<string>> {
+async function collectConfiguredPluginIds(
+  configPath: string,
+): Promise<Set<string>> {
   const parsed = await readJsonFileOrEmpty(configPath);
   const plugins = isRecord(parsed.plugins) ? parsed.plugins : {};
   const ids = new Set<string>();
@@ -1154,10 +1302,12 @@ async function isSkillImportCandidateImportable(
   candidate: SkillImportCandidate,
   existingNameKeysByTargetRoot: Map<string, Set<string>>,
 ): Promise<boolean> {
-  return (await getSkillImportCandidateSkipReason(
-    candidate,
-    existingNameKeysByTargetRoot,
-  )) === undefined;
+  return (
+    (await getSkillImportCandidateSkipReason(
+      candidate,
+      existingNameKeysByTargetRoot,
+    )) === undefined
+  );
 }
 
 async function getSkillImportCandidateSkipReason(
@@ -1184,7 +1334,9 @@ async function getCommandImportCandidateSkipReason(
   }
   let existingNameKeys = existingNameKeysByTargetRoot.get(candidate.targetRoot);
   if (!existingNameKeys) {
-    existingNameKeys = await collectExistingCommandNameKeys(candidate.targetRoot);
+    existingNameKeys = await collectExistingCommandNameKeys(
+      candidate.targetRoot,
+    );
     existingNameKeysByTargetRoot.set(candidate.targetRoot, existingNameKeys);
   }
   return existingNameKeys.has(candidate.nameKey) ? "sameNameExists" : undefined;
@@ -1194,10 +1346,12 @@ async function isCommandImportCandidateImportable(
   candidate: CommandImportCandidate,
   existingNameKeysByTargetRoot: Map<string, Set<string>>,
 ): Promise<boolean> {
-  return (await getCommandImportCandidateSkipReason(
-    candidate,
-    existingNameKeysByTargetRoot,
-  )) === undefined;
+  return (
+    (await getCommandImportCandidateSkipReason(
+      candidate,
+      existingNameKeysByTargetRoot,
+    )) === undefined
+  );
 }
 
 async function getPluginImportCandidateSkipReason(
@@ -1209,7 +1363,10 @@ async function getPluginImportCandidateSkipReason(
   if (await pathExists(candidate.targetPath)) {
     return "targetExists";
   }
-  const configPath = resolvePluginConfigPathForScope(targetScope, workspacePath);
+  const configPath = resolvePluginConfigPathForScope(
+    targetScope,
+    workspacePath,
+  );
   if (!configPath) {
     return "targetExists";
   }
@@ -1218,7 +1375,9 @@ async function getPluginImportCandidateSkipReason(
     existingPluginIds = await collectConfiguredPluginIds(configPath);
     existingPluginIdsByConfigPath.set(configPath, existingPluginIds);
   }
-  return existingPluginIds.has(candidate.id.toLowerCase()) ? "sameNameExists" : undefined;
+  return existingPluginIds.has(candidate.id.toLowerCase())
+    ? "sameNameExists"
+    : undefined;
 }
 
 async function isPluginImportCandidateImportable(
@@ -1227,12 +1386,14 @@ async function isPluginImportCandidateImportable(
   workspacePath: string | undefined,
   targetScope: SettingsSyncSourceScope = candidate.sourceRootScope,
 ): Promise<boolean> {
-  return (await getPluginImportCandidateSkipReason(
-    candidate,
-    existingPluginIdsByConfigPath,
-    workspacePath,
-    targetScope,
-  )) === undefined;
+  return (
+    (await getPluginImportCandidateSkipReason(
+      candidate,
+      existingPluginIdsByConfigPath,
+      workspacePath,
+      targetScope,
+    )) === undefined
+  );
 }
 
 async function getMcpImportCandidateSkipReason(
@@ -1243,7 +1404,10 @@ async function getMcpImportCandidateSkipReason(
 ): Promise<SettingsSyncMcpServerSkipReason | undefined> {
   let existingNameKeys = existingNameKeysByTargetScope.get(targetScope);
   if (!existingNameKeys) {
-    existingNameKeys = await collectExistingMcpServerNameKeys(targetScope, workspacePath);
+    existingNameKeys = await collectExistingMcpServerNameKeys(
+      targetScope,
+      workspacePath,
+    );
     existingNameKeysByTargetScope.set(targetScope, existingNameKeys);
   }
   return existingNameKeys.has(candidate.nameKey) ? "sameNameExists" : undefined;
@@ -1255,12 +1419,14 @@ async function isMcpImportCandidateImportable(
   workspacePath: string | undefined,
   targetScope: SettingsSyncSourceScope = candidate.sourceRootScope,
 ): Promise<boolean> {
-  return (await getMcpImportCandidateSkipReason(
-    candidate,
-    existingNameKeysByTargetScope,
-    workspacePath,
-    targetScope,
-  )) === undefined;
+  return (
+    (await getMcpImportCandidateSkipReason(
+      candidate,
+      existingNameKeysByTargetScope,
+      workspacePath,
+      targetScope,
+    )) === undefined
+  );
 }
 
 async function buildSourceRootSummaries(
@@ -1346,8 +1512,12 @@ async function buildCommandSourceRootSummaries(
         path: candidate.sourcePath,
         importable,
         ...(skipReason ? { skipReason } : {}),
-        ...(candidate.description ? { description: candidate.description } : {}),
-        ...(candidate.argumentHint ? { argumentHint: candidate.argumentHint } : {}),
+        ...(candidate.description
+          ? { description: candidate.description }
+          : {}),
+        ...(candidate.argumentHint
+          ? { argumentHint: candidate.argumentHint }
+          : {}),
       });
     }
     summaries.push({
@@ -1356,7 +1526,9 @@ async function buildCommandSourceRootSummaries(
       discoveredCount: groupCandidates.length,
       importableCount,
       skippedCount: groupCandidates.length - importableCount,
-      commands: commands.sort((left, right) => left.name.localeCompare(right.name)),
+      commands: commands.sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
     });
   }
 
@@ -1409,7 +1581,9 @@ async function buildPluginSourceRootSummaries(
       discoveredCount: groupCandidates.length,
       importableCount,
       skippedCount: groupCandidates.length - importableCount,
-      plugins: plugins.sort((left, right) => left.name.localeCompare(right.name)),
+      plugins: plugins.sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
     });
   }
 
@@ -1423,7 +1597,10 @@ async function buildMcpSourceRootSummaries(
   candidates: McpImportCandidate[],
   workspacePath: string | undefined,
 ): Promise<SettingsSyncSourceRootSummary[]> {
-  const existingNameKeysByTargetScope = new Map<SettingsSyncSourceScope, Set<string>>();
+  const existingNameKeysByTargetScope = new Map<
+    SettingsSyncSourceScope,
+    Set<string>
+  >();
   const grouped = new Map<string, McpImportCandidate[]>();
   for (const candidate of candidates) {
     const key = `${candidate.sourceRootScope}:${candidate.sourceRootPath}`;
@@ -1461,7 +1638,9 @@ async function buildMcpSourceRootSummaries(
       discoveredCount: groupCandidates.length,
       importableCount,
       skippedCount: groupCandidates.length - importableCount,
-      mcpServers: mcpServers.sort((left, right) => left.name.localeCompare(right.name)),
+      mcpServers: mcpServers.sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
     });
   }
 
@@ -1517,12 +1696,17 @@ async function collectCommandImportCandidates(
     if (!(await exists(root.rootPath))) {
       continue;
     }
-    for (const commandPath of await collectCommandMarkdownPaths(root.rootPath)) {
+    for (const commandPath of await collectCommandMarkdownPaths(
+      root.rootPath,
+    )) {
       if (seenSourcePaths.has(commandPath)) {
         continue;
       }
       seenSourcePaths.add(commandPath);
-      const targetRoot = resolveCommandCandidateTargetRoot(root.scope, workspacePath);
+      const targetRoot = resolveCommandCandidateTargetRoot(
+        root.scope,
+        workspacePath,
+      );
       if (!targetRoot) {
         continue;
       }
@@ -1536,7 +1720,9 @@ async function collectCommandImportCandidates(
         name: metadata.name,
         nameKey: normalizeCommandNameKey(metadata.name),
         ...(metadata.description ? { description: metadata.description } : {}),
-        ...(metadata.argumentHint ? { argumentHint: metadata.argumentHint } : {}),
+        ...(metadata.argumentHint
+          ? { argumentHint: metadata.argumentHint }
+          : {}),
         sourceRootScope: root.scope === "workspace" ? "project" : "global",
         sourceRootPath: root.rootPath,
         sourcePath: commandPath,
@@ -1564,7 +1750,10 @@ async function collectPluginImportCandidates(
         continue;
       }
       seenSourcePaths.add(pluginPath);
-      const targetRoot = resolvePluginCandidateTargetRoot(root.scope, workspacePath);
+      const targetRoot = resolvePluginCandidateTargetRoot(
+        root.scope,
+        workspacePath,
+      );
       if (!targetRoot) {
         continue;
       }
@@ -1597,7 +1786,10 @@ async function collectMcpImportCandidates(
     if (!(await pathExists(root.rootPath))) {
       continue;
     }
-    const serverMap = await readMcpServersFromSourceFile(root.rootPath, root.format);
+    const serverMap = await readMcpServersFromSourceFile(
+      root.rootPath,
+      root.format,
+    );
     for (const [name, config] of Object.entries(serverMap)) {
       const sourcePath = `${root.rootPath}#${name}`;
       const seenKey = `${root.agent}:${sourcePath}`;
@@ -1625,15 +1817,23 @@ async function buildSkillsDiscovery(
   const candidates = await collectSkillImportCandidates(workspacePath);
   const agents: SettingsSyncDiscoveryResult["agents"] = [];
   for (const { agent } of SUPPORTED_SKILL_AGENT_SOURCES) {
-    const agentCandidates = candidates.filter((candidate) => candidate.agent === agent);
+    const agentCandidates = candidates.filter(
+      (candidate) => candidate.agent === agent,
+    );
     const discoveredCount = agentCandidates.length;
-    const sourcePaths = [...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath))]
-      .sort((left, right) => left.localeCompare(right));
+    const sourcePaths = [
+      ...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath)),
+    ].sort((left, right) => left.localeCompare(right));
     const sourceRoots = await buildSourceRootSummaries(agentCandidates);
     let importableCount = 0;
     const existingNameKeysByTargetRoot = new Map<string, Set<string>>();
     for (const candidate of agentCandidates) {
-      if (await isSkillImportCandidateImportable(candidate, existingNameKeysByTargetRoot)) {
+      if (
+        await isSkillImportCandidateImportable(
+          candidate,
+          existingNameKeysByTargetRoot,
+        )
+      ) {
         importableCount += 1;
       }
     }
@@ -1664,15 +1864,23 @@ async function buildCommandsDiscovery(
   const candidates = await collectCommandImportCandidates(workspacePath);
   const agents: SettingsSyncDiscoveryResult["agents"] = [];
   for (const { agent } of SUPPORTED_COMMAND_AGENT_SOURCES) {
-    const agentCandidates = candidates.filter((candidate) => candidate.agent === agent);
+    const agentCandidates = candidates.filter(
+      (candidate) => candidate.agent === agent,
+    );
     const discoveredCount = agentCandidates.length;
-    const sourcePaths = [...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath))]
-      .sort((left, right) => left.localeCompare(right));
+    const sourcePaths = [
+      ...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath)),
+    ].sort((left, right) => left.localeCompare(right));
     const sourceRoots = await buildCommandSourceRootSummaries(agentCandidates);
     let importableCount = 0;
     const existingNameKeysByTargetRoot = new Map<string, Set<string>>();
     for (const candidate of agentCandidates) {
-      if (await isCommandImportCandidateImportable(candidate, existingNameKeysByTargetRoot)) {
+      if (
+        await isCommandImportCandidateImportable(
+          candidate,
+          existingNameKeysByTargetRoot,
+        )
+      ) {
         importableCount += 1;
       }
     }
@@ -1703,19 +1911,27 @@ async function buildPluginsDiscovery(
   const candidates = await collectPluginImportCandidates(workspacePath);
   const agents: SettingsSyncDiscoveryResult["agents"] = [];
   for (const { agent } of SUPPORTED_PLUGIN_AGENT_SOURCES) {
-    const agentCandidates = candidates.filter((candidate) => candidate.agent === agent);
+    const agentCandidates = candidates.filter(
+      (candidate) => candidate.agent === agent,
+    );
     const discoveredCount = agentCandidates.length;
-    const sourcePaths = [...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath))]
-      .sort((left, right) => left.localeCompare(right));
-    const sourceRoots = await buildPluginSourceRootSummaries(agentCandidates, workspacePath);
+    const sourcePaths = [
+      ...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath)),
+    ].sort((left, right) => left.localeCompare(right));
+    const sourceRoots = await buildPluginSourceRootSummaries(
+      agentCandidates,
+      workspacePath,
+    );
     let importableCount = 0;
     const existingPluginIdsByConfigPath = new Map<string, Set<string>>();
     for (const candidate of agentCandidates) {
-      if (await isPluginImportCandidateImportable(
-        candidate,
-        existingPluginIdsByConfigPath,
-        workspacePath,
-      )) {
+      if (
+        await isPluginImportCandidateImportable(
+          candidate,
+          existingPluginIdsByConfigPath,
+          workspacePath,
+        )
+      ) {
         importableCount += 1;
       }
     }
@@ -1746,19 +1962,30 @@ async function buildMcpDiscovery(
   const candidates = await collectMcpImportCandidates(workspacePath);
   const agents: SettingsSyncDiscoveryResult["agents"] = [];
   for (const { agent } of SUPPORTED_MCP_AGENT_SOURCES) {
-    const agentCandidates = candidates.filter((candidate) => candidate.agent === agent);
+    const agentCandidates = candidates.filter(
+      (candidate) => candidate.agent === agent,
+    );
     const discoveredCount = agentCandidates.length;
-    const sourcePaths = [...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath))]
-      .sort((left, right) => left.localeCompare(right));
-    const sourceRoots = await buildMcpSourceRootSummaries(agentCandidates, workspacePath);
+    const sourcePaths = [
+      ...new Set(agentCandidates.map((candidate) => candidate.sourceRootPath)),
+    ].sort((left, right) => left.localeCompare(right));
+    const sourceRoots = await buildMcpSourceRootSummaries(
+      agentCandidates,
+      workspacePath,
+    );
     let importableCount = 0;
-    const existingNameKeysByTargetScope = new Map<SettingsSyncSourceScope, Set<string>>();
+    const existingNameKeysByTargetScope = new Map<
+      SettingsSyncSourceScope,
+      Set<string>
+    >();
     for (const candidate of agentCandidates) {
-      if (await isMcpImportCandidateImportable(
-        candidate,
-        existingNameKeysByTargetScope,
-        workspacePath,
-      )) {
+      if (
+        await isMcpImportCandidateImportable(
+          candidate,
+          existingNameKeysByTargetScope,
+          workspacePath,
+        )
+      ) {
         importableCount += 1;
       }
     }
@@ -1843,9 +2070,15 @@ async function importSkillsForAgent(
     }
     try {
       await mkdir(dirname(targetCandidate.targetPath), { recursive: true });
-      await importSkillDirectory(candidate.sourcePath, targetCandidate.targetPath, importMode);
+      await importSkillDirectory(
+        candidate.sourcePath,
+        targetCandidate.targetPath,
+        importMode,
+      );
       importedCount += 1;
-      const existingNameKeys = existingNameKeysByTargetRoot.get(targetCandidate.targetRoot);
+      const existingNameKeys = existingNameKeysByTargetRoot.get(
+        targetCandidate.targetRoot,
+      );
       if (existingNameKeys) {
         existingNameKeys.add(candidate.nameKey);
       }
@@ -1871,7 +2104,8 @@ async function importSkillsForAgent(
   return {
     agent,
     category: "skills",
-    status: failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
+    status:
+      failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
     importedCount,
     skippedCount,
     failedCount,
@@ -1888,7 +2122,9 @@ async function importCommandsForAgent(
   commandPaths?: string[],
 ): Promise<SettingsSyncTaskImportResult> {
   const selectedCommandPaths = commandPaths ? new Set(commandPaths) : null;
-  const candidates = (await collectCommandImportCandidates(workspacePath)).filter(
+  const candidates = (
+    await collectCommandImportCandidates(workspacePath)
+  ).filter(
     (candidate) =>
       candidate.agent === agent &&
       (!sourceScope || candidate.sourceRootScope === sourceScope) &&
@@ -1937,9 +2173,15 @@ async function importCommandsForAgent(
     }
     try {
       await mkdir(dirname(targetCandidate.targetPath), { recursive: true });
-      await importCommandFile(candidate.sourcePath, targetCandidate.targetPath, importMode);
+      await importCommandFile(
+        candidate.sourcePath,
+        targetCandidate.targetPath,
+        importMode,
+      );
       importedCount += 1;
-      const existingNameKeys = existingNameKeysByTargetRoot.get(targetCandidate.targetRoot);
+      const existingNameKeys = existingNameKeysByTargetRoot.get(
+        targetCandidate.targetRoot,
+      );
       if (existingNameKeys) {
         existingNameKeys.add(candidate.nameKey);
       }
@@ -1963,7 +2205,8 @@ async function importCommandsForAgent(
   return {
     agent,
     category: "commands",
-    status: failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
+    status:
+      failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
     importedCount,
     skippedCount,
     failedCount,
@@ -1980,7 +2223,9 @@ async function importPluginsForAgent(
   pluginPaths?: string[],
 ): Promise<SettingsSyncTaskImportResult> {
   const selectedPluginPaths = pluginPaths ? new Set(pluginPaths) : null;
-  const candidates = (await collectPluginImportCandidates(workspacePath)).filter(
+  const candidates = (
+    await collectPluginImportCandidates(workspacePath)
+  ).filter(
     (candidate) =>
       candidate.agent === agent &&
       (!sourceScope || candidate.sourceRootScope === sourceScope) &&
@@ -1994,8 +2239,14 @@ async function importPluginsForAgent(
 
   for (const candidate of candidates) {
     const selectedTargetScope = targetScope ?? candidate.sourceRootScope;
-    const selectedTargetRoot = resolvePluginTargetRootForScope(selectedTargetScope, workspacePath);
-    const selectedConfigPath = resolvePluginConfigPathForScope(selectedTargetScope, workspacePath);
+    const selectedTargetRoot = resolvePluginTargetRootForScope(
+      selectedTargetScope,
+      workspacePath,
+    );
+    const selectedConfigPath = resolvePluginConfigPathForScope(
+      selectedTargetScope,
+      workspacePath,
+    );
     if (!selectedTargetRoot || !selectedConfigPath) {
       skippedCount += 1;
       pluginResults.push({
@@ -2033,10 +2284,25 @@ async function importPluginsForAgent(
     }
     try {
       await mkdir(dirname(targetCandidate.targetPath), { recursive: true });
-      await importPluginDirectory(candidate.sourcePath, targetCandidate.targetPath, importMode);
-      await addPluginDirToConfig(selectedConfigPath, targetCandidate.targetPath);
+      await importPluginDirectory(
+        candidate.sourcePath,
+        targetCandidate.targetPath,
+        importMode,
+      );
+      try {
+        await addPluginDirToConfig(
+          selectedConfigPath,
+          targetCandidate.targetPath,
+        );
+      } catch (error) {
+        // config.json 损坏时登记失败，但插件目录已经放好。目录残留会让用户修好配置后重试时
+        // 被判成 targetExists 而永远无法登记；导入前已确认目标不存在，所以这里只删本次放入的目录或软链。
+        await rm(targetCandidate.targetPath, { recursive: true, force: true });
+        throw error;
+      }
       importedCount += 1;
-      const existingPluginIds = existingPluginIdsByConfigPath.get(selectedConfigPath);
+      const existingPluginIds =
+        existingPluginIdsByConfigPath.get(selectedConfigPath);
       if (existingPluginIds) {
         existingPluginIds.add(candidate.id.toLowerCase());
       }
@@ -2047,7 +2313,12 @@ async function importPluginsForAgent(
         status: "imported",
         ...(candidate.version ? { version: candidate.version } : {}),
       });
-    } catch {
+    } catch (error) {
+      log.warn(undefined, "[importPlugins] 插件导入失败", {
+        sourcePath: candidate.sourcePath,
+        configPath: selectedConfigPath,
+        errorMessage: (error as Error)?.message,
+      });
       failedCount += 1;
       pluginResults.push({
         name: candidate.name,
@@ -2062,7 +2333,8 @@ async function importPluginsForAgent(
   return {
     agent,
     category: "plugins",
-    status: failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
+    status:
+      failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
     importedCount,
     skippedCount,
     failedCount,
@@ -2077,22 +2349,31 @@ async function importMcpServersForAgent(
   targetScope?: SettingsSyncSourceScope,
   mcpServerPaths?: string[],
 ): Promise<SettingsSyncTaskImportResult> {
-  const selectedMcpServerPaths = mcpServerPaths ? new Set(mcpServerPaths) : null;
+  const selectedMcpServerPaths = mcpServerPaths
+    ? new Set(mcpServerPaths)
+    : null;
   const candidates = (await collectMcpImportCandidates(workspacePath)).filter(
     (candidate) =>
       candidate.agent === agent &&
       (!sourceScope || candidate.sourceRootScope === sourceScope) &&
-      (!selectedMcpServerPaths || selectedMcpServerPaths.has(candidate.sourcePath)),
+      (!selectedMcpServerPaths ||
+        selectedMcpServerPaths.has(candidate.sourcePath)),
   );
   let importedCount = 0;
   let skippedCount = 0;
   let failedCount = 0;
   const mcpServerResults: SettingsSyncMcpServerImportResult[] = [];
-  const existingNameKeysByTargetScope = new Map<SettingsSyncSourceScope, Set<string>>();
+  const existingNameKeysByTargetScope = new Map<
+    SettingsSyncSourceScope,
+    Set<string>
+  >();
 
   for (const candidate of candidates) {
     const selectedTargetScope = targetScope ?? candidate.sourceRootScope;
-    const selectedConfigPath = resolveMcpConfigPathForScope(selectedTargetScope, workspacePath);
+    const selectedConfigPath = resolveMcpConfigPathForScope(
+      selectedTargetScope,
+      workspacePath,
+    );
     if (!selectedConfigPath) {
       skippedCount += 1;
       mcpServerResults.push({
@@ -2122,9 +2403,14 @@ async function importMcpServersForAgent(
       continue;
     }
     try {
-      await addMcpServerToZcodeConfig(selectedConfigPath, candidate.name, candidate.config);
+      await addMcpServerToZcodeConfig(
+        selectedConfigPath,
+        candidate.name,
+        candidate.config,
+      );
       importedCount += 1;
-      const existingNameKeys = existingNameKeysByTargetScope.get(selectedTargetScope);
+      const existingNameKeys =
+        existingNameKeysByTargetScope.get(selectedTargetScope);
       if (existingNameKeys) {
         existingNameKeys.add(candidate.nameKey);
       }
@@ -2134,7 +2420,12 @@ async function importMcpServersForAgent(
         sourceScope: candidate.sourceRootScope,
         status: "imported",
       });
-    } catch {
+    } catch (error) {
+      log.warn(undefined, "[importMcpServers] MCP 导入失败", {
+        name: candidate.name,
+        configPath: selectedConfigPath,
+        errorMessage: (error as Error)?.message,
+      });
       failedCount += 1;
       mcpServerResults.push({
         name: candidate.name,
@@ -2148,7 +2439,8 @@ async function importMcpServersForAgent(
   return {
     agent,
     category: "mcpServers",
-    status: failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
+    status:
+      failedCount > 0 ? "failed" : importedCount > 0 ? "success" : "skipped",
     importedCount,
     skippedCount,
     failedCount,
@@ -2160,28 +2452,40 @@ function shouldScanSkills(request: {
   categories?: SettingsSyncCategory[];
   intent?: "firstRun" | "manualImport";
 }): boolean {
-  return request.intent === "manualImport" && request.categories?.includes("skills") === true;
+  return (
+    request.intent === "manualImport" &&
+    request.categories?.includes("skills") === true
+  );
 }
 
 function shouldScanCommands(request: {
   categories?: SettingsSyncCategory[];
   intent?: "firstRun" | "manualImport";
 }): boolean {
-  return request.intent === "manualImport" && request.categories?.includes("commands") === true;
+  return (
+    request.intent === "manualImport" &&
+    request.categories?.includes("commands") === true
+  );
 }
 
 function shouldScanPlugins(request: {
   categories?: SettingsSyncCategory[];
   intent?: "firstRun" | "manualImport";
 }): boolean {
-  return request.intent === "manualImport" && request.categories?.includes("plugins") === true;
+  return (
+    request.intent === "manualImport" &&
+    request.categories?.includes("plugins") === true
+  );
 }
 
 function shouldScanMcpServers(request: {
   categories?: SettingsSyncCategory[];
   intent?: "firstRun" | "manualImport";
 }): boolean {
-  return request.intent === "manualImport" && request.categories?.includes("mcpServers") === true;
+  return (
+    request.intent === "manualImport" &&
+    request.categories?.includes("mcpServers") === true
+  );
 }
 
 async function getClaudeAgentsFileMigrationStatus(): Promise<SettingsSyncClaudeAgentsFileMigrationStatus> {
@@ -2249,13 +2553,17 @@ export function createSettingsSyncService(
   }
 
   return {
-    async getClaudeAgentsFileMigrationStatus(request): Promise<SettingsSyncClaudeAgentsFileMigrationStatus> {
+    async getClaudeAgentsFileMigrationStatus(
+      request,
+    ): Promise<SettingsSyncClaudeAgentsFileMigrationStatus> {
       void request.workspaceIdentity;
       void request.workspacePath;
       return getClaudeAgentsFileMigrationStatus();
     },
 
-    async copyClaudeAgentsFileToZcodeAgentsFile(request = {}): Promise<SettingsSyncClaudeAgentsFileCopyResult> {
+    async copyClaudeAgentsFileToZcodeAgentsFile(
+      request = {},
+    ): Promise<SettingsSyncClaudeAgentsFileCopyResult> {
       const result = await copyClaudeAgentsFileToZcodeAgentsFile({
         overwrite: request.overwrite,
       });
@@ -2295,46 +2603,54 @@ export function createSettingsSyncService(
       const taskResults: SettingsSyncTaskImportResult[] = [];
       for (const selection of request.selections) {
         if (selection.category === "skills") {
-          taskResults.push(await importSkillsForAgent(
-            request.workspacePath,
-            selection.agent,
-            selection.sourceScope,
-            selection.targetScope,
-            selection.importMode,
-            selection.skillPaths,
-          ));
+          taskResults.push(
+            await importSkillsForAgent(
+              request.workspacePath,
+              selection.agent,
+              selection.sourceScope,
+              selection.targetScope,
+              selection.importMode,
+              selection.skillPaths,
+            ),
+          );
           continue;
         }
         if (selection.category === "commands") {
-          taskResults.push(await importCommandsForAgent(
-            request.workspacePath,
-            selection.agent,
-            selection.sourceScope,
-            selection.targetScope,
-            selection.importMode,
-            selection.commandPaths,
-          ));
+          taskResults.push(
+            await importCommandsForAgent(
+              request.workspacePath,
+              selection.agent,
+              selection.sourceScope,
+              selection.targetScope,
+              selection.importMode,
+              selection.commandPaths,
+            ),
+          );
           continue;
         }
         if (selection.category === "plugins") {
-          taskResults.push(await importPluginsForAgent(
-            request.workspacePath,
-            selection.agent,
-            selection.sourceScope,
-            selection.targetScope,
-            selection.importMode,
-            selection.pluginPaths,
-          ));
+          taskResults.push(
+            await importPluginsForAgent(
+              request.workspacePath,
+              selection.agent,
+              selection.sourceScope,
+              selection.targetScope,
+              selection.importMode,
+              selection.pluginPaths,
+            ),
+          );
           continue;
         }
         if (selection.category === "mcpServers") {
-          taskResults.push(await importMcpServersForAgent(
-            request.workspacePath,
-            selection.agent,
-            selection.sourceScope,
-            selection.targetScope,
-            selection.mcpServerPaths,
-          ));
+          taskResults.push(
+            await importMcpServersForAgent(
+              request.workspacePath,
+              selection.agent,
+              selection.sourceScope,
+              selection.targetScope,
+              selection.mcpServerPaths,
+            ),
+          );
           continue;
         }
         taskResults.push({
@@ -2347,9 +2663,18 @@ export function createSettingsSyncService(
         });
       }
       return {
-        successCount: taskResults.reduce((sum, result) => sum + result.importedCount, 0),
-        skippedCount: taskResults.reduce((sum, result) => sum + result.skippedCount, 0),
-        failedCount: taskResults.reduce((sum, result) => sum + result.failedCount, 0),
+        successCount: taskResults.reduce(
+          (sum, result) => sum + result.importedCount,
+          0,
+        ),
+        skippedCount: taskResults.reduce(
+          (sum, result) => sum + result.skippedCount,
+          0,
+        ),
+        failedCount: taskResults.reduce(
+          (sum, result) => sum + result.failedCount,
+          0,
+        ),
         taskResults,
       };
     },

@@ -41,7 +41,10 @@ function isTransportFrame(
   return payload.zcode_type === "rpc-frame";
 }
 
-function queueBatch(messageSeq: number, outerBytes = 1): AcknowledgedRelayOutboundBatch {
+function queueBatch(
+  messageSeq: number,
+  outerBytes = 1,
+): AcknowledgedRelayOutboundBatch {
   return {
     messageSeq,
     frames: [],
@@ -119,7 +122,9 @@ describe("createWebRemoteControlRelayProtocol", () => {
       sendFrame: (frame) => sent.push(frame),
     });
 
-    protocol.send(VSBuffer.wrap(new Uint8Array([0, 1, 2, 3, 4]).subarray(1, 4)));
+    protocol.send(
+      VSBuffer.wrap(new Uint8Array([0, 1, 2, 3, 4]).subarray(1, 4)),
+    );
 
     expect(sent[0]?.dataBase64).toBe("AQID");
   });
@@ -203,7 +208,11 @@ describe("createWebRemoteControlRelayProtocol", () => {
     adapter.protocol.send(VSBuffer.wrap(new Uint8Array([3])));
 
     expect(delivered.map((frame) => frame.seq)).toEqual([1, 2, 3]);
-    expect(delivered.map((frame) => frame.dataBase64)).toEqual(["AQ==", "Ag==", "Aw=="]);
+    expect(delivered.map((frame) => frame.dataBase64)).toEqual([
+      "AQ==",
+      "Ag==",
+      "Aw==",
+    ]);
   });
 
   it("reports buffered rpc frames as failed when they cannot flush before timeout", async () => {
@@ -253,7 +262,11 @@ describe("createWebRemoteControlRelayProtocol", () => {
 
   it("drops duplicate inbound frames and reports seq gaps without delivering them", () => {
     const received: number[][] = [];
-    const gaps: Array<{ seq: number; expectedSeq: number; bridgeSessionId: string }> = [];
+    const gaps: Array<{
+      seq: number;
+      expectedSeq: number;
+      bridgeSessionId: string;
+    }> = [];
     const adapter = createWebRemoteControlRelayProtocol({
       bridgeSessionId: "bridge-1",
       sendFrame: () => {},
@@ -289,7 +302,9 @@ describe("createWebRemoteControlRelayProtocol", () => {
     });
 
     expect(received).toEqual([[1]]);
-    expect(gaps).toEqual([{ bridgeSessionId: "bridge-1", seq: 3, expectedSeq: 2 }]);
+    expect(gaps).toEqual([
+      { bridgeSessionId: "bridge-1", seq: 3, expectedSeq: 2 },
+    ]);
   });
 
   it("does not flush buffered outbound frames after the bridge is degraded", () => {
@@ -349,9 +364,9 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     const serializer = new WebRemoteControlRelayPayloadSerializer();
     for (const frame of frames) {
       // desktop 方向：serializer 附加 target_terminal_id 后的实际发送字节。
-      expect(serializer.prepare(frame, 1_800_000_000, worstTerminalId).bytes).toBeLessThanOrEqual(
-        limit,
-      );
+      expect(
+        serializer.prepare(frame, 1_800_000_000, worstTerminalId).bytes,
+      ).toBeLessThanOrEqual(limit);
       // web 方向：relay 附加 from_terminal_id 后 device 收到的字节。
       expect(
         new TextEncoder().encode(
@@ -384,7 +399,9 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     const frames = outbound.filter(isTransportFrame);
     expect(frames.length).toBeGreaterThan(1);
     for (const frame of frames) {
-      expect(measureWebRemoteControlRpcRelayEnvelopeBytes(frame)).toBeLessThanOrEqual(
+      expect(
+        measureWebRemoteControlRpcRelayEnvelopeBytes(frame),
+      ).toBeLessThanOrEqual(
         WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxPhysicalFrameBytes,
       );
     }
@@ -425,8 +442,11 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
   });
 
   it("uses cumulative ACKs for exact byte accounting and high/low flow edges", () => {
-    const firstBatchBytes = encodeAcknowledgedMessage(new Uint8Array([1])).reduce(
-      (total, frame) => total + measureWebRemoteControlRpcRelayEnvelopeBytes(frame),
+    const firstBatchBytes = encodeAcknowledgedMessage(
+      new Uint8Array([1]),
+    ).reduce(
+      (total, frame) =>
+        total + measureWebRemoteControlRpcRelayEnvelopeBytes(frame),
       0,
     );
     const sent: WebRemoteControlRpcTransportPayload[] = [];
@@ -570,7 +590,9 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     const initialFrames = attempts.filter(isTransportFrame);
     expect(initialFrames).toHaveLength(2);
     const [firstAttempt, secondAttempt] = initialFrames;
-    const expectedOutbound = encodeAcknowledgedMessage(new Uint8Array(1024 * 1024));
+    const expectedOutbound = encodeAcknowledgedMessage(
+      new Uint8Array(1024 * 1024),
+    );
     expect(expectedOutbound.length).toBeGreaterThan(1);
 
     adapter.acceptPayload(encodeAcknowledgedMessage(new Uint8Array([1]))[0]!);
@@ -585,7 +607,10 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     sendAll = true;
     attempts.length = 0;
     expect(adapter.flushPendingFrames()).toBe(true);
-    expect(attempts[0]).toMatchObject({ zcode_type: "rpc-frame-ack", ackMessageSeq: 2 });
+    expect(attempts[0]).toMatchObject({
+      zcode_type: "rpc-frame-ack",
+      ackMessageSeq: 2,
+    });
     const flushedFrames = attempts.filter(isTransportFrame);
     expect(flushedFrames).toHaveLength(expectedOutbound.length - 1);
     expect(flushedFrames[0]).toBe(secondAttempt);
@@ -603,8 +628,12 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
   });
 
   it("handles synchronous reentrant ACK and lost-ACK replay without duplicate delivery", () => {
-    let left: ReturnType<typeof createAcknowledgedWebRemoteControlRelayProtocol>;
-    let right: ReturnType<typeof createAcknowledgedWebRemoteControlRelayProtocol>;
+    let left: ReturnType<
+      typeof createAcknowledgedWebRemoteControlRelayProtocol
+    >;
+    let right: ReturnType<
+      typeof createAcknowledgedWebRemoteControlRelayProtocol
+    >;
     let deliverAcknowledgement = true;
     const leftFrames: WebRemoteControlRpcTransportFramePayload[] = [];
     left = createAcknowledgedWebRemoteControlRelayProtocol({
@@ -658,7 +687,7 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     right.dispose();
   });
 
-  it("degrades before sending any fragment when exact replay bytes exceed 8 MiB", () => {
+  it("degrades before sending any fragment when exact replay bytes exceed the hard limit", () => {
     let sends = 0;
     const faults: string[] = [];
     const adapter = createAcknowledgedWebRemoteControlRelayProtocol({
@@ -671,16 +700,19 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     adapter.onDegraded((fault) => {
       faults.push(fault.reasonCode);
     });
-    const bytes = new Uint8Array(6_300_000);
-    const exactOuterBytes = encodeAcknowledgedMessage(bytes).reduce(
-      (total, frame) => total + measureWebRemoteControlRpcRelayEnvelopeBytes(frame),
-      0,
+    // 重放缓冲硬限 = 2 × maxMessageBytes：单条合法消息不会超限（超限在 encode 阶段被拒），
+    // 用多条未 ACK 消息累计越过硬限，验证发送侧在越限后停发并 degraded。
+    const bytes = new Uint8Array(
+      WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxMessageBytes - 1024,
     );
-    expect(exactOuterBytes).toBeGreaterThan(8 * 1024 * 1024);
-
+    adapter.protocol.send(VSBuffer.wrap(bytes));
+    adapter.protocol.send(VSBuffer.wrap(bytes));
+    adapter.protocol.send(VSBuffer.wrap(bytes));
+    const sendsAtLimit = sends;
+    // 越限 degraded 后继续 send 不得再发出任何帧。
     adapter.protocol.send(VSBuffer.wrap(bytes));
 
-    expect(sends).toBe(0);
+    expect(sends).toBe(sendsAtLimit);
     expect(adapter.unacknowledgedBytes).toBe(0);
     expect(faults).toEqual(["remote.rpcFrame.replayBufferExceeded"]);
     adapter.dispose();
@@ -801,7 +833,7 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     adapter.dispose();
   });
 
-  it("does not let public options loosen the 8MiB replay or 30s assembly hard limits", async () => {
+  it("does not let public options loosen the replay or 30s assembly hard limits", async () => {
     let sends = 0;
     const replayFaults: string[] = [];
     const replay = createAcknowledgedWebRemoteControlRelayProtocol({
@@ -815,8 +847,15 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     replay.onDegraded((fault) => {
       replayFaults.push(fault.reasonCode);
     });
-    replay.protocol.send(VSBuffer.wrap(new Uint8Array(6_300_000)));
-    expect(sends).toBe(0);
+    const chunk = new Uint8Array(
+      WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxMessageBytes - 1024,
+    );
+    replay.protocol.send(VSBuffer.wrap(chunk));
+    replay.protocol.send(VSBuffer.wrap(chunk));
+    replay.protocol.send(VSBuffer.wrap(chunk));
+    const sendsAtLimit = sends;
+    replay.protocol.send(VSBuffer.wrap(chunk));
+    expect(sends).toBe(sendsAtLimit);
     expect(replayFaults).toEqual(["remote.rpcFrame.replayBufferExceeded"]);
     replay.dispose();
 
@@ -831,7 +870,9 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
     assembly.onDegraded((fault) => {
       assemblyFaults.push(fault.reasonCode);
     });
-    assembly.acceptPayload(encodeAcknowledgedMessage(new Uint8Array(1024 * 1024))[0]!);
+    assembly.acceptPayload(
+      encodeAcknowledgedMessage(new Uint8Array(1024 * 1024))[0]!,
+    );
     await vi.advanceTimersByTimeAsync(30_001);
     expect(assemblyFaults).toEqual(["remote.rpcFrame.assemblyTimeout"]);
     assembly.dispose();
@@ -985,7 +1026,9 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
   it("reports a non-drained flush when data or ACK send callback disposes reentrantly", () => {
     for (const payloadKind of ["data", "ack"] as const) {
       let disposeDuringSend = false;
-      let adapter: ReturnType<typeof createAcknowledgedWebRemoteControlRelayProtocol>;
+      let adapter: ReturnType<
+        typeof createAcknowledgedWebRemoteControlRelayProtocol
+      >;
       adapter = createAcknowledgedWebRemoteControlRelayProtocol({
         ...acknowledgedIdentity,
         sendFrame: () => {
@@ -1000,7 +1043,9 @@ describe("createAcknowledgedWebRemoteControlRelayProtocol", () => {
       if (payloadKind === "data") {
         adapter.protocol.send(VSBuffer.wrap(new Uint8Array([1])));
       } else {
-        adapter.acceptPayload(encodeAcknowledgedMessage(new Uint8Array([1]))[0]!);
+        adapter.acceptPayload(
+          encodeAcknowledgedMessage(new Uint8Array([1]))[0]!,
+        );
       }
 
       disposeDuringSend = true;

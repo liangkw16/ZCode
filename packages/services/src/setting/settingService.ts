@@ -11,11 +11,22 @@ import {
   appSettingsSchema,
   formatLogPrefix,
   formatZodError,
+  USER_INSTRUCTIONS_MAX_BYTES,
+  USER_INSTRUCTIONS_TOO_LARGE_ERROR_CODE,
   ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
-import type { ISettingService, WorkspaceSettingsProjection } from "./setting.js";
+import { atomicWritePrivateTextFile } from "@zcode/shared/node";
+import type {
+  ISettingService,
+  WorkspaceSettingsProjection,
+} from "./setting.js";
 import { normalizeSettingsPatch } from "#src/setting/normalizeSettingsPatch.js";
-import { copyDataDirectory, getDataBaseDir, validateDataBaseDirTarget } from "../paths.js";
+import {
+  copyDataDirectory,
+  getAgentUserInstructionsFilePath,
+  getDataBaseDir,
+  validateDataBaseDirTarget,
+} from "../paths.js";
 import { isEffectiveDevelopmentNodeEnv } from "../runtime-tools/nodeEnv.js";
 import { maybeThrowInjectedFsFault } from "../fs/fsFaultInjection.js";
 import { atomicWriteText, withAtomicFileLock } from "../fs/atomicFileUtils.js";
@@ -61,7 +72,10 @@ function buildCorruptSettingsBackupPath(settingsFile: string): string {
   return `${settingsFile}.corrupt-${timestamp}`;
 }
 
-async function quarantineCorruptSettingsFile(settingsFile: string, error: unknown): Promise<void> {
+async function quarantineCorruptSettingsFile(
+  settingsFile: string,
+  error: unknown,
+): Promise<void> {
   const backupPath = buildCorruptSettingsBackupPath(settingsFile);
   try {
     // 用户手动编辑或远端磁盘异常可能把 setting.json 写成非 JSON（例如 ":wq"）。
@@ -78,10 +92,15 @@ async function quarantineCorruptSettingsFile(settingsFile: string, error: unknow
     ) {
       // 启动时多个服务可能同时读取同一个坏 setting.json。
       // 第一个读取已经完成隔离后，后续读取再 rename 会遇到 ENOENT；这是并发下的预期结果，不应当按备份失败刷错误日志。
-      log("invalid settings json already quarantined by another reader, returning defaults");
+      log(
+        "invalid settings json already quarantined by another reader, returning defaults",
+      );
       return;
     }
-    log("invalid settings json backup failed, returning defaults. error:", renameError);
+    log(
+      "invalid settings json backup failed, returning defaults. error:",
+      renameError,
+    );
   }
 }
 
@@ -90,7 +109,8 @@ function delay(ms: number): Promise<void> {
 }
 
 function shouldPersistSettingsMigrations(rawValue: unknown): boolean {
-  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) return false;
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue))
+    return false;
   const raw = rawValue as Record<string, unknown>;
   return (
     // 原因：只在内存迁移仍会把磁盘上的 3 留给回滚客户端；必须走现有写锁落盘。
@@ -108,7 +128,9 @@ interface ReadSettingsResult {
   needsMigrationPersist: boolean;
 }
 
-async function readSettingsWithMetaAt(settingsFile: string): Promise<ReadSettingsResult> {
+async function readSettingsWithMetaAt(
+  settingsFile: string,
+): Promise<ReadSettingsResult> {
   try {
     // settingService.get() 会被 UI 和远程会话高频调用。
     // 之前每次读取都把完整配置写入生产日志，导致日志暴涨且暴露路径/配置细节；普通读取只保留开发态 debug。
@@ -121,7 +143,11 @@ async function readSettingsWithMetaAt(settingsFile: string): Promise<ReadSetting
       let lastParseError: unknown = parseError;
       // setting.json 可能正被另一次 update 覆盖写入，读者会短暂读到半截 JSON。
       // 先做短重试，只有连续失败才按坏文件隔离，避免把正常会话配置误清成默认值。
-      for (let retryAttempt = 1; retryAttempt <= SETTINGS_PARSE_RETRY_COUNT; retryAttempt += 1) {
+      for (
+        let retryAttempt = 1;
+        retryAttempt <= SETTINGS_PARSE_RETRY_COUNT;
+        retryAttempt += 1
+      ) {
         await delay(SETTINGS_PARSE_RETRY_DELAY_MS);
         try {
           rawValue = JSON.parse(await readFile(settingsFile, "utf-8"));
@@ -138,7 +164,9 @@ async function readSettingsWithMetaAt(settingsFile: string): Promise<ReadSetting
         };
       }
     }
-    const result = appSettingsSchema.safeParse(migrateLegacyAccountConnectionSettings(rawValue));
+    const result = appSettingsSchema.safeParse(
+      migrateLegacyAccountConnectionSettings(rawValue),
+    );
     if (!result.success) {
       log(
         "read failed schema validation, returning defaults. error:",
@@ -194,7 +222,10 @@ async function writeSettingsAt(
   const persisted = { ...rollbackFields, ...settings };
   // 旧 Team 尚待 OAuth 补组织时，schema 的默认 {} 不是用户的新选择。
   // 普通偏好保存必须保留新字段缺席；只有迁移提交或用户显式选连接才结束旧导入。
-  if (!commitAccountSelection && readIncompleteLegacyTeamConnections(raw).length > 0) {
+  if (
+    !commitAccountSelection &&
+    readIncompleteLegacyTeamConnections(raw).length > 0
+  ) {
     delete persisted.providerFamilyConnectionSelections;
   }
   await atomicWriteText(settingsFile, JSON.stringify(persisted, null, 2), {
@@ -220,7 +251,12 @@ export function createSettingService(): ISettingService {
  * 不允许再出现第二处手拼设置文件路径。
  */
 export function resolveSettingsFilePath(): string {
-  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "v2", "setting.json");
+  return join(
+    resolveUserHomeDir(),
+    ZCODE_DATA_DIR_SEGMENT,
+    "v2",
+    "setting.json",
+  );
 }
 
 /** Host 私有迁移入口，不加入 Setting RPC；普通 get/update 从不等待 OAuth 查询。 */
@@ -230,12 +266,30 @@ export function createSettingServiceWithMigrations(): {
     reader: (settings: AppSettings) => Promise<WorkspaceSettingsProjection>,
   ) => void;
   prepareLegacyAccountConnections: (
-    resolveOrganization: (connection: LegacyTeamConnection) => Promise<string | null>,
+    resolveOrganization: (
+      connection: LegacyTeamConnection,
+    ) => Promise<string | null>,
   ) => Promise<readonly ProviderFamilyDomain[]>;
 } {
   // 原因：每次 IO 动态读 HOME 会让旧异步投影写进后来实例的目录。
   // 在实例创建时取值，既支持测试/Host 注入，也让读取、文件锁与替换始终同源。
+  // kcode 身份：settingsFile 经 resolveSettingsFilePath 解析（.kcode/.zcode 随 flavor），
+  // 不随上游同步回退到硬编码 .zcode。
   const settingsFile = resolveSettingsFilePath();
+  // 个性化指令文件与 settingsFile 同理：实例创建时取值，读取与写入始终同源。
+  const userInstructionsFile = getAgentUserInstructionsFilePath();
+  // 修复原因（评审 CR-01）：atomicWriteText 只保证单次替换完整，不保证多次保存的提交顺序；
+  // 慢 IO 下旧写的 rename 可能晚于新写落地，用旧内容覆盖已保存的新内容。个性化指令的
+  // 写入必须进程内 FIFO 排队（组件按草稿新旧顺序入队，队尾即最新内容），跨实例写入由
+  // 文件锁再兜一层；读取先排空队列，避免保存后立即重开读到旧内容。
+  let userInstructionsWriteQueue: Promise<unknown> = Promise.resolve();
+  const enqueueUserInstructionsWrite = <T>(
+    write: () => Promise<T>,
+  ): Promise<T> => {
+    const queued = userInstructionsWriteQueue.then(write, write);
+    userInstructionsWriteQueue = queued.catch(() => {});
+    return queued;
+  };
   const getSettingsFile = () => settingsFile;
   const getSettingsDir = () => dirname(settingsFile);
   const readSettingsWithMeta = () => readSettingsWithMetaAt(settingsFile);
@@ -246,19 +300,33 @@ export function createSettingServiceWithMigrations(): {
     enterCommitPhase?: () => void,
     commitAccountSelection?: boolean,
   ) =>
-    writeSettingsAt(settingsFile, settings, shouldCommit, enterCommitPhase, commitAccountSelection);
+    writeSettingsAt(
+      settingsFile,
+      settings,
+      shouldCommit,
+      enterCommitPhase,
+      commitAccountSelection,
+    );
   let updateQueue = Promise.resolve();
   let writeQueueGeneration = 0;
   let workspaceProjection:
     | ((settings: AppSettings) => Promise<WorkspaceSettingsProjection>)
     | undefined;
-  const projectSettings = async (settings: AppSettings): Promise<AppSettings> =>
+  const projectSettings = async (
+    settings: AppSettings,
+  ): Promise<AppSettings> =>
     workspaceProjection
-      ? appSettingsSchema.parse({ ...settings, ...(await workspaceProjection(settings)) })
+      ? appSettingsSchema.parse({
+          ...settings,
+          ...(await workspaceProjection(settings)),
+        })
       : settings;
 
   const enqueueSettingsWrite = async (
-    runUpdate: (shouldCommit: () => boolean, enterCommitPhase: () => void) => Promise<void>,
+    runUpdate: (
+      shouldCommit: () => boolean,
+      enterCommitPhase: () => void,
+    ) => Promise<void>,
   ) => {
     const runCurrentUpdate = async () => {
       const currentGeneration = ++writeQueueGeneration;
@@ -317,12 +385,23 @@ export function createSettingServiceWithMigrations(): {
       return readSettings();
     },
 
-    async update(patch: Partial<AppSettings>, expectedAccountSettings): Promise<void> {
-      const runUpdate = async (shouldCommit: () => boolean, enterCommitPhase: () => void) => {
-        const validatedPatch = appSettingsPatchSchema.parse(normalizeSettingsPatch(patch));
+    async update(
+      patch: Partial<AppSettings>,
+      expectedAccountSettings,
+    ): Promise<void> {
+      const runUpdate = async (
+        shouldCommit: () => boolean,
+        enterCommitPhase: () => void,
+      ) => {
+        const validatedPatch = appSettingsPatchSchema.parse(
+          normalizeSettingsPatch(patch),
+        );
         const current = await readSettings();
         // 原因：完整连接映射来自读改写快照；任一无版本写入者都能绕过其它窗口的 CAS。
-        const writesConnections = Object.hasOwn(patch, "providerFamilyConnectionSelections");
+        const writesConnections = Object.hasOwn(
+          patch,
+          "providerFamilyConnectionSelections",
+        );
         if (
           writesConnections &&
           expectedAccountSettings?.providerFamilyDomainUpdatedAt === undefined
@@ -331,7 +410,9 @@ export function createSettingServiceWithMigrations(): {
         }
         if (expectedAccountSettings) {
           // 账号查询期间用户可能已手动切换。必须在同一写队列内校验，不能靠调用方先读再写。
-          const expected = appSettingsPatchSchema.parse(expectedAccountSettings);
+          const expected = appSettingsPatchSchema.parse(
+            expectedAccountSettings,
+          );
           if (
             current.providerFamilyDomain !== expected.providerFamilyDomain ||
             // 原因：另一窗口重新选择相同身份时映射值不变；旧回滚仍须按操作版本拒绝。
@@ -362,7 +443,10 @@ export function createSettingServiceWithMigrations(): {
         // 后写入的补丁会把前一个字段整块抹掉，导致下次启动恢复不到会话。
         // 这里把写入串行化，让每个补丁都基于上一次真正落盘后的最新状态继续合并。
         if (merged.recentProjects) {
-          merged.recentProjects = [...new Set(merged.recentProjects)].slice(0, MAX_RECENT_PROJECTS);
+          merged.recentProjects = [...new Set(merged.recentProjects)].slice(
+            0,
+            MAX_RECENT_PROJECTS,
+          );
         }
 
         await writeSettings(
@@ -383,7 +467,9 @@ export function createSettingServiceWithMigrations(): {
       if (!validation.ok) {
         // Windows 安装目录由安装器/自动更新管理，把 .zcode/v2 放进去可能在升级时被覆盖。
         // 迁移前在 service 层拦截，避免 UI 入口变化或 RPC 调用绕过前端判断。
-        const error = new Error(`${validation.code}: ${validation.forbiddenDir}`);
+        const error = new Error(
+          `${validation.code}: ${validation.forbiddenDir}`,
+        );
         (error as Error & { code: string }).code = validation.code;
         throw error;
       }
@@ -396,6 +482,63 @@ export function createSettingServiceWithMigrations(): {
 
       await this.update({ dataBaseDir: newDir });
     },
+
+    async getUserInstructions(): Promise<{
+      content: string;
+      filePath: string;
+    }> {
+      // 读取等待已接纳的写入排空：保存后立即重开分区时不能把旧内容当基线。
+      await userInstructionsWriteQueue;
+      try {
+        const content = await readFile(userInstructionsFile, "utf8");
+        return { content, filePath: userInstructionsFile };
+      } catch (error) {
+        if (
+          error &&
+          typeof error === "object" &&
+          "code" in error &&
+          (error as { code?: string }).code === "ENOENT"
+        ) {
+          // 文件不存在等价于未配置个性化指令，不算错误。
+          return { content: "", filePath: userInstructionsFile };
+        }
+        throw error;
+      }
+    },
+
+    async saveUserInstructions(content: string): Promise<{ filePath: string }> {
+      // 最终校验用与 CLI 读取一致的共享常量，防止其他 RPC 调用方绕过 UI 写入超限内容
+      // （Agent 只读前 100KB，超限保存会让用户误以为全部生效）。
+      if (Buffer.byteLength(content, "utf8") > USER_INSTRUCTIONS_MAX_BYTES) {
+        const error = new Error(
+          `user instructions exceed ${USER_INSTRUCTIONS_MAX_BYTES} bytes`,
+        );
+        (error as Error & { code: string }).code =
+          USER_INSTRUCTIONS_TOO_LARGE_ERROR_CODE;
+        throw error;
+      }
+      await enqueueUserInstructionsWrite(async () => {
+        // 修复原因（评审 CR-01 回归）：acquireFileLock 以不带 recursive 的 mkdir(lockFile)
+        // 创建锁文件，父目录 ~/.zcode 不存在时会 ENOENT 抛出——建目录必须发生在取锁之前，
+        // 否则首次保存（目录尚不存在）永远失败。
+        maybeThrowInjectedFsFault({
+          operation: "mkdir",
+          path: dirname(userInstructionsFile),
+        });
+        await mkdir(dirname(userInstructionsFile), { recursive: true });
+        await withAtomicFileLock(userInstructionsFile, async () => {
+          maybeThrowInjectedFsFault({
+            operation: "writeFile",
+            path: userInstructionsFile,
+          });
+          // 修复原因（评审 CR-01 权限）：atomicWriteText 的临时文件不带 mode，rename 换 inode
+          // 后会把既有 0600 文件放宽为 umask 默认（常见 0644），同机其他账号可读。
+          // 私有写入固定 0600，只会收紧不会放宽权限。
+          await atomicWritePrivateTextFile(userInstructionsFile, content);
+        });
+      });
+      return { filePath: userInstructionsFile };
+    },
   };
 
   let inFlight: Promise<readonly ProviderFamilyDomain[]> | null = null;
@@ -403,7 +546,8 @@ export function createSettingServiceWithMigrations(): {
   return {
     service,
     setWorkspaceProjection(reader) {
-      if (workspaceProjection) throw new Error("settings.workspace-projection-already-bound");
+      if (workspaceProjection)
+        throw new Error("settings.workspace-projection-already-bound");
       workspaceProjection = reader;
     },
     prepareLegacyAccountConnections(resolveOrganization) {
@@ -412,18 +556,22 @@ export function createSettingServiceWithMigrations(): {
       if (inFlight) return inFlight;
       const run = async (): Promise<readonly ProviderFamilyDomain[]> => {
         await service.get();
-        const original = await readLegacyAccountConnectionSettingsFile(getSettingsFile());
+        const original =
+          await readLegacyAccountConnectionSettingsFile(getSettingsFile());
         const incomplete = readIncompleteLegacyTeamConnections(original);
         if (incomplete.length === 0) return [];
         // 网络在写队列外：代理设置读取及用户操作均可继续，不形成 get -> HTTP -> get 循环。
         const resolved = await Promise.all(
           incomplete.map(async (connection) => ({
             ...connection,
-            organizationId: await resolveOrganization(connection).catch(() => null),
+            organizationId: await resolveOrganization(connection).catch(
+              () => null,
+            ),
           })),
         );
         await enqueueSettingsWrite(async (shouldCommit, enterCommitPhase) => {
-          const latest = await readLegacyAccountConnectionSettingsFile(getSettingsFile());
+          const latest =
+            await readLegacyAccountConnectionSettingsFile(getSettingsFile());
           // 只核对迁移输入，不因普通语言/窗口设置变化丢失合法结果，也不覆盖用户新账号意图。
           if (
             Object.hasOwn(latest, "providerFamilyConnectionSelections") ||
@@ -433,11 +581,18 @@ export function createSettingServiceWithMigrations(): {
           )
             return;
           if (resolved.some((entry) => !entry.organizationId?.trim())) return;
-          const migrated = appSettingsSchema.parse(migrateLegacyAccountConnectionSettings(latest));
+          const migrated = appSettingsSchema.parse(
+            migrateLegacyAccountConnectionSettings(latest),
+          );
           const selections: ProviderFamilyConnectionSelectionSettings = {
             ...migrated.providerFamilyConnectionSelections,
           };
-          for (const { family, productId, projectId, organizationId } of resolved) {
+          for (const {
+            family,
+            productId,
+            projectId,
+            organizationId,
+          } of resolved) {
             selections[family] = {
               kind: "team-coding-plan",
               productId,
@@ -446,7 +601,10 @@ export function createSettingServiceWithMigrations(): {
             };
           }
           await writeSettings(
-            await projectSettings({ ...migrated, providerFamilyConnectionSelections: selections }),
+            await projectSettings({
+              ...migrated,
+              providerFamilyConnectionSelections: selections,
+            }),
             shouldCommit,
             enterCommitPhase,
             true,

@@ -29,7 +29,10 @@ export interface WebRemoteControlDeviceTransportOptions {
   deviceMid: string;
   meta: WebRemoteControlRelayV2Meta;
   getToken(signal: AbortSignal): Promise<string>;
-  resolveDeviceSid(signal: AbortSignal, forceRegistration: boolean): Promise<string>;
+  resolveDeviceSid(
+    signal: AbortSignal,
+    forceRegistration: boolean,
+  ): Promise<string>;
   logger: {
     info: (...args: unknown[]) => void;
     warn: (...args: unknown[]) => void;
@@ -38,6 +41,8 @@ export interface WebRemoteControlDeviceTransportOptions {
   onStateChange(state: WebRemoteControlDeviceTransportState): void;
   /** terminalId 来自 relay 附加的 from_terminal_id；官方 relay 无该字段（undefined）。 */
   onPayload(payload: WebRemoteControlAppPayload, terminalId?: string): void;
+  /** schema 不认识的 payload；由上层决定是否回 unsupported-action，transport 不理解业务语义。 */
+  onUnrecognizedPayload?(payload: unknown): void;
   onRawTransportPayload?(payload: unknown, terminalId?: string): boolean;
   onRawTransportFault?(reasonCode: string): void;
   onError(error: Error): void;

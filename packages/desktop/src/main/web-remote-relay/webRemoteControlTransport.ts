@@ -50,12 +50,18 @@ export class WebRemoteControlDeviceTransport {
   private handshakeTimer?: ReturnType<typeof setTimeout>;
   private readonly retry = new WebRemoteControlV2RetryPolicy();
   private readonly heartbeat = new WebRemoteControlV2Heartbeat(
-    () => this.send({ type: "pair_status_query", client_ts: Math.floor(Date.now() / 1000) }),
+    () =>
+      this.send({
+        type: "pair_status_query",
+        client_ts: Math.floor(Date.now() / 1000),
+      }),
     () => this.scheduleReconnect(),
   );
   private readonly serializer = new WebRemoteControlRelayPayloadSerializer();
 
-  constructor(private readonly options: WebRemoteControlDeviceTransportOptions) {}
+  constructor(
+    private readonly options: WebRemoteControlDeviceTransportOptions,
+  ) {}
 
   start(): void {
     if (this.controller) return;
@@ -72,7 +78,10 @@ export class WebRemoteControlDeviceTransport {
     this.setState("idle");
   }
 
-  measurePayloadBytes(payload: WebRemoteControlAppPayload, targetTerminalId?: string): number {
+  measurePayloadBytes(
+    payload: WebRemoteControlAppPayload,
+    targetTerminalId?: string,
+  ): number {
     return this.serializer.prepare(
       payload,
       Math.floor(Date.now() / 1000),
@@ -117,7 +126,10 @@ export class WebRemoteControlDeviceTransport {
     try {
       // 首次注册和失效后的重注册共用连接尝试，网络失败均由此处退避，不能在 manager 裸 await。
       if (!this.deviceSid || this.registrationPending) {
-        const sid = await this.options.resolveDeviceSid(signal, this.registrationPending);
+        const sid = await this.options.resolveDeviceSid(
+          signal,
+          this.registrationPending,
+        );
         if (signal.aborted || generation !== this.generation) return;
         this.deviceSid = sid;
         this.registrationPending = false;
@@ -150,8 +162,13 @@ export class WebRemoteControlDeviceTransport {
         const byteLength = Array.isArray(raw)
           ? raw.reduce((sum, part) => sum + part.byteLength, 0)
           : raw.byteLength;
-        if (byteLength > WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxPhysicalFrameBytes) {
-          this.options.onRawTransportFault?.("remote.rpcFrame.envelopeTooLarge");
+        if (
+          byteLength >
+          WEB_REMOTE_CONTROL_RPC_TRANSPORT_LIMITS.maxPhysicalFrameBytes
+        ) {
+          this.options.onRawTransportFault?.(
+            "remote.rpcFrame.envelopeTooLarge",
+          );
           return;
         }
         let value: unknown;
@@ -171,9 +188,13 @@ export class WebRemoteControlDeviceTransport {
       socket.on("close", () => {
         if (socket !== this.socket) return;
         if (this.state !== "paired") {
-          noteWebRemoteRelayConnectAttempt(Date.now() - this.connectStartedAt, false, {
-            attempt: this.connectAttempt,
-          });
+          noteWebRemoteRelayConnectAttempt(
+            Date.now() - this.connectStartedAt,
+            false,
+            {
+              attempt: this.connectAttempt,
+            },
+          );
         }
         this.scheduleReconnect();
       });
@@ -183,7 +204,9 @@ export class WebRemoteControlDeviceTransport {
     }
   }
 
-  private async handleMessage(message: WebRemoteControlRelayV2IncomingMessage): Promise<void> {
+  private async handleMessage(
+    message: WebRemoteControlRelayV2IncomingMessage,
+  ): Promise<void> {
     if (message.type === "error") {
       if (message.code === "KICKED") {
         const delay = this.retry.kickedDelay();
@@ -200,15 +223,24 @@ export class WebRemoteControlDeviceTransport {
         // 注册遇到网络错误时必须重试注册，不能带已失效 SID 再次握手。
         this.registrationPending = true;
         this.scheduleReconnect(0);
-      } else if (message.code === "INTERNAL" || message.code === "DEVICE_OFFLINE") {
+      } else if (
+        message.code === "INTERNAL" ||
+        message.code === "DEVICE_OFFLINE"
+      ) {
         this.scheduleReconnect();
       } else {
-        this.handleConnectionError(new WebRemoteControlV2ConnectionError("relay-unavailable"));
+        this.handleConnectionError(
+          new WebRemoteControlV2ConnectionError("relay-unavailable"),
+        );
       }
       return;
     }
     if (message.type === "auth_ack") {
-      if (this.state !== "authenticating" || message.device_sid !== this.deviceSid) return;
+      if (
+        this.state !== "authenticating" ||
+        message.device_sid !== this.deviceSid
+      )
+        return;
       clearTimeout(this.handshakeTimer);
       this.authenticated = true;
       this.retry.acknowledged();
@@ -228,7 +260,10 @@ export class WebRemoteControlDeviceTransport {
         this.pairedGeneration = this.generation;
         if (previousGeneration)
           this.options.onSendReady?.({
-            kind: previousGeneration === this.generation ? "same-socket" : "reconnected-socket",
+            kind:
+              previousGeneration === this.generation
+                ? "same-socket"
+                : "reconnected-socket",
           });
       }
     } else if (message.type === "data" && this.state === "paired") {
@@ -237,12 +272,14 @@ export class WebRemoteControlDeviceTransport {
         value &&
         typeof value === "object" &&
         "zcode_type" in value &&
-        (value.zcode_type === "rpc-frame" || value.zcode_type === "rpc-frame-ack") &&
+        (value.zcode_type === "rpc-frame" ||
+          value.zcode_type === "rpc-frame-ack") &&
         this.options.onRawTransportPayload?.(value, message.from_terminal_id)
       )
         return;
       const payload = parseWebRemoteControlAppPayload(value);
       if (payload) this.options.onPayload(payload, message.from_terminal_id);
+      else this.options.onUnrecognizedPayload?.(value);
     }
   }
 
@@ -271,7 +308,10 @@ export class WebRemoteControlDeviceTransport {
   }
 
   private handleConnectionError(error: unknown): void {
-    if (!(error instanceof WebRemoteControlV2ConnectionError) || error.retryable) {
+    if (
+      !(error instanceof WebRemoteControlV2ConnectionError) ||
+      error.retryable
+    ) {
       this.options.logger.warn("[web-remote-control] V2 connection retry");
       this.scheduleReconnect();
       return;
@@ -283,16 +323,21 @@ export class WebRemoteControlDeviceTransport {
   }
 
   private send(message: WebRemoteControlRelayV2OutgoingMessage): void {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+    if (this.socket?.readyState === WebSocket.OPEN)
+      this.socket.send(JSON.stringify(message));
   }
 
   private setState(state: WebRemoteControlDeviceTransportState): void {
     if (this.state === state) return;
     this.state = state;
     if (state === "paired") {
-      noteWebRemoteRelayConnectAttempt(Date.now() - this.connectStartedAt, true, {
-        attempt: this.connectAttempt,
-      });
+      noteWebRemoteRelayConnectAttempt(
+        Date.now() - this.connectStartedAt,
+        true,
+        {
+          attempt: this.connectAttempt,
+        },
+      );
     }
     this.options.logger.info("[web-remote-control] V2 device state", { state });
     this.options.onStateChange(state);

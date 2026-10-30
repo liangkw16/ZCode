@@ -5,7 +5,10 @@ import type {
   WebRemoteControlDeviceGroup,
 } from "#src/web-remote-control/contract.js";
 import type { WebRemoteControlRelayV2Device } from "@zcode/shared/web-remote-relay";
-import { parseWebRemoteControlExternalQrParams } from "@zcode/shared";
+import {
+  parseWebRemoteControlExternalQrParams,
+  type WebRemoteControlFailure,
+} from "@zcode/shared";
 import { WebRemoteControlV2ConnectionError } from "@zcode/shared/web-remote-relay";
 import type { WebOAuthProviderId } from "#src/auth/browserOAuthCredentialRepo.js";
 import { groupWebRemoteControlDevices } from "#src/web-remote-control/domain/webRemoteControlDeviceGroups.js";
@@ -49,6 +52,10 @@ function resolveAutoConnectSid(
     groups.find((group) => group.deviceMid === mid)?.onlineConnections ?? [];
   return connections.length === 1 ? connections[0]?.device_sid : undefined;
 }
+
+/** 这两类失败说明当前 SID 已接不上桌面，可按 MID 接续；其余失败（含 session-conflict）保持原行为。 */
+const LOST_TARGET_FAILURES: ReadonlySet<WebRemoteControlFailure["reason"]> =
+  new Set(["device-not-owned", "desktop-disconnected"]);
 
 /** 只负责连接前的 admission；配对后的 workspace/恢复仍归既有 bootstrap。 */
 export class WebRemoteControlEntry {
@@ -220,16 +227,24 @@ export class WebRemoteControlEntry {
             .find((item) => item.device_sid === sid)
         : this.lastOnlineDevices?.find((item) => item.device_sid === sid)
       : undefined;
-    if (!device) {
-      // Bug 原因：列表处于 loading/error 或 reset 重建窗口（devices 为空）时旧逻辑直接
-      // return，点击无任何反馈；设备列表刷新一旦偶发失败（限流/网络抖动），之后每次
-      // 点击都无效，页面看似正常却进不去（IAB 真机验收实测复现）。仅在数据不可信或
-      // 为空的窗口自动刷新重试一次；可信数据里确实离线的 SID 保持静默（旧语义）。
-      if (!viaRefresh && (!trustworthy || !groups.length)) {
-        void this.refreshDevices().then(() => this.selectDevice(sid, true));
-      }
+    if (device) {
+      this.admit(device, true);
       return;
     }
+    // Bug 原因：列表处于 loading/error 或 reset 重建窗口（devices 为空）时旧逻辑直接
+    // return，点击无任何反馈；设备列表刷新一旦偶发失败（限流/网络抖动），之后每次
+    // 点击都无效，页面看似正常却进不去（IAB 真机验收实测复现）。仅在数据不可信或
+    // 为空的窗口自动刷新重试一次；可信数据里确实离线的 SID 保持静默（旧语义）。
+    if (!viaRefresh && (!trustworthy || !groups.length)) {
+      void this.refreshDevices().then(() => this.selectDevice(sid, true));
+    }
+  }
+
+  /** 手动选择、最近设备与旧 SID 接续共用的 admission：回写 URL 与最近设备后走既有建连路径。 */
+  private admit(
+    device: WebRemoteControlRelayV2Device,
+    canResolveLostTarget: boolean,
+  ): void {
     const url = new URL(this.options.getHref());
     url.searchParams.set("sid", device.device_sid);
     url.searchParams.set("mid", device.device_mid);
@@ -238,12 +253,63 @@ export class WebRemoteControlEntry {
     else url.searchParams.delete("name");
     this.options.replaceHref(url.href);
     this.rememberDevice(device.device_sid, device.device_mid);
-    this.connect({
-      deviceSid: device.device_sid,
-      deviceMid: device.device_mid,
-      deviceName: name || undefined,
-      appVersion: url.searchParams.get("app_version") || undefined,
-    });
+    this.connect(
+      {
+        deviceSid: device.device_sid,
+        deviceMid: device.device_mid,
+        deviceName: name || undefined,
+        appVersion: url.searchParams.get("app_version") || undefined,
+      },
+      canResolveLostTarget,
+    );
+  }
+
+  /**
+   * Bugfix: 桌面收到 AUTH_FAILED 后会重新注册，同一台电脑（MID）换了新 SID；旧链接或已配对页面仍带旧 SID，
+   * 旧实现只显示失败页，用户要手动“选择其他设备”或重新扫码。这里复用无 SID 入口的最近设备落点规则，
+   * 用当前账号设备列表查一次：同 MID 恰好一个其他在线 SID 才接续，其余情况仍显示原失败页。
+   */
+  private async resolveLostTarget(
+    params: WebRemoteControlEntryConnection["params"],
+    failure: WebRemoteControlFailure,
+  ): Promise<void> {
+    this.reset();
+    const { signal } = this.scope;
+    const jwt = this.options.auth.getZCodeJwtToken();
+    if (!jwt) return this.switchAccount();
+    try {
+      const devices = await this.options.devices(jwt, signal);
+      if (signal.aborted) return;
+      // 与列表一致：账号变更后的响应不能作为接续依据。
+      if (this.options.auth.getZCodeJwtToken() !== jwt) return this.start();
+      const groups = groupWebRemoteControlDevices(
+        devices,
+        this.options.locale,
+        readKnownDevices(this.options.storage),
+      );
+      const sid = resolveAutoConnectSid(
+        devices,
+        groups,
+        params.deviceSid,
+        params.deviceMid ?? null,
+      );
+      const device =
+        sid && sid !== params.deviceSid
+          ? groups
+              .flatMap((group) => group.onlineConnections)
+              .find((item) => item.device_sid === sid)
+          : undefined;
+      if (device) return this.admit(device, false);
+    } catch (error) {
+      if (signal.aborted) return;
+      if (this.options.auth.getZCodeJwtToken() !== jwt) return this.start();
+      if (
+        error instanceof WebRemoteControlV2ConnectionError &&
+        error.reason === "auth-required"
+      )
+        return this.switchAccount();
+    }
+    this.options.onView({ kind: "failure", failure });
   }
 
   async chooseOtherDevice(): Promise<void> {
@@ -264,27 +330,49 @@ export class WebRemoteControlEntry {
     }
   }
 
-  private connect(params: WebRemoteControlEntryConnection["params"]): void {
+  private connect(
+    params: WebRemoteControlEntryConnection["params"],
+    canResolveLostTarget = true,
+  ): void {
     this.reset();
     const { signal } = this.scope;
+    // 接续出的连接配对前不能再接续，避免新目标立即失败时在 SID 间循环；配对成功后恢复。
+    let resolveLostTarget = canResolveLostTarget;
     this.options.connect({
       params,
       signal,
-      getToken: (tokenSignal) => {
+      getToken: async (tokenSignal) => {
         const jwt = this.options.auth.getZCodeJwtToken();
-        if (!jwt)
-          return Promise.reject(
-            new WebRemoteControlV2ConnectionError("auth-required"),
-          );
-        return this.options.token(jwt, tokenSignal);
+        if (!jwt) throw new WebRemoteControlV2ConnectionError("auth-required");
+        try {
+          return await this.options.token(jwt, tokenSignal);
+        } catch (error) {
+          // Bugfix: 401 只否定这次请求用的 JWT。请求在途时其他标签页写入了新 JWT，旧实现仍按 401
+          // 登出，把新登录一起清掉并回登录页；这里改为可重试，transport 下一轮读取新 JWT 重新申请。
+          const current = this.options.auth.getZCodeJwtToken();
+          if (
+            error instanceof WebRemoteControlV2ConnectionError &&
+            error.reason === "auth-required" &&
+            current &&
+            current !== jwt
+          )
+            throw new WebRemoteControlV2ConnectionError(
+              "relay-unavailable",
+              true,
+            );
+          throw error;
+        }
       },
       onPaired: () => {
-        if (!signal.aborted)
-          this.rememberDevice(params.deviceSid, params.deviceMid);
+        if (signal.aborted) return;
+        resolveLostTarget = true;
+        this.rememberDevice(params.deviceSid, params.deviceMid);
       },
       onFailure: (failure) => {
         if (signal.aborted) return;
         if (failure.reason === "auth-required") void this.switchAccount();
+        else if (resolveLostTarget && LOST_TARGET_FAILURES.has(failure.reason))
+          void this.resolveLostTarget(params, failure);
         else this.options.onView({ kind: "failure", failure });
       },
     });

@@ -213,7 +213,16 @@ export function listArtifactReferrers(
     .iterate(ARTIFACT_URI_SCHEME) as Iterable<{ session_id: SessionId; data: string }>;
   for (const row of rows) {
     for (const match of row.data.matchAll(ARTIFACT_URI_SESSION)) {
-      const target = decodeURIComponent(match[1]!) as SessionId;
+      // Bug 修复（上游同步审查 2026-10-30）：part 内容是任意文本，畸形 URI（如
+      // `zcode-artifact://%/file.png`）在判断是否属于删除目标之前 decode 会抛
+      // URIError，且本查询是全表扫描——任何一个无关会话里的畸形文本都会阻断整批
+      // 删除。解码失败的匹配按无关引用跳过。
+      let target: string;
+      try {
+        target = decodeURIComponent(match[1]!);
+      } catch {
+        continue;
+      }
       if (target === row.session_id || !targets.has(target)) continue;
       referrers.set(target, (referrers.get(target) ?? new Set()).add(row.session_id));
     }

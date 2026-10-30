@@ -259,6 +259,12 @@ describe("virtual project CLI session facts", () => {
     const referrers = await store.listArtifactReferrers?.([source.session.id, other]);
     expect(referrers?.get(source.session.id)).toEqual([fork]);
     expect(referrers?.has(other)).toBe(false);
+
+    // 上游同步审查 P2 回归：无关会话 part 里的畸形 artifact URI（非法百分号转义）
+    // 不能阻断整批删除——解码失败按无关引用跳过。
+    await refer(other, "zcode-artifact://%/file.png");
+    const afterMalformed = await store.listArtifactReferrers?.([source.session.id]);
+    expect(afterMalformed?.get(source.session.id)).toEqual([fork]);
     store.close();
   });
 

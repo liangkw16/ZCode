@@ -85,7 +85,11 @@
 - 只在本机 Host 执行；路由到远程 Host 报 `project.data-local-only`，legacy 单 root 只读。
 - `deleteProjectData` 只接受**已软删除**的项目（否则 `project.data-requires-removed`），保证不会删到仍在使用的项目。
 - 会话按 cwd 分组：该 cwd 已有运行中的 Agent 进程时交给该进程执行（它持有会话运行态，能判断运行中并释放已加载的会话）；否则交给不寄居真实项目的管理面进程（与全局工作流、插件管理同一进程）。测量只读，与全局工作流同一载体选择：本机已有活跃 Agent 进程时用它，否则用管理面进程。
-- CLI 删除：运行中的会话（已加载且有在途 turn）保留并返回 `kept`（`reason: "running"`）。附件仍被本次不删除的未删除会话引用的会话树整棵保留（`reason: "referenced"`）：fork、回退与工作流转录按值复制 part，`zcode-artifact://<源会话>/…` 仍指向源会话的附件目录，删掉会让存活的 fork 读不到图片与工具产物；引用按 part 内容中的 artifact URI 判定（覆盖所有复制路径，不依赖 fork 谱系），保留一棵会让引用它的树也变成「本次不删除」，按不动点迭代。已加载的空闲会话按 `deleteSession` 的释放顺序关闭，但**不**发布 `session.removed`（只释放运行态）；随后删除文件，再在一个事务里删除会话行（`pragma foreign_keys = on`，级联 message/part/usage 等；无外键的 `input_history`、`dwf_run`、`workflow_run` 显式删除），最后才从 sessions-index 移除。文件删除失败不删行，记入 `failed`，sessions-index 与 Host 镜像保持原样，下次重试仍能找到。
+- CLI 删除（2026-10-30 修正：批次内运行态与引用关系都按**删除进行时**判定，不再信任批次开始时的快照）：
+  - **运行态逐树复查**：每棵树在真正删除前复查 residency；执行期间（如删除前一棵树文件时）被命令准入变为 busy 的树整棵保留并返回 `kept`（`reason: "running"`），不删文件、不删行、不 release（上游同步审查 P1：批次头一次性计算会让运行中会话被抽掉持久数据）。
+  - **引用方先删、失败阻断**：按轮次处理，每轮重取引用快照（引用查询只返回仍存活的会话）；引用方属于本轮待删集合的树推迟到后续轮（引用方先删），引用方已随本批删除的自然解除；引用方仍存活且不在待删集合（批外会话，或本批中删除失败/被保留的树）时，被引用树整棵保留（`reason: "referenced"`），附件不能先于引用方消失（上游同步审查 P2：部分失败会把可恢复会话的附件引用变成永久悬挂）。
+  - **畸形 URI 忽略**：part 内容是任意文本，artifact URI 解码失败按无关引用跳过，不得阻断其他会话的删除（上游同步审查 P2）。
+  - fork、回退与工作流转录按值复制 part，fork、回退与工作流转录按值复制 part，`zcode-artifact://<源会话>/…` 仍指向源会话的附件目录，删掉会让存活的 fork 读不到图片与工具产物；引用按 part 内容中的 artifact URI 判定（覆盖所有复制路径，不依赖 fork 谱系），保留一棵会让引用它的树也变成「本次不删除」，按不动点迭代。已加载的空闲会话按 `deleteSession` 的释放顺序关闭，但**不**发布 `session.removed`（只释放运行态）；随后删除文件，再在一个事务里删除会话行（`pragma foreign_keys = on`，级联 message/part/usage 等；无外键的 `input_history`、`dwf_run`、`workflow_run` 显式删除），最后才从 sessions-index 移除。文件删除失败不删行，记入 `failed`，sessions-index 与 Host 镜像保持原样，下次重试仍能找到。
 - Host 在 CLI 返回后计算目录集合（保留或失败会话的 cwd 不删记忆与检查点），删除目录，再处理已删会话的任务索引行：目录全部删除成功时删除这些行，项目不再被任何任务、自动化、闲时任务引用时删除项目行；有目录删除失败时只把这些行标为 CLI 已删除（`deleted=1, cli_deleted=1`，列表不再显示），项目保持软删除，重试时仍能按这些行找回目录。命令正常返回部分结果，不因保留而抛错（释放量要计入进度）；UI 对 `runningSessions > 0` 记原因 `project.data-session-running`、对 `referencedSessions > 0` 记 `project.data-session-referenced`、对 `failed > 0` 记 `project.data-delete-failed`。
 - 结果以 `state:projects` 广播；sessions-index 的 `session.removed` 迟到时，对已不存在的行是空操作。
 

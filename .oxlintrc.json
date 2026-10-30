@@ -43,7 +43,14 @@
         "src/runtime/methods/steering.ts",
         "src/runtime/methods/turn.ts",
         "src/runtime/methods/turn-model-step.ts",
-        "**/packages/ui/src/remote-connection-flow/index.ts"
+        "**/packages/ui/src/remote-connection-flow/index.ts",
+        // 根目录运行时 oxlint 按 cwd 相对路径匹配；**/ 前缀对零段前缀不稳定，
+        // 补写无前缀形式（同上方 core 包双写）。
+        "packages/ui/src/remote-connection-flow/index.ts",
+        // 上游存量同步服务（841 行）：本仓合并仅保留 kcode 数据目录段与 export 化
+        // 两个函数，不为行数机械拆分远端/本地镜像同步流程。
+        "**/packages/services/src/plugin-sync/pluginSyncService.ts",
+        "packages/services/src/plugin-sync/pluginSyncService.ts"
       ],
       "rules": {
         "max-lines": ["warn", { "max": 800, "skipBlankLines": true, "skipComments": true }]

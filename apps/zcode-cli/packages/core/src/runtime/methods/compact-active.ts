@@ -52,7 +52,7 @@ import {
   readApprovedPlanFileReferenceEntry,
   replaceReadFileStateAfterCompact,
   restorePostCompactFiles,
-  buildRuntimeModeReminderBody,
+  buildRuntimeModeReminderBodyForTask,
   hasFullRuntimeModeReminder,
 } from "../helpers/index.js";
 import type { CompactRecentPreservationPolicy } from "../helpers/index.js";
@@ -291,6 +291,13 @@ async function compactActiveConversationImpl(
   // 修复原因：摘要请求另选工具（只带 ToolSearch 相关工具，或超过 100 个时发空列表）时，
   // tools 段与主循环不同，整个摘要请求不命中主循环的前缀缓存。
   const compactCandidates = options.getContinuationTools?.() ?? this.getTools(compactModel);
+  // kcode 本地语义（10-30 合并取上游工具目录时声明被误删，tsc 增量缓存漏检）：
+  // 摘要请求可能路由到独立摘要模型（跨 provider），会话级 toolSearch 是主模型的能力
+  // 契约，必须按摘要模型能力降级后再交给请求准备入口投影。
+  const compactToolSearchMode = coerceToolSearchModeForModel(
+    this.config.toolSearch?.mode,
+    compactModel,
+  );
   const registry = this.getToolRegistry();
 
   while (true) {
@@ -595,9 +602,15 @@ async function compactActiveConversationImpl(
       // 修复原因：输入附件与 auto/reactive compaction 在同一次循环中，且先于 compaction 收集；
       // 保留段可能已带本次收集的完整提醒，无条件重发会出现两条完整提醒，周期也多算一次。
       // 保留段只有简短提醒时，完整说明已被摘要，仍要重发。
+      // 修复原因：这里曾不区分子会话，子会话 compact 后又收到主会话的五阶段提醒；与轮内收集共用选择逻辑。
       const planModeReminderBody = hasFullRuntimeModeReminder(preservedEntries)
         ? null
-        : buildRuntimeModeReminderBody([], this.getMode(), this.getPlanEnabled());
+        : buildRuntimeModeReminderBodyForTask([], {
+            mode: this.getMode(),
+            planEnabled: this.getPlanEnabled(),
+            taskType: this.config.taskType,
+            tools: compactCandidates,
+          });
       // compaction 附件顺序：文件恢复 → plan 文件 → plan 提醒 → ToolSearch 公告
       // → agent listing → skill 列表 → 环境 → 模型 → 输出风格。
       // 修复原因：agent listing 排在文件恢复之前，顺序错误。

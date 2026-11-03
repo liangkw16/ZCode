@@ -400,8 +400,6 @@ it("coerces session toolSearch modes to the target model capability for auxiliar
   expect(coerceToolSearchModeForModel("off", nonAnthropic)).toBe("off");
   expect(coerceToolSearchModeForModel(undefined, nonAnthropic)).toBe("off");
 });
-||||||| 3c5b2276
-
 
 describe("removal reasons", () => {
   const AMBIENT =

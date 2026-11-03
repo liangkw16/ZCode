@@ -217,9 +217,9 @@ export function listArtifactReferrers(
       // `zcode-artifact://%/file.png`）在判断是否属于删除目标之前 decode 会抛
       // URIError，且本查询是全表扫描——任何一个无关会话里的畸形文本都会阻断整批
       // 删除。解码失败的匹配按无关引用跳过。
-      let target: string;
+      let target: SessionId;
       try {
-        target = decodeURIComponent(match[1]!);
+        target = decodeURIComponent(match[1]!) as SessionId;
       } catch {
         continue;
       }

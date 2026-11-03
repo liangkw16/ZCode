@@ -1,23 +1,12 @@
-<<<<<<< HEAD
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConfigKey, ConfigScope, ConfigScopePriority } from "@zcode/contracts";
 import {
   createConfig,
   createConfigPort,
   mergeConfigs,
-  updateUiLocaleInFileConfig,
-} from "../src/config/index.js";
-||||||| 3c5b2276
-import { describe, expect, it } from "vitest";
-import { createConfig, updateUiLocaleInFileConfig } from "../src/config/index.js";
-=======
-import { describe, expect, it, vi } from "vitest";
-import {
-  createConfig,
   resolveWorkspaceStorageDir,
   updateUiLocaleInFileConfig,
 } from "../src/config/index.js";
->>>>>>> upstream/main
 import { parseEnvConfig } from "../src/config/env-config.adapter.js";
 import {
   addSuppressedBuiltinInFileConfig,

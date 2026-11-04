@@ -146,6 +146,8 @@ const SHELL_TEXT_VARIABLE_PATTERN = new RegExp(
 );
 // 盘符路径（`C:\`）或 UNC 路径（`\\server`）。
 const WINDOWS_PATH_PATTERN = /^(?:[A-Za-z]:\\|\\\\)/u;
+// 文本替换后会被 shell 改写取值的字符：参数展开/命令替换、引号截断、转义、换行。
+const SHELL_UNSAFE_VALUE_PATTERN = /[\$`"'\\\n]/u;
 
 export function expandCustomCommandPrompt(input: {
   args: string;
@@ -231,6 +233,11 @@ function resolveShellTextVariable(
   // 未加引号的 `bash ${CLAUDE_PLUGIN_ROOT}/x.sh` 会变成 `C:Usersdev...`；原来按环境变量展开没有这个问题。
   // Git Bash 在引号内外都认 `C:/...` 和 `//server/share`。
   if (WINDOWS_PATH_PATTERN.test(value)) value = value.replaceAll("\\", "/");
+  // Bug 修复（上游同步审查 2026-11-04）：值按文本替换进命令，含 shell 引号/展开活跃
+  // 字符（$ ` " ' \ 换行）的路径在执行时会被再次展开或截断引号——原环境变量传值没有
+  // 这个问题（参数展开结果不会被 shell 重新扫描）。这类值按"无法安全解析"处理，
+  // 与未知变量同路径整块不转交，避免审批看到的命令与实际执行不一致。
+  if (SHELL_UNSAFE_VALUE_PATTERN.test(value)) return undefined;
   return value || undefined;
 }
 

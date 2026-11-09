@@ -282,6 +282,21 @@ interface WebRemoteControlManagerDependencies {
 const EXTERNAL_RELAY_QR_READY_TIMEOUT_MS = 30_000;
 const MOBILE_DISCONNECT_STATUS_GRACE_MS = 3_000;
 
+/**
+ * 修复原因（2026-11-09 回归）：开机自动恢复期间 relay/EasyTier 可能未就绪，
+ * transport 按设计在后台无限退避重连并在就绪后自愈到 waiting_terminal
+ * （实测超时后 1s/33s 收敛，见 11-05、11-07 日志）。该超时不是终态失败，
+ * 必须与 auth-required/relay-unavailable 等终态错误区分，否则恢复路径把
+ * "收敛中"误判为失败并释放 claim，而半启动 runtime 仍占用窗口，恢复永久失去
+ * 重试资格（runtimes.has 守卫短路一切后续 restore），只能手动开启。
+ */
+export class WebRemoteControlQrReadyTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebRemoteControlQrReadyTimeoutError";
+  }
+}
+
 function createFailure(
   reason: WebRemoteControlFailureReason,
   message?: string,
@@ -2225,7 +2240,7 @@ export function createWebRemoteControlManager(
           const timeout = setTimeout(
             () =>
               finish(
-                new Error(
+                new WebRemoteControlQrReadyTimeoutError(
                   "External relay device did not reach QR-ready state before timeout.",
                 ),
               ),
@@ -2560,6 +2575,20 @@ export function createWebRemoteControlManager(
         });
         return true;
       } catch (error) {
+        // 修复原因（2026-11-09 回归）：QR-ready 超时时 transport 仍在后台退避重连，
+        // 收敛后会自行到达 waiting_terminal 并补存启用意图。此时 runtime 已认领窗口，
+        // 释放 claim 只会把"收敛中"记成失败，且 runtimes.has 守卫使一切重试短路，
+        // 恢复永久失效直到手动开启。保持认领、等待自愈；仅 lifecycleRevision 变更
+        // （登录态切换等已接管状态机）时交回现有释放路径。
+        if (
+          error instanceof WebRemoteControlQrReadyTimeoutError &&
+          revision === lifecycleRevision
+        ) {
+          dependencies.logger.info(
+            `[web-remote-control] restore still connecting in background window=${windowId} workspace=${currentContext.workspacePath}`,
+          );
+          return true;
+        }
         if (revision === lifecycleRevision) startupRestoreClaimed = false;
         dependencies.logger.warn(
           "[web-remote-control] restore previous enabled state failed",

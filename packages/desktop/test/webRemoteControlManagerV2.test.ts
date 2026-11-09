@@ -706,6 +706,46 @@ describe("V2 manager public API with real relay", () => {
     expect(f.manager.getStatus(1).status).toBe("running");
     expect(f.settings.webRemoteControlLastEnabledContext).toEqual({ workspacePath: "/workspace" });
   });
+  it("自动恢复遇QR-ready超时保留认领等待后台自愈，不判死也不丢重试资格（2026-11-09回归）", async () => {
+    // 回归场景：开机自动恢复期间 relay/EasyTier 未就绪（对齐 11-05、11-07 日志），
+    // transport 在后台退避重连并最终自愈到 waiting_terminal。超时被误判为终态失败
+    // 会释放 claim 并放弃恢复；正确语义是认领窗口、等待收敛。
+    let failing = true;
+    const context = { workspacePath: "/workspace", kind: "local" as const };
+    const f = await fixture(
+      {
+        onHttp: (call) =>
+          call.path.endsWith("/device") && failing ? { status: 503 } : undefined,
+      },
+      { webRemoteControlLastEnabledContext: context },
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const restore = f.manager.restorePreviouslyEnabled(1, [context]);
+    await delay(60);
+    await vi.advanceTimersByTimeAsync(30000);
+    // 超时≠终态失败：恢复保持认领（窗口已被 runtime 占用），不打失败告警。
+    expect(await restore).toBe(true);
+    expect(
+      f.logger.info.mock.calls.flat().some((arg) =>
+        String(arg).includes("restore still connecting in background"),
+      ),
+    ).toBe(true);
+    expect(
+      f.logger.warn.mock.calls
+        .flat()
+        .some((arg) => String(arg).includes("restore previous enabled state failed")),
+    ).toBe(false);
+    // 认领保留期间，后续 sync 不能对同一窗口再起第二条 runtime。
+    expect(await f.manager.restorePreviouslyEnabled(1, [context])).toBe(false);
+    // relay 恢复后 transport 自愈：意图在收敛时补存（先抹掉初始值以证明写入）。
+    f.settings.webRemoteControlLastEnabledContext = undefined;
+    failing = false;
+    await delay(40);
+    await vi.advanceTimersByTimeAsync(30000);
+    await delay(80);
+    expect(f.manager.getStatus(1).status).toBe("running");
+    expect(f.settings.webRemoteControlLastEnabledContext).toEqual({ workspacePath: "/workspace" });
+  });
   it("token401终止状态不能被远程workspace关闭通知覆盖", async () => {
     const f = await fixture({
       onHttp: (call) => (call.path.endsWith("/token") ? { status: 401 } : undefined),

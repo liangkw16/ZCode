@@ -703,3 +703,39 @@ Playwright 驱动真实 Chrome（独立 profile，右侧可见窗口）× ZCode 
 验收过程中发现并修复两处真机缺陷（`54442ada` 入口吞点击重试、`3eb6b6d4`
 preempted 通知漏登运行时解析器 + 匹配放宽）。MT08/11/13 至此单测、协议级、
 视觉级三层验证齐备。
+
+## 实现记录：自动恢复的 QR-ready 超时语义修正（2026-11-09）
+
+**触发场景**：开机/重启后自动恢复（`restorePreviouslyEnabled`）期间，本机 relay
+或 EasyTier 尚未就绪（桌面 `relayWsUrl` 走 `10.126.126.7:8787`，需等 overlay
+收敛），transport 在 30s QR-ready 窗口内未到达 `waiting_terminal`。
+
+**根因证据**（`~/.kcode/v2/logs`，两起同型）：
+
+- 11-05 11:08:43 `restoring previous enabled state` → 「V2 connection retry」×5 →
+  11:09:13（30s 整）`restore previous enabled state failed` → **11:09:46 transport
+  自愈到 `waiting_terminal`**（超时后 33s，一切已晚）；
+- 11-07 21:27:41 同型：21:28:11 超时判死，**21:28:12（仅晚 1s）** token 获取成功
+  进入 `waiting_terminal`，此后至 11-09 无任何 paired——恢复彻底失效。
+
+**缺陷**：`start()` 的 ready 超时按设计不撤销后台恢复（transport 无限退避、
+收敛后到达 `waiting_terminal` 并补存启用意图），但 `restorePreviouslyEnabled`
+的 catch 把该超时当成终态失败——重置 `startupRestoreClaimed` 并告警；而半启动
+runtime 仍留在 `runtimes` 占用窗口，`runtimes.has` 守卫使后续一切恢复重试直接
+短路，状态机进入"已判死 + 占着窗口 + 无重试资格"的死锁，只能手动开启。
+
+**修正规则**（状态所有者不变，manager 仍是恢复状态机唯一所有者）：
+
+- QR-ready 超时错误提升为独立类型（`WebRemoteControlQrReadyTimeoutError`），
+  与既有的 `WebRemoteControlV2ConnectionError`（auth-required / relay-unavailable
+  等终态）区分；
+- `restorePreviouslyEnabled` 收到该超时且 `lifecycleRevision` 未变时：**保留
+  claim、不打失败告警**（改 info"后台收敛中"）、返回 `true`（窗口已被 runtime
+  认领，`notifyAuthStateChanged` 的遍历应停止）——恢复语义变为"认领即成功，
+  收敛交给 transport 自愈"；
+- 其余错误维持原路径：释放 claim + warn，由后续 renderer sync 或登录通知重试；
+- 交互式手动开启（用户点面板）的超时语义不变：30s 超时仍向用户报失败。
+
+**验收**：单测覆盖「超时后 claim 保留 + 不告警 + 自愈后意图补存」；重建安装后
+重启，日志应出现 `restoring previous enabled state` 且即使启动期 relay 慢也不落
+`failed`，最终到达 `waiting_terminal`。

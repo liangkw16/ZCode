@@ -74,6 +74,8 @@ import {
   setDataBaseDir,
   migrateApplicationStorage,
   resolveDefaultZCodeAgentCommand,
+  // kcode 隔离：设置文件路径唯一解析点（{home}/{segment}/v2/setting.json）。
+  resolveSettingsFilePath,
   startupStorage,
 } from "@zcode/services/node";
 import {
@@ -617,7 +619,8 @@ async function runBrowserCommandOnView(params: {
 let currentDesktopZoomLevel = 0;
 let currentDesktopWindowSize: DesktopWindowSize | undefined;
 const preloadPath = join(import.meta.dirname, "../preload/index.cjs");
-const settingsFile = join(homedir(), ".zcode", "v2", "setting.json");
+// kcode 隔离：原硬编码 ~/.zcode/v2/setting.json 改为随数据目录 segment（ZKCODE-007）。
+const settingsFile = resolveSettingsFilePath();
 let activeAppShutdownPolicy = resolveAppShutdownPolicy("normal", process.platform);
 let activeAppShutdownKind: AppShutdownKind | null = null;
 const WINDOWS_AGENT_FORCE_KILL_TIMEOUT_MS = 2_000;

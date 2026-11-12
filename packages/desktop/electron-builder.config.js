@@ -864,8 +864,9 @@ export default {
       to: "config/provider/zcode-builtin.json",
     },
     {
-      // 应用图标：打包后放入 resources 目录，主进程通过 process.resourcesPath 加载
-      from: "build/icon.png",
+      // 应用图标：打包后放入 resources 目录，主进程通过 process.resourcesPath 加载。
+      // KCode 档换用专属图标资源，避免并排安装时与 ZCode 共用同一张图。
+      from: desktopProductIdentity.resourceIconPath,
       to: "icon.png",
     },
     ...(targetPlatform.os === "linux"
@@ -951,6 +952,9 @@ export default {
     target: ["dmg", "zip"],
     category: "public.app-category.developer-tools",
     artifactName: buildDesktopArtifactName("mac"),
+    // 图标随身份走：KCode 用 build/kcode/icon.icns，production/preview 显式指回默认值（与
+    // electron-builder 的默认解析结果一致），保证非 kcode 构建产物零变化。
+    icon: desktopProductIdentity.macIconPath,
     // macOS 语言包是 en.lproj / zh_CN.lproj，沿用顶层 "en-US" 会一个都匹配不上被全部删掉，
     // Chromium 自带文案随之丢失（视频控件菜单只剩图标、播放速度子菜单空白）。
     electronLanguages: MAC_ELECTRON_LANGUAGES,

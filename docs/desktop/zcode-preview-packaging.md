@@ -341,3 +341,80 @@ MR !2636 合入后 bug scanner 报出两项，均成立，本轮修正：
 
 - `pnpm typecheck`：通过。`oxlint` 改动文件：0 errors；仅格式化新增行（含上一轮遗留的 `notify-feishu.mjs` 长调用行）。
 - `vitest`：`autoUpdaterReadyState`、`desktopProductIdentity`、`ciNodeVersionConfig`、`desktopCommandHandlers`、`desktopApplicationMenu`、`desktopMainIpcPlatform`、`notifyFeishuScript`、`publishReleaseScript`、`notarizeMacosScript`、`runtime-asset-scripts`、`uploadOssScript`、`macosReleaseAppDoctor`、`viteRendererConfig`、`tsupChunkIsolation`、`electronBuilderLinuxPackageTargets` 15 文件 263 用例通过。
+
+## 追记 2026-10-20：KCode 自用并排安装档（`ZCODE_KCODE_IDENTITY`）
+
+### 需求
+
+个人 fork（kcode 分支）需要一个可与正式 `ZCode` 同机共存、互不冲突的自用安装包，不做分发、不做全局改名。要求源码改动尽可能少，因此完全复用 Preview 已验证的身份隔离机制，只新增一个构建档。
+
+### 决策
+
+| 项 | 决定 | 说明 |
+| --- | --- | --- |
+| 新增变量 | `ZCODE_KCODE_IDENTITY=1`（与 Preview 开关同套严格 `1`/`0` 语义，其它拼写构建期失败） | 构建期开关，只控制身份；优先级高于 `ZCODE_PREVIEW_IDENTITY` |
+| 身份 | flavor `kcode`：appId `dev.zcode.app.kcode`、productName `KCode`、Linux `kcode`、Helper variant `kcode` | 与 Preview 同构的隔离档；electron-builder / tsup / vite 全部经 `resolveDesktopProductIdentity` 自动消费 |
+| Electron 运行数据 | `runtimeApplicationName = "KCode"` → 独立 `userData` 与单实例锁 | 与正式版/Preview 可同时运行 |
+| 业务数据 | 继续共享 `${ZCODE_HOME:-$HOME/.zcode}` | 凭据共享 = 免登录；根配置 schema 为 passthrough，正式版读到新配置键（如 `compact`）不会报错；并发/互写风险与 Preview 同等，accepted |
+| 更新 | 非 production flavor → updater / 强更 / 更新入口全关（既有门控） | 自用包由重新构建替换，不走 stable feed |
+| 业务语义 | Dynamic Workflow 等灰度跟随 production 分支（不借用 Preview 的强制 `alwaysOn`） | KCode 只隔离身份，不改变功能行为 |
+| Deep link | 继续共用 `zcode://`（与 Preview 相同的 accepted limitation） | 凭据共享后无需在 KCode 内重新走 OAuth |
+| CI / 发布 | 不新增 CI 入口；本地 `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` 构建 | 自用不分发，tag/release 流水线不识别该开关即可 |
+
+### 改动位置
+
+| 位置 | 改动 |
+| --- | --- |
+| `packages/desktop/scripts/desktop-product-identity.mjs` | `KCODE_IDENTITY` 身份记录、`ZCODE_KCODE_IDENTITY` 开关（严格 1/0）、flavor 推导最高优先级、Windows AUMID 映射 |
+| `packages/shared/src/env.ts` | `ZCodeProductFlavor` 联合类型与 `normalizeZCodeProductFlavor` 接受 `"kcode"` |
+| `packages/desktop/src/main/desktopRuntimeEnv.ts` | `isKcodePackagedRuntime`；`runtimeApplicationName` kcode 分支；Helper variant 注入扩展到 kcode |
+| electron-builder / tsup / vite 配置 | 零改动（identity 全部自动消费） |
+
+### 新增用例
+
+| Case ID | Setup | Assertion | Evidence | Status |
+| --- | --- | --- | --- | --- |
+| ZKCODE-001 | `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` | identity 解析为 kcode；优先级高于 Preview 开关；普通构建不受影响 | `desktopProductIdentity.test.ts` | verified |
+| ZKCODE-002 | `ZCODE_KCODE_IDENTITY` 取 `true/yes/on/2` 等 | 构建期抛 `expected 1 or 0` | `desktopProductIdentity.test.ts` | verified |
+| ZKCODE-003 | 编译期 `__ZCODE_PRODUCT_FLAVOR__=kcode` + 打包态 | 应用名 `KCode`、userData/session 独立、Helper variant `kcode`、Dynamic Workflow 继承值被删（非 alwaysOn） | `desktopRuntimeEnv.test.ts` | verified |
+| ZKCODE-004 | shared 层注入 kcode define | `ZCODE_PRODUCT_FLAVOR === "kcode"`，normalize 大小写不敏感 | `shared/test/env.test.ts` | verified |
+| ZKCODE-005 | tsup defines 白名单 | `__ZCODE_PRODUCT_FLAVOR__` 允许 `"kcode"` | `tsupChunkIsolation.test.ts` | verified |
+| ZKCODE-006 | 真实 `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` 构建 | 产物 `KCode.app`，Info.plist bundle id `dev.zcode.app.kcode`，与正式版并排安装可同时运行 | manual build smoke | verified（本机 macOS） |
+
+### 本机构建要点（ZKCODE-006 实测记录）
+
+- 依赖收集器：仓库根同时存在 `pnpm-lock.yaml` 与 `package-lock.json`，electron-builder 锁文件探测歧义后回落环境探测。直接 `node cli.js` 调用会被识别为 npm collector，在 pnpm hoisted 布局下解析不到依赖树（node-pty 等进不了 asar，afterPack 重打包断言失败）。本地打包必须带 `npm_config_user_agent=pnpm/<version>`（或经 `pnpm exec` 调用）走 pnpm collector。
+- 版本号：electron-builder 在应用 `extraMetadata.version` 前校验 `packages/desktop/package.json` 的 `version`，缺失直接失败；本分支已补 `3.16.1`（与根版本一致）。
+- DMG：`electronDownload.mirror` 默认 npmmirror，其 CDN 缺少 `dmgbuild-bundle-arm64` 二进制（404），本地构建用 `--mac zip` 产出 zip 后解压安装，效果等同。
+
+## 追记 2026-10-20（二）：KCode 数据层镜像隔离（完全独立）
+
+### 落地内容
+
+详见 `docs/superpowers/specs/2026-10-20-kcode-full-isolation-design.md` 与实施计划。kcode flavor 的全部全局数据（设置/远控身份/凭据/会话/插件/skills/agent db/storage 根）落 `~/.kcode` 镜像根；默认构建（production/preview）路径仍为 `~/.zcode`，上游零变化。真实 HOME 不动（Bash/git/ssh 照旧）。工作区相对 `.zcode`（项目级配置）保持共享语义。
+
+### 本机验收（ZKCODE-007）
+
+- `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` 构建安装后：`~/.kcode/{v2,cli,workspace,backup,plugin-workspace}` 全套生成；KCode 运行时写入（tasks-index.sqlite、agent 日志、logs）全部落 `~/.kcode`；`~/.zcode` 同期新写经 session id 归属甄别均为 ZCode 自身。
+- 远控身份随 `~/.kcode/v2/setting.json` 隔离（双端同开远控不再互踢）；登录发起时 kcode 重新接管 `zcode://` handler（`ensureDeepLinkHandlerForLogin`）。
+- 手动待验：A2 KCode 独立登录、A3 双端远控同时在线、A4 KCode 内 Bash `echo $HOME`/git/ssh、A6 ZCode 回归。
+
+## 追记 2026-10-20（三）：KCode 专属应用图标
+
+### 背景与决策
+
+KCode 与 ZCode 并排安装后共用同一个黑底白 "Z" 图标，Dock/启动台无法区分。决策：kcode flavor 换用专属图标——与 ZCode 同族（圆角方 + 白色前倾粗几何字）但底色改为靛蓝渐变（`#6E56F8 → #4338CA`，上→下）、字母为 "K"（前倾 12°，对角笔画厚 106、字干 120，光学均衡）。production/preview 继续用默认 `build/icon.icns`/`build/icon.png`，上游构建产物零变化。
+
+### 资产与接线（单一事实源）
+
+- 资产：`packages/desktop/build/kcode/{icon.svg, icon.png, icon.icns}`。`icon.svg` 是源（几何坐标即最终值），PNG/icns 由 `rsvg-convert`（各尺寸）+ `iconutil -c icns` 派生，不在仓库保留派生脚本。
+- 接线：`desktop-product-identity.mjs` 身份表新增 `macIconPath`/`resourceIconPath` 字段（kcode → `build/kcode/*`，其余 → `build/*`）；`electron-builder.config.js` 的 `mac.icon` 与 extraResources `icon.png` 均按身份取用。
+- 覆盖范围：macOS `.app` 图标（`mac.icon`）与随包 `resources/icon.png`（About/托盘/CUA 权限浮窗等主进程读取处）。Windows/Linux 专属资产（`icon_windows.png`、tray ico、hicolor 目录、安装器图标）KCode 暂不构建，维持共用。
+
+### 验收（ZKCODE-008）
+
+| # | 场景 | 预期 | 验证 |
+| --- | --- | --- | --- |
+| ZKCODE-008-1 | 身份表图标断言 | kcode 指向 `build/kcode/*` 且文件存在；production/preview 保持默认并相等 | `desktopProductIdentity.test.ts`（新增专项用例） |
+| ZKCODE-008-2 | kcode 构建 | `.app/Contents/Resources/` 内 icns 字节 ≠ `build/icon.icns`；`resources/icon.png` 为靛蓝 K；Info.plist icon 生效 | manual build smoke |
+| ZKCODE-008-3 | 默认构建回归 | `mac.icon` 显式指回 `build/icon.icns`，与 electron-builder 默认解析一致，产物无变化 | config 审查（未重打全量包） |

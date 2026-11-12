@@ -40,7 +40,7 @@
       ],
       "outputs": ["dist/**"],
       "cache": true,
-      "env": ["ZCODE_ENV", "NODE_ENV"]
+      "env": ["ZCODE_ENV", "NODE_ENV", "ZCODE_DATA_DIR_SEGMENT"]
     },
     "dev": {
       "cache": false,
@@ -87,7 +87,7 @@
       ],
       "outputs": ["dist/**"],
       "cache": true,
-      "env": ["ZCODE_ENV", "NODE_ENV"]
+      "env": ["ZCODE_ENV", "NODE_ENV", "ZCODE_DATA_DIR_SEGMENT"]
     }
   }
 }

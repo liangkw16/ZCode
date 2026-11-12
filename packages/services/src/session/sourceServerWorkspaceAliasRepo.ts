@@ -15,6 +15,7 @@ import {
   WORKSPACE_TASK_IDENTITY_CONFLICT_ERROR_CODE,
   type SourceServerMigrationReport,
   type SourceServerMigrationReportRow,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 import { getDataBaseDir, getTasksIndexDatabasePath, getWorkspaceHash } from "#src/paths.js";
 
@@ -299,9 +300,9 @@ export class SourceServerWorkspaceAliasRepo {
   public constructor(options: SourceServerWorkspaceAliasRepoOptions = {}) {
     this.taskDbPath = options.taskDbPath ?? getTasksIndexDatabasePath();
     this.sessionDbPath =
-      options.sessionDbPath ?? join(getDataBaseDir(), ".zcode", "cli", "db", "db.sqlite");
+      options.sessionDbPath ?? join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "db", "db.sqlite");
     this.backupRoot =
-      options.backupRoot ?? join(getDataBaseDir(), ".zcode", "server", "migration-backups");
+      options.backupRoot ?? join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT, "server", "migration-backups");
     this.now = options.now ?? Date.now;
     this.createMigrationId = options.migrationId ?? randomUUID;
     this.afterPhaseCommitted = options.afterPhaseCommitted;

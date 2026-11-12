@@ -1,5 +1,6 @@
 /* eslint-disable max-lines -- 导出日志流程涉及文件收集、脱敏与打包，集中维护便于排查与一致性 */
 import { constants, createReadStream, createWriteStream } from "node:fs";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import {
   access,
   copyFile,
@@ -33,12 +34,17 @@ function getZCodeDataDir() {
   return getAppConfigDir();
 }
 
+export function resolveGlobalZCodeCliDir() {
+  return join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli");
+}
+
+/** 上游 v3.18 的导出日志收集点按 `.zcode` 命名调用本助手；kcode 构建统一指向 ZCODE_DATA_DIR_SEGMENT。 */
 function getZCodeCliDir() {
-  return join(homedir(), ".zcode", "cli");
+  return resolveGlobalZCodeCliDir();
 }
 
 function getZCodeCliLogDir() {
-  return join(getZCodeCliDir(), "log");
+  return join(resolveGlobalZCodeCliDir(), "log");
 }
 
 /**
@@ -46,8 +52,8 @@ function getZCodeCliLogDir() {
  * 所以它把生命周期与后台输入诊断 tee 到 `<socket>.exit.log`（见 zcode-cua
  * helperExitLogPathFor）。同目录下还有 `.tokens` broker 凭据，收集时必须按文件名白名单。
  */
-function getCuaHelperRunDir() {
-  return join(homedir(), ".zcode", "computer-use", "run");
+export function resolveCuaRunDir() {
+  return join(homedir(), ZCODE_DATA_DIR_SEGMENT, "computer-use", "run");
 }
 
 function isCuaHelperDiagnosticFileName(fileName: string): boolean {
@@ -1058,7 +1064,7 @@ function shouldApplyLogExportRetention(archivePath: string): boolean {
   const normalizedArchivePath = normalizeArchivePath(archivePath);
   if (
     normalizedArchivePath.startsWith("logs/") ||
-    normalizedArchivePath.startsWith(".zcode/cli/log/")
+    normalizedArchivePath.startsWith(`${ZCODE_DATA_DIR_SEGMENT}/cli/log/`)
   ) {
     return true;
   }
@@ -1259,7 +1265,7 @@ export async function createLogArchiveArtifacts(
   // 如果导出日志只扫描 v2，定位 agent CLI 启动、协议或崩溃问题时会缺少最关键的原生侧日志。
   await collectLogArchiveFilesFromDirectory(
     zcodeCliLogDir,
-    posix.join(".zcode", "cli", "log"),
+    posix.join(ZCODE_DATA_DIR_SEGMENT, "cli", "log"),
     visitedDirs,
     files,
   );
@@ -1267,7 +1273,7 @@ export async function createLogArchiveArtifacts(
   const zcodeCliDir = getZCodeCliDir();
   await collectLogArchiveFilesByName(
     join(zcodeCliDir, CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
-    posix.join(".zcode", "cli", CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
+    posix.join(ZCODE_DATA_DIR_SEGMENT, "cli", CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
     (name) => CLI_MEMORY_FILE_PATTERN.test(name),
     files,
   );
@@ -1276,12 +1282,12 @@ export async function createLogArchiveArtifacts(
   // 二者都不在 ~/.zcode/cli/log 下，需要额外收集才能完整还原现场。
   await collectLogArchiveFile(
     join(zcodeCliDir, "config.json"),
-    posix.join(".zcode", "cli", "config.json"),
+    posix.join(ZCODE_DATA_DIR_SEGMENT, "cli", "config.json"),
     files,
   );
   await collectLogArchiveFilesFromDirectory(
     join(zcodeCliDir, "rollout"),
-    posix.join(".zcode", "cli", "rollout"),
+    posix.join(ZCODE_DATA_DIR_SEGMENT, "cli", "rollout"),
     visitedDirs,
     files,
   );
@@ -1292,8 +1298,8 @@ export async function createLogArchiveArtifacts(
   // ~/.zcode/computer-use/run/<socket>.exit.log，既不在 app data 也不在 ~/.zcode/cli 下。
   // 同目录下有 .tokens broker 凭据，因此按文件名白名单只收 *.exit.log，不递归该目录。
   await collectLogArchiveFilesByName(
-    getCuaHelperRunDir(),
-    posix.join(".zcode", "computer-use", "run"),
+    resolveCuaRunDir(),
+    posix.join(ZCODE_DATA_DIR_SEGMENT, "computer-use", "run"),
     isCuaHelperDiagnosticFileName,
     files,
   );
@@ -1452,18 +1458,18 @@ export async function createFeedbackLogArchiveFromExportLogs(
       { directory: join(sourceDir, "logs"), archivePrefix: "logs" },
       { directory: getZCodeCliLogDir(), archivePrefix: ".zcode/cli/log" },
       {
-        directory: getZCodeCliDir(),
+        directory: resolveGlobalZCodeCliDir(),
         archivePrefix: ".zcode/cli",
         includeFileNames: ["config.json"],
         onlyCurrentDay: false,
         contentPolicy: "cli-config",
       },
       {
-        directory: join(getZCodeCliDir(), "rollout"),
+        directory: join(resolveGlobalZCodeCliDir(), "rollout"),
         archivePrefix: ".zcode/cli/rollout",
       },
       {
-        directory: getCuaHelperRunDir(),
+        directory: resolveCuaRunDir(),
         archivePrefix: ".zcode/computer-use/run",
         exitLogsOnly: true,
       },

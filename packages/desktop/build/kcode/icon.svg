@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- KCode 应用图标源文件：靛蓝渐变圆角方 + 白色前倾 12° 粗几何 K（与 ZCode 黑底白 Z 同族）。
+     派生命令：rsvg-convert 渲染各尺寸 PNG；iconutil -c icns 生成 icns。几何参数见 /tmp 生成器或此文件坐标。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6E56F8"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230" fill="url(#bg)"/>
+  <g fill="#FFFFFF">
+    <polygon points="340.3,244.0 460.3,244.0 346.4,780.0 226.4,780.0"/>
+    <polygon points="362.0,596.6 833.6,286.1 787.0,201.9 315.5,512.5"/>
+    <polygon points="324.8,521.7 672.0,822.8 752.8,737.2 405.6,436.2"/>
+  </g>
+</svg>

@@ -70,9 +70,13 @@ export function resolveAgentUserInstructionsHomeDir(env: NodeJS.ProcessEnv = pro
   return envHome && envHome.length > 0 ? envHome : homedir();
 }
 
-/** `{home}/.zcode/AGENTS.md`：用户自定义指令（个性化）的唯一事实源文件。 */
+/** `{home}/{segment}/AGENTS.md`：用户自定义指令（个性化）的唯一事实源文件。 */
 export function getAgentUserInstructionsFilePath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(resolveAgentUserInstructionsHomeDir(env), ".zcode", "AGENTS.md");
+  // 修复原因：CLI adapter（context/index.ts 的 resolveUserInstructions）已按
+  // ZCODE_DATA_DIR_SEGMENT 解析同一路径；此处残留硬编码旧目录名会让 kcode 构建
+  // 下 App 写旧镜像根的 AGENTS.md 而 Agent 读新镜像根，个性化指令分叉
+  // （dataDirSegmentSweep 守护逐字面量核对时捕获）。同用 segment 常量收口。
+  return join(resolveAgentUserInstructionsHomeDir(env), ZCODE_DATA_DIR_SEGMENT, "AGENTS.md");
 }
 
 function readEnvValue(env: Record<string, string | undefined>, key: string): string | undefined {

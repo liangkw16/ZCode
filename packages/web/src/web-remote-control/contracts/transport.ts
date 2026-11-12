@@ -86,10 +86,8 @@ export interface WebRemoteControlTerminalTransportOptions {
   heartbeatIntervalMs?: number;
   heartbeatJitterMs?: number;
   heartbeatAckTimeoutMs?: number;
-  reconnectJitterMs?: number;
   healthCheckTimeoutMs?: number;
   desktopOfflineGraceMs?: number;
-  staleWaitingRecoveryMs?: number;
   waitingTimeoutMs?: number;
   onPayload(payload: WebRemoteControlAppPayload): void;
   onRawTransportPayload?(payload: unknown): boolean;

@@ -1,9 +1,14 @@
 import { ZAI_PROVIDER_ID, type WebRemoteControlFailure } from "@zcode/shared";
-import type { WebAuthService } from "#src/auth/webAuthService.js";
+import type { WebAuthService } from "#src/auth/contract.js";
 
 export type WebRemoteControlAuthPort = Pick<
   WebAuthService,
-  "getZCodeJwtToken" | "getActiveAccount" | "startLogin" | "logout"
+  | "getZCodeJwtToken"
+  | "getActiveAccount"
+  | "startLogin"
+  | "logout"
+  | "getSessionRevision"
+  | "subscribeSessionChange"
 >;
 
 export interface SelfHostBuildEnv {
@@ -53,10 +58,16 @@ export function createSelfHostAuth(
   return {
     getZCodeJwtToken: () => key,
     getActiveAccount: () => (key ? { displayName: "Self-host", provider: ZAI_PROVIDER_ID } : null),
-    startLogin: () => onFailure({ reason: "relay-unavailable" }),
+    startLogin: () => {
+      onFailure({ reason: "relay-unavailable" });
+      return Promise.resolve();
+    },
     logout: () => {
       onFailure({ reason: "relay-unavailable" });
       return Promise.resolve();
     },
+    // 自托管没有 OAuth 会话；revision 以密钥为身份，换密钥（新 #k= 书签）即换会话。
+    getSessionRevision: () => key,
+    subscribeSessionChange: () => () => {},
   };
 }

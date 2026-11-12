@@ -7,7 +7,7 @@ import {
   type V4SessionDataParams,
   type V4SessionDataPurgeResult,
 } from "@zcode/shared/zcode-protocol-v4";
-import { createSessionResidentPoolHost, deactivateSessionRecord } from "../session-residency.js";
+import { deactivateSessionRecord, readSessionBusyState } from "../session-residency.js";
 import { parseParams, type ZCodeProtocolAgentServerContext } from "../server-types.js";
 import type { SessionDataHost } from "./contract.js";
 
@@ -136,9 +136,13 @@ export async function purgeSessionDataWith(
 function hostFromContext(context: ZCodeProtocolAgentServerContext): SessionDataHost {
   const store = context.deps.sessionStore;
   const files = context.deps.sessionDataFiles;
-  if (!store?.listOwnedSessionTrees || !store.listArtifactReferrers || !store.purgeSessions || !files)
+  if (
+    !store?.listOwnedSessionTrees ||
+    !store.listArtifactReferrers ||
+    !store.purgeSessions ||
+    !files
+  )
     throw new Error("Session data deletion is unavailable");
-  const residency = createSessionResidentPoolHost(context);
   return {
     store: {
       listOwnedSessionTrees: store.listOwnedSessionTrees.bind(store),
@@ -146,13 +150,7 @@ function hostFromContext(context: ZCodeProtocolAgentServerContext): SessionDataH
       purgeSessions: store.purgeSessions.bind(store),
     },
     files,
-    residency(sessionId) {
-      const facts = residency.readResidencyFacts(sessionId);
-      if (!facts) return null;
-      return facts.hasResidencyBlockingWork || facts.hasPendingInteractions || facts.hasQueuedCommands
-        ? "busy"
-        : "idle";
-    },
+    residency: (sessionId) => readSessionBusyState(context, sessionId),
     // 修复原因：曾按 deleteSession 同序 dispose(deleted:true)，在文件删除前就发布 session.removed；
     // 文件删除失败（EACCES/EBUSY）时 Host 已把任务当作删除，CLI 行却还在。这里只做驻留去激活。
     release: (sessionId) => deactivateSessionRecord(context, sessionId),
@@ -181,3 +179,5 @@ export async function purgeSessionData(
   });
   return result;
 }
+
+export { previewSessionDeletion, executeSessionDeletion } from "./permanent-deletion.js";

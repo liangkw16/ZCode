@@ -596,7 +596,7 @@ describe("createWebRemoteControlManager external relay", () => {
     expect(disposeWorkspaceHostAttachmentsForWindow).toHaveBeenCalledWith(1, "manual-stop");
   });
 
-  it("restores the previous target only after its current workspace context is available", async () => {
+  it("falls back to the window workspace when the saved target is absent, without leaking its task", async () => {
     const { getStartupRestoreContext, getLatestTransportOptions, manager } = createManagerHarness({
       startupRestoreContext: {
         workspacePath: "/workspace/demo",
@@ -605,10 +605,33 @@ describe("createWebRemoteControlManager external relay", () => {
       },
     });
 
+    // 上游 v3.18 语义：上次启用目标不在窗口且不属于其他窗口时不再静默跳过，
+    // 改用本窗口工作区恢复设备在线；任务 id 只属于上次目标，不能带到替代工作区。
     await expect(
       manager.restorePreviouslyEnabled(1, [{ workspacePath: "/workspace/other" }]),
-    ).resolves.toBe(false);
-    expect(manager.getStatus(1)).toEqual({ status: "idle" });
+    ).resolves.toBe(true);
+    expect(manager.getStatus(1)).toEqual(
+      expect.objectContaining({
+        status: "running",
+        workspacePath: "/workspace/other",
+      }),
+    );
+    expect(getLatestTransportOptions()).toBeDefined();
+    expect(getStartupRestoreContext()).toEqual({
+      workspacePath: "/workspace/other",
+      workspaceIdentity: undefined,
+      initialTaskId: undefined,
+    });
+  });
+
+  it("restores the saved target with its task once its current workspace context is available", async () => {
+    const { getStartupRestoreContext, getLatestTransportOptions, manager } = createManagerHarness({
+      startupRestoreContext: {
+        workspacePath: "/workspace/demo",
+        workspaceIdentity: "remote:ssh:host:/workspace/demo",
+        initialTaskId: "task-1",
+      },
+    });
 
     await expect(
       manager.restorePreviouslyEnabled(1, [

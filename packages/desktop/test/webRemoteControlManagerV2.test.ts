@@ -278,6 +278,19 @@ describe("V2 manager public API with real relay", () => {
         delete: async (key) => {
           credentials.delete(key);
         },
+        // 上游 v3.18 的 OAuth 会话提交改走 Host 私有批量接口；Map 模拟同语义。
+        loadMany: async (keys) =>
+          Object.fromEntries(keys.map((key) => [key, credentials.get(key) ?? null])),
+        updateMany: async (changes) => {
+          for (const [key, value] of Object.entries(changes)) {
+            if (value === null) credentials.delete(key);
+            else credentials.set(key, value);
+          }
+          return true;
+        },
+        deleteUnreadable: async (keys) => {
+          for (const key of keys) credentials.delete(key);
+        },
       },
       {
         apiClient: { request: vi.fn<typeof fetch>() },
@@ -590,14 +603,21 @@ describe("V2 manager public API with real relay", () => {
     f.manager.syncAvailableWorkspaces(1, [remote]);
     pending.resolve(local);
     await login;
-    expect(f.manager.getStatus(1).status).toBe("idle");
+    // 上游 v3.18 语义：读取期间上次目标已不在窗口时不再静默放弃，改用窗口现存
+    // 工作区（remote）恢复；被关闭的旧本地目标快照仍不得恢复。
+    expect(f.manager.getStatus(1)).toMatchObject({
+      status: "running",
+      workspacePath: "/remote",
+    });
   });
-  it("远程恢复等待当前remoteSessionId，不为离线占位tab启动relay", async () => {
+  it("远程目标未重连也先启动relay，bridge只在配对时建立（上游v3.18语义）", async () => {
     const context = { workspacePath: "/remote", workspaceIdentity: "ssh://host/remote" };
     const f = await fixture({}, { webRemoteControlLastEnabledContext: context });
-    expect(await f.manager.restorePreviouslyEnabled(1, [context])).toBe(false);
-    expect(f.relay.httpCalls).toEqual([]);
+    // 上游 v3.18：离线占位 tab 不再阻断恢复——设备先上线，remoteSessionId 由窗口
+    // 快照跟随（syncRuntimeRemoteSession）；bridge 仍只在手机配对时建立。
+    expect(await f.manager.restorePreviouslyEnabled(1, [context])).toBe(true);
     expect(f.attachWorkspaceHost).not.toHaveBeenCalled();
+    expect(f.manager.getStatus(1).status).toBe("running");
   });
   it("换账号重注册，旧记录删除无权限仍可启动", async () => {
     const f = await fixture();

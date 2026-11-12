@@ -4,7 +4,14 @@ import {
   createCoreError,
   formatCompactSummary,
 } from "../deps.js";
-import type { CompactTimelinePayload, SessionEvent, SessionEventType, TraceContext } from "../deps.js";
+import type {
+  CompactTimelinePayload,
+  Model,
+  SessionEvent,
+  SessionEventType,
+  ToolSearchMode,
+  TraceContext,
+} from "../deps.js";
 import {
   buildProviderRequestMessages,
   createModelContextExceededFinishError,
@@ -18,6 +25,24 @@ import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 export const COMPACT_TOOL_USE_DENIAL_MESSAGE = "Tool use is not allowed during compaction";
 export const COMPACT_TOOL_USE_DENIAL_REASON =
   "compaction agent should only produce text summary";
+
+// 会话 toolSearch mode 是主模型的能力契约；compact 摘要请求可能路由到独立摘要模型
+// （跨 provider），直接沿用 native/local 会在请求构造前抛错（resolveToolSearchMode 对
+// native 要求 protocolSupported、对 local 要求 supportsToolCall）并阻断压缩。
+// 降级为 auto：按目标模型能力解析（native → local → off），保证不抛错。
+// exposure 侧两个 throw 条件若变化，此处的降级判断需同步。
+export function coerceToolSearchModeForModel(
+  mode: ToolSearchMode | undefined,
+  model: Model,
+): ToolSearchMode {
+  if (mode === "native" && !model.requestCapabilities?.toolSearch?.protocolSupported) {
+    return "auto";
+  }
+  if (mode === "local" && !model.properties.supportsToolCall) {
+    return "auto";
+  }
+  return mode ?? "off";
+}
 
 export function createCompactPromptTooLongError(options: {
   attempt: number;

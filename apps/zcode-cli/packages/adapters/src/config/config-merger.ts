@@ -1,12 +1,44 @@
 // Config Merger - Merge configs by priority
 
 import type {
+  CompactRuntimeConfig,
   HookEventName,
   HookMatcherConfig,
   PluginOptionValues,
   RuntimeConfigPatch,
 } from "@zcode/contracts";
 import { ConfigScope, ConfigScopePriority } from "@zcode/contracts";
+
+type CompactModelOverrides = NonNullable<CompactRuntimeConfig["modelOverrides"]>;
+
+/**
+ * modelOverrides 是 provider→model→字段 三层结构：浅覆盖会让高优先层只改一个模型的
+ * 一个字段时丢掉低层其他条目，与 microcompact 子对象是同一种坑，必须逐层合并；
+ * 两条合并入口（本文件的 mergeConfigs 与 ConfigStore 增量 merge）必须共用本 helper，
+ * 否则公开增量接口与启动路径产生不同语义。
+ */
+export function mergeCompactModelOverrides(
+  previous: CompactModelOverrides | undefined,
+  next: CompactModelOverrides | undefined,
+): CompactModelOverrides | undefined {
+  if (previous === undefined && next === undefined) return undefined;
+  const merged: CompactModelOverrides = { ...(previous ?? {}) };
+  for (const [providerId, models] of Object.entries(next ?? {})) {
+    const mergedModels = { ...(merged[providerId] ?? {}) };
+    for (const [modelId, override] of Object.entries(models)) {
+      const mergedOverride = { ...(mergedModels[modelId] ?? {}) };
+      // 显式 undefined 不覆盖低层已配置值（omitUndefined 语义）。
+      for (const [field, value] of Object.entries(override) as Array<
+        [keyof typeof override, number | undefined]
+      >) {
+        if (value !== undefined) mergedOverride[field] = value;
+      }
+      mergedModels[modelId] = mergedOverride;
+    }
+    merged[providerId] = mergedModels;
+  }
+  return merged;
+}
 
 type PluginOptions = Record<string, PluginOptionValues>;
 
@@ -42,6 +74,7 @@ export function mergeConfigs(...configs: PrioritizedConfig[]): RuntimeConfigPatc
         : inputConfig;
     const previousHooks = result.hooks;
     const previousPlugins = result.plugins;
+    const previousCompact = result.compact;
     Object.assign(result, config);
 
     // Deep merge nested objects
@@ -144,6 +177,29 @@ export function mergeConfigs(...configs: PrioritizedConfig[]): RuntimeConfigPatc
     }
     if (config.hooks) {
       result.hooks = mergeHooksConfig(previousHooks, config.hooks);
+    }
+    if (config.compact) {
+      const mergedModelOverrides = mergeCompactModelOverrides(
+        previousCompact?.modelOverrides,
+        config.compact.modelOverrides,
+      );
+      result.compact = {
+        // Object.assign 已把 result.compact 指向当前高优先级层；必须从 previousCompact
+        // 开始构造，否则低优先层只写 compact 顶层字段时会被整段覆盖丢失。
+        ...previousCompact,
+        ...config.compact,
+        // microcompact 是独立子对象，浅覆盖会让 User 层只写 enabled 时丢掉 Project 层的阈值调优。
+        ...((previousCompact?.microcompact || config.compact.microcompact)
+          ? {
+              microcompact: {
+                ...previousCompact?.microcompact,
+                ...config.compact.microcompact,
+              },
+            }
+          : {}),
+        // modelOverrides 与 microcompact 同理：provider→model→字段三层逐级合并，不做整表替换。
+        ...(mergedModelOverrides !== undefined ? { modelOverrides: mergedModelOverrides } : {}),
+      };
     }
     if (config.ui) {
       result.ui = { ...result.ui, ...config.ui };

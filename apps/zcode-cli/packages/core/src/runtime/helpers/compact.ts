@@ -20,7 +20,10 @@ export {
   replaceReadFileStateAfterCompact,
   restorePostCompactFiles,
 } from "./compact-post-reminders.js";
-export type { CompactEntrySelection } from "./compact-selection.js";
+export type {
+  CompactEntrySelection,
+  CompactRecentPreservationPolicy,
+} from "./compact-selection.js";
 export { countCompactPreservedRuntimeMessages } from "./compact-preservation.js";
 export {
   estimateRuntimeEntryTokens,

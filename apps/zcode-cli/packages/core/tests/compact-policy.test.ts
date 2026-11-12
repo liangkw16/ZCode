@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyCompactModelOverrides,
   estimateMessageTokens,
   getAutoCompactOutputReserveTokens,
   getAutoCompactThreshold,
@@ -233,6 +234,56 @@ describe("auto compact policy", () => {
   });
 });
 
+describe("auto compact threshold ratio cap", () => {
+  it("compacts earlier when thresholdRatio tightens below the absolute formula", () => {
+    // 200K 窗口：绝对阈值 166K，0.8 比例帽 160K → 取小者 160K。
+    expect(getAutoCompactThreshold({ contextWindow: 200_000, thresholdRatio: 0.8 })).toBe(160_000);
+    // 1M 大窗口：绝对阈值 966K，0.5 比例帽 500K → 提前触发。
+    expect(
+      getAutoCompactThreshold({ contextWindow: 1_000_000, thresholdRatio: 0.5 }),
+    ).toBe(500_000);
+  });
+
+  it("falls back to the absolute threshold when the ratio does not tighten", () => {
+    // 0.99 × 200K = 198K > 166K，比例帽不收紧时保持现状阈值。
+    expect(getAutoCompactThreshold({ contextWindow: 200_000, thresholdRatio: 0.99 })).toBe(166_000);
+  });
+
+  it("ignores out-of-range ratios and keeps the unified absolute threshold", () => {
+    for (const thresholdRatio of [0, -0.1, 1, 1.5, Number.NaN]) {
+      expect(getAutoCompactThreshold({ contextWindow: 200_000, thresholdRatio })).toBe(166_000);
+    }
+  });
+
+  it("applies an explicit output reserve only as a downward cap", () => {
+    // 用户输出预留只在 21K 硬上限内下调：阈值 = 200K − 16K − 13K。
+    expect(
+      getAutoCompactThreshold({ contextWindow: 200_000, outputReserveTokens: 16_000 }),
+    ).toBe(171_000);
+    // 超过 21K 的预留请求被硬上限截住，保持统一阈值。
+    expect(
+      getAutoCompactThreshold({ contextWindow: 200_000, outputReserveTokens: 64_000 }),
+    ).toBe(166_000);
+  });
+
+  it("applies the ratio cap to the compaction decision", () => {
+    const config = { contextWindow: 200_000, thresholdRatio: 0.8 };
+    const below = shouldAutoCompact({
+      config,
+      messages: ENOUGH_MESSAGES,
+      tokenOverride: { source: "provider_usage", tokenCount: 160_000 },
+    });
+    expect(below).toMatchObject({ reason: "above_threshold", shouldCompact: true, threshold: 160_000 });
+
+    const above = shouldAutoCompact({
+      config,
+      messages: ENOUGH_MESSAGES,
+      tokenOverride: { source: "provider_usage", tokenCount: 159_999 },
+    });
+    expect(above).toMatchObject({ reason: "below_threshold", shouldCompact: false });
+  });
+});
+
 describe("normal request output target", () => {
   it.each([
     { caseId: "OTB01", expected: 32_000, modelLimit: undefined },
@@ -308,5 +359,130 @@ describe("normal request output target", () => {
         modelContextBudgetStrategy: "preflight-v1",
       }),
     ).toBe(11_000);
+  });
+});
+
+describe("applyCompactModelOverrides", () => {
+  const baseConfig = {
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    thresholdRatio: 0.76,
+    modelContextBudgetStrategy: "preflight-v1" as const,
+  };
+
+  it("applies the matching override and reproduces the 400K policy threshold", () => {
+    const { config, source, matched } = applyCompactModelOverrides(
+      {
+        ...baseConfig,
+        modelOverrides: {
+          "account:bigmodel-individual-coding-plan": {
+            "GLM-5.3": { contextWindowTokens: 400_000 },
+          },
+        },
+      },
+      { providerId: "account:bigmodel-individual-coding-plan", modelId: "GLM-5.3" },
+    );
+
+    expect(source).toBe("model-override");
+    expect(matched).toBe(true);
+    expect(config.contextWindow).toBe(400_000);
+    // min(400K − 21K − 13K, floor(400K × 0.76)) = 304K，即官方评测口径触发点。
+    expect(getAutoCompactThreshold(config)).toBe(304_000);
+  });
+
+  it("keeps the model window when only non-window fields are overridden", () => {
+    const { config } = applyCompactModelOverrides(
+      { ...baseConfig, modelOverrides: { p: { m: { bufferTokens: 9_000 } } } },
+      { providerId: "p", modelId: "m" },
+    );
+
+    expect(config.contextWindow).toBe(1_000_000);
+    expect(config.bufferTokens).toBe(9_000);
+    // min(1M − 21K − 9K, floor(1M × 0.76)) = 760K。
+    expect(getAutoCompactThreshold(config)).toBe(760_000);
+  });
+
+  it("applies ratio-only policy to a 200K window (152K)", () => {
+    const { config } = applyCompactModelOverrides(
+      {
+        contextWindow: 200_000,
+        maxOutputTokens: 32_000,
+        thresholdRatio: 0.76,
+      },
+      { providerId: "p", modelId: "m" },
+    );
+
+    // 无覆盖表时 ratio 直接作用于模型窗口：min(166K, 152K)。
+    expect(getAutoCompactThreshold(config)).toBe(152_000);
+  });
+
+  it("falls back to model defaults without overrides (128K keeps 94K)", () => {
+    const { config, source, matched } = applyCompactModelOverrides(
+      { contextWindow: 128_000, maxOutputTokens: 32_000 },
+      { providerId: "p", modelId: "m" },
+    );
+
+    expect(source).toBe("global");
+    expect(matched).toBe(false);
+    expect(getAutoCompactThreshold(config)).toBe(94_000);
+  });
+
+  it("matches provider and model ids case-sensitively and per-provider", () => {
+    const modelOverrides = {
+      "account:bigmodel-individual-coding-plan": { "GLM-5.3": { contextWindowTokens: 400_000 } },
+      "other-provider": { "GLM-5.3": { bufferTokens: 9_000 } },
+    };
+
+    // modelId 大小写不同：不命中。
+    const lower = applyCompactModelOverrides(
+      { ...baseConfig, modelOverrides },
+      { providerId: "account:bigmodel-individual-coding-plan", modelId: "glm-5.3" },
+    );
+    expect(lower.matched).toBe(false);
+    expect(lower.config.contextWindow).toBe(1_000_000);
+
+    // 同名 modelId 挂在其他 provider：只命中自己 provider 的条目。
+    const otherProvider = applyCompactModelOverrides(
+      { ...baseConfig, modelOverrides },
+      { providerId: "other-provider", modelId: "GLM-5.3" },
+    );
+    expect(otherProvider.matched).toBe(true);
+    expect(otherProvider.config.contextWindow).toBe(1_000_000);
+    expect(otherProvider.config.bufferTokens).toBe(9_000);
+  });
+
+  it("treats an empty override entry as matched but global", () => {
+    const { source, matched } = applyCompactModelOverrides(
+      { ...baseConfig, modelOverrides: { p: { m: {} } } },
+      { providerId: "p", modelId: "m" },
+    );
+
+    // 空对象条目存在（matched 便于诊断），但没有任何字段被应用。
+    expect(matched).toBe(true);
+    expect(source).toBe("global");
+  });
+
+  it("honors explicit outputReserveTokens down-cap", () => {
+    const { config } = applyCompactModelOverrides(
+      {
+        contextWindow: 100_000,
+        maxOutputTokens: 32_000,
+        modelOverrides: { p: { m: { outputReserveTokens: 2_000 } } },
+      },
+      { providerId: "p", modelId: "m" },
+    );
+
+    // 显式 reserve 2000：100K − 2K − 13K = 85K（无 ratio）。
+    expect(getAutoCompactThreshold(config)).toBe(85_000);
+  });
+
+  it("strips the modelOverrides key from the resolved policy", () => {
+    const { config } = applyCompactModelOverrides(
+      { ...baseConfig, modelOverrides: { p: { m: { bufferTokens: 9_000 } } } },
+      { providerId: "p", modelId: "m" },
+    );
+
+    // 配置结构不能泄漏进阈值计算与后续 spread。
+    expect(Object.hasOwn(config, "modelOverrides")).toBe(false);
   });
 });

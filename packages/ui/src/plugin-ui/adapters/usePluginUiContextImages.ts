@@ -100,7 +100,8 @@ function decodeBase64(dataBase64: string): ArrayBuffer {
   const binary = atob(dataBase64);
   const buffer = new ArrayBuffer(binary.length);
   const bytes = new Uint8Array(buffer);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  for (let index = 0; index < binary.length; index += 1)
+    bytes[index] = binary.charCodeAt(index);
   return buffer;
 }
 
@@ -115,16 +116,62 @@ function pluginUiContextImageFiles(context: PluginUiModelContext): File[] {
   );
 }
 
-const PLUGIN_UI_CONTEXT_IMAGE_OPTIONS: ContextImageAttachmentsOptions<PluginUiModelContext> = {
-  toFiles: pluginUiContextImageFiles,
-  // 第三方插件上下文保持抽共用实现前的语义：用当下的撤销函数。
-  removeStrategy: "current",
-};
+/**
+ * 把插件上下文里的 image 块物化成 composer 图片附件（与粘贴截图同一条上传链路）。
+ * 每条上下文的附件 id 记在这里：同一实例再次 updateModelContext（同 id、新对象）或用户移除该上下文时，
+ * 旧附件一并撤掉；发送后附件由 composer 自己按冻结 id 清理，这里的撤销对已清理的 id 是 no-op。
+ */
+// Bug 修复（上游同步审查 2026-11-04，v3.18 同步保留）：上下文列表随 pluginUiModelContextEvents 的
+// 模块级 store 跨 Composer 卸载存活，附件也由 composerAttachmentUploadStore 跨卸载保留；上游
+// v3.18 的通用 useContextImageAttachments 仍用组件级 useRef 映射且 "current" 策略卸载不清理，
+// 重挂载后同一上下文的图片会被再次 addAttachmentFiles（重复上传/发送/占用附件名额）。插件路径
+// 维持我们的模块级映射（与上下文 store 同生命周期）；网页元素 chip 走上游通用 hook（卸载撤、重挂补）。
+const materialized = new Map<
+  string,
+  { context: PluginUiModelContext; ids: string[] }
+>();
+
+/** 上下文 → 附件的同步核心；独立导出以便单测模拟"重挂载后再次同步"（映射在模块级存续）。 */
+export function syncPluginUiContextImages(
+  contexts: readonly PluginUiModelContext[],
+  port: ContextImageAttachmentsPort,
+): void {
+  const seen = new Set<string>();
+  for (const context of contexts) {
+    seen.add(context.id);
+    const existing = materialized.get(context.id);
+    if (existing?.context === context) continue;
+    if (existing) {
+      for (const id of existing.ids) port.removeAttachment(id);
+      materialized.delete(context.id);
+    }
+    const files = pluginUiContextImageFiles(context);
+    if (files.length === 0) continue;
+    materialized.set(context.id, {
+      context,
+      ids: port.addAttachmentFiles(files),
+    });
+  }
+  for (const [id, entry] of materialized) {
+    if (seen.has(id)) continue;
+    for (const attachmentId of entry.ids) port.removeAttachment(attachmentId);
+    materialized.delete(id);
+  }
+}
+
+/** 仅测试复位：模块级映射在用例间需要隔离（沿用仓库 *ForTest 导出惯例）。 */
+export function resetPluginUiContextImagesForTest(): void {
+  materialized.clear();
+}
 
 /** 插件上下文里的 image 块 → 本条上下文名下的图片附件，随下一回合发送。 */
 export function usePluginUiContextImages(
   contexts: readonly PluginUiModelContext[],
   port: ContextImageAttachmentsPort,
 ): void {
-  useContextImageAttachments(contexts, port, PLUGIN_UI_CONTEXT_IMAGE_OPTIONS);
+  const portRef = useRef(port);
+  portRef.current = port;
+  useEffect(() => {
+    syncPluginUiContextImages(contexts, portRef.current);
+  }, [contexts]);
 }

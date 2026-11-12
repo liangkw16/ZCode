@@ -36,6 +36,7 @@ import {
   type ModelStreamEvent,
   type PermissionRuleset,
   type SessionEvent,
+  type SessionId,
   type SessionInfo,
   type SessionStorePort,
   type TodoItem,
@@ -57,7 +58,9 @@ import {
 import { createInMemoryHookRunner } from "../src/hooks/index.js";
 import {
   buildPostCompactRuntimeEntries,
+  estimateRuntimeEntryTokens,
   selectCompactEntries,
+  selectCompactEntriesForInitialPromptTooLong,
   toTokenUsageInfo,
 } from "../src/runtime/helpers/index.js";
 import { createToolRegistry } from "../src/tool/registry.js";
@@ -3567,6 +3570,291 @@ describe("AgentRuntime manual compact", () => {
     expect(postCompactRequest).not.toContain(longPrompt);
   });
 
+  it("resolves compact.modelOverrides for the executing model at the auto compact assembly point", async () => {
+    // 命中 override：窗口 240、reserve 1、buffer 10 → 阈值 229；
+    // 未命中：模型窗口 200K → 阈值 199_989。第二轮 usage 230 只在命中侧越线。
+    const compactConfig = {
+      bufferTokens: 10,
+      summaryReserveTokens: 0,
+      modelOverrides: {
+        test: { "GLM-5.3": { contextWindowTokens: 240, outputReserveTokens: 1 } },
+      },
+    };
+
+    const buildRuntime = (sessionId: SessionId, selection: string) => {
+      const eventStore = createTestSessionEventStore();
+      const requests: string[] = [];
+      const debug = vi.fn();
+      const info = vi.fn();
+      const logger = {
+        child: () => logger,
+        debug,
+        error: vi.fn(),
+        info,
+        warn: vi.fn(),
+      };
+      let normalResponseCount = 0;
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          compact: compactConfig,
+          maxOutputTokens: 1,
+          modelSelection: createTestModelSelection(selection),
+          systemPrompt: "You are a model override compact test agent.",
+        },
+        {
+          eventStore,
+          logger,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                requests.push(providerContentToText(request.messages.at(-1)?.content));
+                const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                if (lastContent.includes("create a detailed summary")) {
+                  return {
+                    finishReason: "stop",
+                    text: "<summary>Model override summary.</summary>",
+                    usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+                  };
+                }
+                normalResponseCount++;
+                return {
+                  finishReason: "stop",
+                  text: `normal response ${normalResponseCount}`,
+                  usage: {
+                    inputTokens: normalResponseCount === 2 ? 230 : 3,
+                    outputTokens: 1,
+                    totalTokens: normalResponseCount === 2 ? 231 : 4,
+                  },
+                };
+              },
+            }) as never,
+          ),
+        },
+      );
+      return { eventStore, requests, runtime, sessionId, debug };
+    };
+
+    const hit = buildRuntime(
+      createSessionId("runtime-compact-model-override-hit"),
+      "test/GLM-5.3",
+    );
+    await hit.runtime.executeTurn("warmup");
+    await hit.runtime.executeTurn("old context ".repeat(80));
+    const hitResult = await hit.runtime.executeTurn("continue enough to trigger");
+
+    const hitBoundary = (await hit.eventStore.getEvents(hit.sessionId)).find(
+      (event) => event.type === SessionEventType.CompactBoundary,
+    )?.payload as CompactBoundaryPayload | undefined;
+    expect(hitBoundary).toMatchObject({
+      autoCompactThreshold: 229,
+      trigger: CompactTrigger.Auto,
+    });
+    expect(hit.requests.some((content) => content.includes("create a detailed summary"))).toBe(
+      true,
+    );
+    expect(hitResult.response).toBe("normal response 3");
+    // 判定日志必须带模型身份与策略来源：父子并行/同名跨 provider 场景只能靠它诊断。
+    const hitSkipLog = hit.debug.mock.calls
+      .map((call) => call[1])
+      .find(
+        (context) =>
+          context?.event === "compact.auto.skipped" && context?.modelId === "GLM-5.3",
+      );
+    expect(hitSkipLog).toMatchObject({
+      providerId: "test",
+      modelId: "GLM-5.3",
+      policySource: "model-override",
+      modelOverrideMatched: true,
+      contextWindow: 240,
+      threshold: 229,
+    });
+
+    // 未命中的模型：同配置下不压缩，三轮请求全部是普通响应。
+    const miss = buildRuntime(
+      createSessionId("runtime-compact-model-override-miss"),
+      "test/other-model",
+    );
+    await miss.runtime.executeTurn("warmup");
+    await miss.runtime.executeTurn("old context ".repeat(80));
+    const missResult = await miss.runtime.executeTurn("continue enough to trigger");
+
+    const missEvents = await miss.eventStore.getEvents(miss.sessionId);
+    expect(missEvents.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(
+      false,
+    );
+    expect(miss.requests).toHaveLength(3);
+    expect(miss.requests.some((content) => content.includes("create a detailed summary"))).toBe(
+      false,
+    );
+    expect(missResult.response).toBe("normal response 3");
+    const missSkipLog = miss.debug.mock.calls
+      .map((call) => call[1])
+      .find(
+        (context) =>
+          context?.event === "compact.auto.skipped" && context?.modelId === "other-model",
+      );
+    expect(missSkipLog).toMatchObject({
+      providerId: "test",
+      modelId: "other-model",
+      policySource: "global",
+      modelOverrideMatched: false,
+    });
+  });
+
+  it("derives the microcompact threshold from the model-scoped auto threshold", async () => {
+    // 命中 override：auto 阈值 2999（4K−1−1K）→ micro 默认阈值
+    // max(0, min(⌊2999×0.9⌋, 2999−2000)) = 999；两个工具结果合计 ≈1.5K token 触发。
+    // 未命中：模型窗口 200K → micro 阈值 179_990，不触发。
+    const buildMicroRuntime = (sessionId: SessionId, selection: string) => {
+      const eventStore = createTestSessionEventStore();
+      const debug = vi.fn();
+      const info = vi.fn();
+      const logger = {
+        child: () => logger,
+        debug,
+        error: vi.fn(),
+        info,
+        warn: vi.fn(),
+      };
+      const toolRegistry = createToolRegistry();
+      const oldToolOutput = "old-tool-result-token ".repeat(120);
+      const latestToolOutput = "latest-tool-result-token ".repeat(80);
+      toolRegistry.register({
+        inputSchema: {},
+        metadata: {
+          concurrentSafe: true,
+          destructive: false,
+          name: "LargeRead",
+          needsApproval: false,
+          readOnly: true,
+          riskLevel: "low",
+          sideEffectScope: "none",
+        },
+        handler: async (input) =>
+          (input as { slot?: string }).slot === "old" ? oldToolOutput : latestToolOutput,
+      });
+
+      let normalRequestCount = 0;
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          compact: {
+            bufferTokens: 1_000,
+            summaryReserveTokens: 0,
+            modelOverrides: {
+              test: { "GLM-5.3": { contextWindowTokens: 4_000, outputReserveTokens: 1 } },
+            },
+            // 不设 thresholdTokens：micro 阈值必须由模型级 auto 阈值派生。
+            microcompact: {
+              compactableToolNames: ["LargeRead"],
+              enabled: true,
+              keepRecentToolResults: 1,
+              minTokenSavings: 1,
+            },
+          },
+          maxOutputTokens: 1,
+          mode: "yolo",
+          modelSelection: createTestModelSelection(selection),
+          systemPrompt: "You are a model override microcompact test agent.",
+        },
+        {
+          eventStore,
+          logger,
+          modelFactory: createTestModelFactory({
+            async generateText() {
+              normalRequestCount++;
+              if (normalRequestCount === 1) {
+                return {
+                  finishReason: "tool-calls",
+                  providerMetadata: undefined,
+                  text: "",
+                  toolCalls: [{ id: "large-read-old", name: "LargeRead", input: { slot: "old" } }],
+                  usage: { inputTokens: 10, outputTokens: 1, totalTokens: 11 },
+                };
+              }
+              if (normalRequestCount === 2) {
+                return {
+                  finishReason: "tool-calls",
+                  providerMetadata: undefined,
+                  text: "",
+                  toolCalls: [
+                    { id: "large-read-latest", name: "LargeRead", input: { slot: "latest" } },
+                  ],
+                  usage: { inputTokens: 12, outputTokens: 1, totalTokens: 13 },
+                };
+              }
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "done after local microcompact",
+                usage: { inputTokens: 4, outputTokens: 4, totalTokens: 8 },
+              };
+            },
+          }),
+          toolRegistry,
+        },
+      );
+      return { eventStore, runtime, sessionId, debug, info };
+    };
+
+    const hit = buildMicroRuntime(
+      createSessionId("runtime-microcompact-model-override-hit"),
+      "test/GLM-5.3",
+    );
+    const hitResult = await hit.runtime.executeTurn("read two large files");
+
+    const hitEvents = await hit.eventStore.getEvents(hit.sessionId);
+    const hitMicroBoundary = hitEvents.find(
+      (event) => event.type === SessionEventType.MicrocompactBoundary,
+    )?.payload as MicrocompactBoundaryPayload | undefined;
+    expect(hitMicroBoundary).toMatchObject({
+      clearedToolCallIds: ["large-read-old"],
+      keptToolCallIds: ["large-read-latest"],
+      trigger: MicrocompactTrigger.TokenPressure,
+    });
+    // micro 阈值 999 < auto 阈值 2999：只触发本地裁剪，不触发全量摘要。
+    expect(hitEvents.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+    expect(hitResult.response).toBe("done after local microcompact");
+    // micro 判定日志同样必须带模型身份与策略来源，且不丢失派生阈值。
+    // applied 日志是 info 级；skipped 是 debug 级。
+    const hitAppliedLog = hit.info.mock.calls
+      .map((call) => call[1])
+      .find((context) => context?.event === "compact.micro.applied");
+    expect(hitAppliedLog).toMatchObject({
+      providerId: "test",
+      modelId: "GLM-5.3",
+      policySource: "model-override",
+      modelOverrideMatched: true,
+      thresholdTokens: 999,
+    });
+
+    const miss = buildMicroRuntime(
+      createSessionId("runtime-microcompact-model-override-miss"),
+      "test/other-model",
+    );
+    const missResult = await miss.runtime.executeTurn("read two large files");
+
+    const missEvents = await miss.eventStore.getEvents(miss.sessionId);
+    expect(
+      missEvents.some((event) => event.type === SessionEventType.MicrocompactBoundary),
+    ).toBe(false);
+    expect(missResult.response).toBe("done after local microcompact");
+    const missSkipLog = miss.debug.mock.calls
+      .map((call) => call[1])
+      .find(
+        (context) =>
+          context?.event === "compact.micro.skipped" && context?.modelId === "other-model",
+      );
+    expect(missSkipLog).toMatchObject({
+      providerId: "test",
+      modelId: "other-model",
+      policySource: "global",
+      modelOverrideMatched: false,
+    });
+  });
+
+
   it.each([
     { kept: "full", planFromStart: false, warmupTurns: 2, expected: [1, 0] },
     { kept: "sparse", planFromStart: true, warmupTurns: 6, expected: [1, 1] },
@@ -6384,3 +6672,125 @@ function createRecordingSessionStore(
     },
   };
 }
+
+describe("compact recent preservation policy", () => {
+  const entries: RuntimeMessageEntry[] = [
+    { message: { role: "system", content: "system prompt" } },
+    { message: { role: "user", content: "round1 request" } },
+    { message: { role: "assistant", content: "round1 response" } },
+    { message: { role: "user", content: "round2 request" } },
+    { message: { role: "assistant", content: "round2 response" } },
+    { message: { role: "user", content: "round3 request" } },
+    { message: { role: "assistant", content: "round3 response" } },
+  ];
+  const messageContents = (list: readonly RuntimeMessageEntry[]): string[] =>
+    list.flatMap((entry) => ("message" in entry ? [entry.message.content] : []));
+
+  it("defaults to preserving the most recent round for auto compact", () => {
+    const selection = selectCompactEntries({ entries, trigger: CompactTrigger.Auto });
+    expect(selection.groupsPreserved).toBe(1);
+    // 轮组以 assistant 为起点：最后一组只含最新的 assistant 消息。
+    expect(messageContents(selection.preservedEntries)).toEqual(["round3 response"]);
+  });
+
+  it("preserves keepRecentRounds groups when configured", () => {
+    const selection = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentRounds: 2 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(selection.groupsPreserved).toBe(2);
+    expect(messageContents(selection.preservedEntries)).toEqual([
+      "round2 response",
+      "round3 request",
+      "round3 response",
+    ]);
+  });
+
+  it("preserves groups until the keepRecentTokens budget is covered", () => {
+    // 预算小于最新一组：仍保底保留 1 组。
+    const tiny = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentTokens: 1 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(tiny.groupsPreserved).toBe(1);
+
+    // 超大预算覆盖全部轮组：保留段受摘要区可压缩条件封顶（4 组最多保留 2 组，
+    // 摘要区剩 [u1],[a1,u2] 两组且含 assistant），压缩不会退化成 no-op。
+    const huge = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentTokens: 1_000_000 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(huge.groupsPreserved).toBe(2);
+    expect(messageContents(huge.entriesForSummary)).toEqual([
+      "system prompt",
+      "round1 request",
+      "round1 response",
+      "round2 request",
+    ]);
+  });
+
+  it("ignores the preservation policy for manual compact", () => {
+    const selection = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentRounds: 2, keepRecentTokens: 1_000_000 },
+      trigger: CompactTrigger.Manual,
+    });
+    expect(selection.groupsPreserved).toBe(0);
+    expect(selection.preservedEntries).toEqual([]);
+  });
+
+  it("caps aggressive keepRecent so the summary region stays compactable", () => {
+    // 4 个轮组（[u1], [a1,u2], [a2,u3], [a3]）：keepRecentRounds=4 请求保留全部，
+    // 但摘要区必须保留 ≥2 组且含 assistant → 封顶 2，压缩不会退化成 no-op。
+    const selection = selectCompactEntries({
+      entries,
+      preserveRecent: { keepRecentRounds: 4 },
+      trigger: CompactTrigger.Auto,
+    });
+    expect(selection.groupsPreserved).toBe(2);
+    expect(messageContents(selection.entriesForSummary)).toEqual([
+      "system prompt",
+      "round1 request",
+      "round1 response",
+      "round2 request",
+    ]);
+  });
+
+  it("keeps the configured preserve floor when reactive overflow reselects entries", () => {
+    // 6 个轮组：按最后一组实测 token 构造只差 1 组的 overflow gap，
+    // 无配置时重选保留 2 组；keepRecentRounds=3 应作为下限生效（bug：曾降回 2）。
+    const longEntries: RuntimeMessageEntry[] = [
+      { message: { role: "system", content: "system prompt" } },
+      { message: { role: "user", content: "round1 request" } },
+      { message: { role: "assistant", content: "round1 response" } },
+      { message: { role: "user", content: "round2 request" } },
+      { message: { role: "assistant", content: "round2 response" } },
+      { message: { role: "user", content: "round3 request" } },
+      { message: { role: "assistant", content: "round3 response" } },
+      { message: { role: "user", content: "round4 request" } },
+      { message: { role: "assistant", content: "round4 response" } },
+      { message: { role: "user", content: "round5 request" } },
+      { message: { role: "assistant", content: "round5 response" } },
+    ];
+    const lastGroupTokens = estimateRuntimeEntryTokens([longEntries[longEntries.length - 1]!]);
+    const promptTooLongCause = `${lastGroupTokens + 3} tokens > 1`;
+
+    const withoutPolicy = selectCompactEntriesForInitialPromptTooLong({
+      entries: longEntries,
+      promptTooLongCause,
+      trigger: CompactTrigger.Reactive,
+    });
+    expect(withoutPolicy?.groupsPreserved).toBe(2);
+
+    const withPolicy = selectCompactEntriesForInitialPromptTooLong({
+      entries: longEntries,
+      preserveRecent: { keepRecentRounds: 3 },
+      promptTooLongCause,
+      trigger: CompactTrigger.Reactive,
+    });
+    expect(withPolicy?.groupsPreserved).toBe(3);
+  });
+});

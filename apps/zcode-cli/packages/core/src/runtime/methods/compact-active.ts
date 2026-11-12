@@ -25,7 +25,8 @@ import {
   createCompactBoundaryId,
   getUsageTotalTokens,
 } from "../deps.js";
-import type { SessionEvent, TraceContext } from "../deps.js";
+import type { SessionEvent, TraceContext, ModelSelection } from "../deps.js";
+import type { AutoCompactPolicyConfig } from "../deps.js";
 import {
   defaultCompactPhaseForTrigger,
   defaultCompactReasonForTrigger,
@@ -54,6 +55,7 @@ import {
   buildRuntimeModeReminderBodyForTask,
   hasFullRuntimeModeReminder,
 } from "../helpers/index.js";
+import type { CompactRecentPreservationPolicy } from "../helpers/index.js";
 import {
   buildCompactLeadingAnnouncements,
   collectSkillsListing,
@@ -73,6 +75,7 @@ import {
 import { selectPersistedCompactTail } from "../helpers/compact-preservation.js";
 import {
   buildCompactSummaryRequestMessages,
+  coerceToolSearchModeForModel,
   createCompactContextExceededFinishError,
   createCompactPromptTooLongError,
   formatCompactSummaryOrThrow,
@@ -203,11 +206,24 @@ async function compactActiveConversationImpl(
   const trigger = options.trigger ?? CompactTrigger.Manual;
   const phase = options.phase ?? defaultCompactPhaseForTrigger(trigger);
   const compactReason = options.compactReason ?? defaultCompactReasonForTrigger(trigger);
+  // 独立摘要模型（compact.summaryProvider/summaryModel）是显式用户配置，
+  // 优先级高于 auto/reactive 链路为复用而传入的 options.model。
+  const summaryModelSelection = resolveCompactSummaryModelSelection(this.config.compact);
   const compactModel =
-    options.model ??
-    createRuntimeModel(this, {
-      selection: this.getSessionModelSelection(),
+    summaryModelSelection !== undefined
+      ? createRuntimeModel(this, { selection: summaryModelSelection })
+      : (options.model ??
+        createRuntimeModel(this, {
+          selection: this.getSessionModelSelection(),
+        }));
+  if (summaryModelSelection !== undefined) {
+    this.logger?.info("Compact summary model override active", {
+      event: "compact.summary_model_override",
+      module: "core.runtime",
+      model: `${summaryModelSelection.providerId}/${summaryModelSelection.modelId}`,
+      trigger,
     });
+  }
   const executionMaxOutputTokens = compactModel.optionSpecs.maxOutputTokens.max;
   // Active compact 会跨多个 await 保留这份成员浅快照；它依赖 RuntimeMessageEntry
   // 不可变约定。selection、provider render 和最终 replace 会创建各自拥有的副本，
@@ -219,6 +235,7 @@ async function compactActiveConversationImpl(
   const initialSelection = selectInitialCompactEntriesForActiveConversation({
     activeEntries,
     initialPromptTooLongCause: options.initialPromptTooLongCause,
+    preserveRecent: resolveCompactRecentPreservationPolicy(this.config.compact),
     trigger,
     useMidConversationSystem,
   });
@@ -284,6 +301,13 @@ async function compactActiveConversationImpl(
   // 修复原因：摘要请求另选工具（只带 ToolSearch 相关工具，或超过 100 个时发空列表）时，
   // tools 段与主循环不同，整个摘要请求不命中主循环的前缀缓存。
   const compactCandidates = options.getContinuationTools?.() ?? this.getTools(compactModel);
+  // kcode 本地语义（10-30 合并取上游工具目录时声明被误删，tsc 增量缓存漏检）：
+  // 摘要请求可能路由到独立摘要模型（跨 provider），会话级 toolSearch 是主模型的能力
+  // 契约，必须按摘要模型能力降级后再交给请求准备入口投影。
+  const compactToolSearchMode = coerceToolSearchModeForModel(
+    this.config.toolSearch?.mode,
+    compactModel,
+  );
   const registry = this.getToolRegistry();
 
   while (true) {
@@ -345,6 +369,7 @@ async function compactActiveConversationImpl(
           prompt: compactPrompt,
           applyCacheControl: true,
           skipCacheWrite: true,
+          toolSearchMode: compactToolSearchMode,
         });
         const requestMessages = prepared.request.messages;
         const recordableEntries = filterOutputTokenContinuationEntries(prepared.entries);
@@ -418,7 +443,10 @@ async function compactActiveConversationImpl(
         events.push(modelRequestEvent);
         const modelStartedAt = Date.now();
         const networkEventStartIndex = events.length;
-        const compactSummaryMaxOutputTokens = capCompactSummaryMaxOutputTokens(compactModel);
+        const compactSummaryMaxOutputTokens = capCompactSummaryMaxOutputTokens(
+          compactModel,
+          this.config.compact,
+        );
         using statusSink = this.createModelStatusSink(modelTraceContext, events);
         const compactModelRequest = {
           abortSignal: options.abortSignal,
@@ -840,11 +868,13 @@ function canUseCompactSummaryTruncationFallback(trigger: CompactTrigger): boolea
 function selectInitialCompactEntriesForActiveConversation(input: {
   activeEntries: readonly RuntimeMessageEntry[];
   initialPromptTooLongCause?: unknown;
+  preserveRecent?: CompactRecentPreservationPolicy;
   trigger: CompactTrigger;
   useMidConversationSystem?: boolean;
 }) {
   const baseSelection = selectCompactEntries({
     entries: input.activeEntries,
+    ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
     trigger: input.trigger,
   });
   if (input.initialPromptTooLongCause === undefined) {
@@ -855,19 +885,53 @@ function selectInitialCompactEntriesForActiveConversation(input: {
     selectCompactEntriesForInitialPromptTooLong({
       entries: input.activeEntries,
       promptTooLongCause: input.initialPromptTooLongCause,
+      ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
       trigger: input.trigger,
       useMidConversationSystem: input.useMidConversationSystem,
     }) ?? baseSelection
   );
 }
 
-function capCompactSummaryMaxOutputTokens(model: Model): number {
-  // Compact 是独立执行链，在这里显式选择模型上限与 summary 20K 上限中的较小值。
+function capCompactSummaryMaxOutputTokens(
+  model: Model,
+  config: AutoCompactPolicyConfig | undefined,
+): number {
+  const configured = config?.summaryMaxOutputTokens;
+  const summaryCap =
+    typeof configured === "number" && Number.isFinite(configured) && configured > 0
+      ? Math.floor(configured)
+      : MAX_OUTPUT_TOKENS_FOR_SUMMARY;
+  // Compact 是独立执行链，在这里显式选择模型上限与 summary 上限中的较小值。
   const desired = Math.min(
     resolveNormalRequestMaxOutputTokens({
       modelMaxOutputTokens: model.optionSpecs.maxOutputTokens.max,
     }),
-    MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+    summaryCap,
   );
   return Math.min(desired, model.optionSpecs.maxOutputTokens.max);
+}
+
+function resolveCompactSummaryModelSelection(
+  config: AutoCompactPolicyConfig | undefined,
+): ModelSelection | undefined {
+  const providerId = config?.summaryProvider?.trim();
+  const modelId = config?.summaryModel?.trim();
+  if (!providerId || !modelId) return undefined;
+  return { providerId, modelId };
+}
+
+function resolveCompactRecentPreservationPolicy(
+  config: AutoCompactPolicyConfig | undefined,
+): CompactRecentPreservationPolicy | undefined {
+  if (config?.keepRecentTokens === undefined && config?.keepRecentRounds === undefined) {
+    return undefined;
+  }
+  return {
+    ...(config?.keepRecentRounds !== undefined
+      ? { keepRecentRounds: config.keepRecentRounds }
+      : {}),
+    ...(config?.keepRecentTokens !== undefined
+      ? { keepRecentTokens: config.keepRecentTokens }
+      : {}),
+  };
 }

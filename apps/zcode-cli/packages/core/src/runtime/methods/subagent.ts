@@ -15,6 +15,7 @@ import {
   CoreErrorType,
 } from "../deps.js";
 import type {
+  AutoCompactPolicyConfig,
   ExploreSubagentRuntimeRequest,
   McpConnectionSnapshot,
   McpPort,
@@ -313,6 +314,11 @@ export function createDefaultSubagentPort(
             modelSelection: cloneModelSelection(childSelection),
             modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
             workingDirectory: request.workingDirectory,
+            // child 只继承 modelOverrides 覆盖表（无则不设 compact 键，维持子代理默认策略）；
+            // 覆盖表在 child 组装点按 child 自己的模型身份解析。
+            ...(buildChildCompactConfig(this.config.compact)
+              ? { compact: buildChildCompactConfig(this.config.compact) }
+              : {}),
             // Bash cd 只改变执行 cwd；若丢失绑定身份，child 会落到另一个 workspace，重启后无法打开。
             workspacePath: this.config.workspacePath ?? request.workspaceRoot,
             workspaceIdentity:
@@ -610,6 +616,18 @@ export function modelSelectionFromActiveModel(model: Model): ModelSelection {
     modelId: model.modelId,
     ...(reasoningLevel ? { options: { reasoningLevel } } : {}),
   };
+}
+
+/** child 继承的父 compact 配置输入（未解析的策略对象）。 */
+export type ChildCompactConfigParent = AutoCompactPolicyConfig | undefined;
+
+export function buildChildCompactConfig(parentCompact: ChildCompactConfigParent): AutoCompactPolicyConfig | undefined {
+  // child 只继承未解析的 modelOverrides 覆盖表：全局阈值字段继续不传（维持现状，
+  // 否则老用户配置的全局字段会改变子代理压缩节奏）；child 在组装点用自己的
+  // Active Model 解析，父代理解析结果不传给 child。
+  return parentCompact?.modelOverrides
+    ? { modelOverrides: parentCompact.modelOverrides }
+    : undefined;
 }
 
 function createSubagentOverrideModelFactory(

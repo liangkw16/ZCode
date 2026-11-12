@@ -8,6 +8,8 @@
 
 compact 阶段语义与 memory read/write path 的增量改造计划见 [compact-phase-memory-plan.md](./compact-phase-memory-plan.md)。
 
+按模型覆盖阈值策略（`compact.modelOverrides`）的设计与实施见 [model-overrides-design.md](./model-overrides-design.md) 与 [model-overrides-plan.md](./model-overrides-plan.md)。
+
 Compact 的目标不是简单减少 UI 中可见消息，而是在不丢失当前任务连续性的前提下，把模型可见上下文从“完整历史”切换为“断点 + 总结 + 必要恢复上下文”。因此它必须和 session、message chain、tool result、memory、hooks、rewind、file checkpoint、resume 和 trace 一起设计。
 
 ---

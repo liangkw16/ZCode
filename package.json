@@ -79,7 +79,7 @@
     "db:schema:update": "pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts --update",
     "provider:regression:report": "tsx apps/zcode-cli/tools/provider-regression/src/report-cli.ts",
     "provider:regression": "pnpm --filter @zcode/bootstrap... build && tsx apps/zcode-cli/tools/provider-regression/src/cli.ts",
-    "test:engineering": "vitest run --project engineering",
+    "test:engineering": "vitest run --project unit --project fork-isolated",
     "test:engineering:affected": "node scripts/run-affected-engineering-tests.mjs",
     "test:engineering-tools": "node --test scripts/test/affected-engineering-test-cli.test.mjs scripts/test/pre-push-worktree.test.mjs scripts/test/retired-app-unit-evidence.test.mjs scripts/test/e2e-remote-targets-check.test.mjs",
     "check:e2e-remote-targets": "node scripts/check-e2e-remote-targets.mjs",

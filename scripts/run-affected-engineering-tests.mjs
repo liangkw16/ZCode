@@ -57,7 +57,9 @@ export async function main(argv = process.argv.slice(2)) {
         "test",
         {
           root,
-          project: ["engineering"],
+          // kcode 把工程测试拆成 unit（threads）与 fork-isolated（串行 fork）两个项目；
+          // 上游仍是单一 engineering 项目（CLI 回归夹具也用该名）。按名字取交集选择。
+          project: ["engineering", "unit", "fork-isolated"],
           watch: false,
           run: true,
           reporters: ["default"],

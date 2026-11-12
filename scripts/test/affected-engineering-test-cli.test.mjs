@@ -28,6 +28,8 @@ async function fixture(t) {
     process.platform === "win32" ? "junction" : "dir",
   );
   const write = (path, content) => writeFile(join(root, path), content);
+  // 修复原因：机器级 core.hooksPath（如企业提交钩子链）会接管夹具仓库的 .git/hooks，
+  // "真实 git push"用例里自装的 pre-push 永不执行。夹具必须显式回退到仓库内钩子目录。
   const git = async (...args) =>
     (
       await exec(
@@ -39,6 +41,8 @@ async function fixture(t) {
           "user.email=test@example.invalid",
           "-c",
           "commit.gpgsign=false",
+          "-c",
+          "core.hooksPath=.git/hooks",
           ...args,
         ],
         { cwd: root, env },
@@ -419,7 +423,8 @@ test("真实 git push 消费任意显式基线，而不是 remote SHA", async (t
   await git("add", ".");
   await git("commit", "-m", "unrelated feature");
   // remote SHA 的范围只有无关联文本；显式 comparison-ref 的范围含公共 setup，应选中整个套件并跳过。
-  const result = await exec("git", ["push", "origin", "main"], {
+  // 与夹具 git() 相同的 hooksPath 回退：本机全局钩子链不得接管这里的 pre-push。
+  const result = await exec("git", ["-c", "core.hooksPath=.git/hooks", "push", "origin", "main"], {
     cwd: root,
     env: { ...env, ZCODE_AFFECTED_TEST_BASE: "comparison-ref" },
   });
@@ -429,7 +434,10 @@ test("真实 git push 消费任意显式基线，而不是 remote SHA", async (t
   await assert.rejects(readFile(join(root, "selected")), { code: "ENOENT" });
 });
 
-for (const file of ["vitest.config.ts", "scripts/engineering-test-files.json"]) {
+// kcode 的 vitest.config.ts 用 glob include 而非上游的 engineering-test-files.json
+// 清单 import：清单只服务 coverage matrix 证据（retired-app-unit-evidence），不再是
+// 配置依赖，官方选择对它为 0 是正确行为；全量触发只保留 vitest.config.ts。
+for (const file of ["vitest.config.ts"]) {
   test(`real worktree trigger selects all engineering tests for ${file}`, async () => {
     const result = await exec(process.execPath, [entry, "--files", file, "--dry-run"], {
       cwd: resolve("."),

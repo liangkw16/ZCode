@@ -279,6 +279,10 @@ describe("terminal 与 V2 假 relay 的线级契约", () => {
 
   it("网络和5xx保持500ms指数退避，上限10秒", async () => {
     let fail: "server" | "network" | undefined = "server";
+    // 退避带 ±20% jitter，且 WebRemoteControlV2RetryPolicy 在构造时捕获 Math.random 引用
+    // （默认参数）：种子必须先于 fixture（transport 构造）生效，测试体内再 mock 已无效。
+    // random 固定 0.5 使抖动因子恰为 1.0，逐毫秒边界断言才确定。
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
     const h = await fixture({
       users: { jwt: "user-1" },
       onHttp: (call) =>

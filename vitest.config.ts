@@ -128,6 +128,9 @@ export default defineConfig({
           exclude: [
             "packages/desktop/test/e2e/**",
             "packages/zcode-cua/**",
+            // node:test 格式的 CI 专有回归（agent-crash 退出诊断在 Linux CI 复现），
+            // 由 .gitlab/ci job 直接 node --test 执行，Vitest 读了会报 "No test suite"。
+            "packages/desktop/test/*.node.test.ts",
             ...forkIsolatedTests,
           ],
           // Node 24/macOS 的 threads 全量运行可触发 V8 SIGSEGV；诊断时切换进程隔离，测试范围不变。

@@ -226,8 +226,12 @@ export class WebRemoteControlEntry {
   selectDevice(sid: string, viaRefresh = false): void {
     // 连接已开始（reset 清空列表）后的重复点击直接忽略，不能重启入口。
     if (!this.list) return;
+    // 只有"已接受过某次列表会话"才需要会话一致性重启（上游 v3.18 语义：账号/revision
+    // 切换后点击应重启入口）；列表尚在 loading/失败、还没接受过任何会话时不能把点击
+    // 变成重启——那会吞掉点击（54442ada 修复的真机缺陷），继续走下方刷新重试路径。
     if (
-      !this.matchesSession(this.list.acceptedJwt ?? null, this.list.acceptedRevision ?? null)
+      this.list.acceptedJwt &&
+      !this.matchesSession(this.list.acceptedJwt, this.list.acceptedRevision ?? null)
     ) {
       void this.start();
       return;

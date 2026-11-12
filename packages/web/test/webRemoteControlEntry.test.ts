@@ -20,6 +20,9 @@ function setup(
     logout: vi.fn(async () => {
       jwt = null;
     }),
+    // 上游 v3.18 auth 契约新增；mock 下会话 revision 与 JWT 同生命周期。
+    getSessionRevision: () => jwt,
+    subscribeSessionChange: () => () => {},
   };
   const token = vi.fn(async () => "one-use-token");
   const connect = vi.fn();

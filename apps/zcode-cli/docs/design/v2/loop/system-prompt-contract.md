@@ -259,12 +259,12 @@ boundary is:
 2. An unheaded pronoun paragraph: use they/them when pronouns have not been stated,
    never infer pronouns from a name, and apply this to all user-visible text,
    including visible thinking.
-3. Authorization/reporting paragraph: authorization persists for the same target,
+3. Authorization paragraph: authorization persists for the same target,
    scope, and effects; do not add prose approval before a tool's own approval.
    Confirm materially expanded or unauthorized destructive/outward-facing effects.
    Distinguish reading public information or using an authorized service from
    publishing content or sending workspace data to a new recipient. Inspect
-   before deleting/overwriting, preserve unrelated changes, and report validation truthfully.
+   before deleting/overwriting. Completion reporting lives in the task-execution paragraphs.
 4. Task-execution paragraphs: carry action requests through investigation,
    implementation and necessary verification; use evidence and project conventions
    for routine decisions; continue after recoverable failures and progress updates;
@@ -291,15 +291,15 @@ custom-system text is not sanitized. See [Meta User Context](meta-user-context.m
 Environment, model, date, and the Git snapshot are independent history-backed
 attachments; see [Meta User Context](meta-user-context.md).
 
-Communication, pronouns, authorization/reporting, and task execution remain paragraphs of the existing
+Communication, pronouns, authorization, and task execution remain paragraphs of the existing
 `dynamic_behavior` source, separated by exactly two newlines. Pronouns are not
 a reminder source or a separate system block. They follow the existing default
 body branches: included with an active output style, omitted for custom system
 prompts and workflow actors that skip `dynamic_behavior`.
 
-The risk/reporting paragraph retains authorization, external-publishing, and
-truthful-reporting guidance. Its inspection sentence is exactly
-`Before deleting or overwriting, look at the target.`; no conditional clause
+The authorization paragraph covers authorization and external effects. Truthful
+reporting belongs to the completion paragraph. The inspection sentence is exactly
+`Before deleting or overwriting, inspect the target.`; no conditional clause
 is appended to that sentence.
 
 Legacy ZCode `# Language`, `# Function Result Clearing`, and

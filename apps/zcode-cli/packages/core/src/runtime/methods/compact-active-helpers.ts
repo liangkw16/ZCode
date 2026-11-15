@@ -1,6 +1,8 @@
 import {
   COMPACT_PROMPT_TOO_LONG_USER_MESSAGE,
   CoreErrorType,
+  SessionEventType,
+  isCoreError,
   MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   createCoreError,
   formatCompactSummary,
@@ -9,14 +11,17 @@ import {
 import type {
   CompactTimelinePayload,
   AutoCompactPolicyConfig,
+  ModelSelection,
+  CompactTrigger,
   Model,
   SessionEvent,
-  SessionEventType,
   ToolSearchMode,
   TraceContext,
 } from "../deps.js";
 import {
   buildProviderRequestMessages,
+  selectCompactEntries,
+  selectCompactEntriesForInitialPromptTooLong,
   createModelContextExceededFinishError,
   isContextExceededFinishReason,
   readRawFinishReason,
@@ -29,6 +34,12 @@ import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
 import { resumeStoredSessionEventPublication } from "./events.js";
 
+const COMPACT_SUMMARY_OUTPUT_LIMIT_REASON = "compact_summary_output_limit";
+
+export function isCompactSummaryOutputLimitError(error: unknown): boolean {
+  return isCoreError(error) && error.context?.reason === COMPACT_SUMMARY_OUTPUT_LIMIT_REASON;
+}
+
 export const COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT =
   "The previous summary exceeded the output limit. Rewrite the complete handoff substantially more concisely. Preserve the current goal, constraints, evidence gaps, and next action; omit repeated history and long excerpts.";
 
@@ -38,7 +49,7 @@ export function createCompactSummaryOutputLimitError(result: RuntimeModelTextRes
     "Compact summary exceeded the output limit; the original history was preserved.",
     {
       context: {
-        reason: "compact_summary_output_limit",
+        reason: COMPACT_SUMMARY_OUTPUT_LIMIT_REASON,
         finishReason: result.finishReason,
         rawFinishReason: readRawFinishReason(result.providerMetadata),
       },
@@ -242,4 +253,63 @@ export function resolveCompactRecentPreservationPolicy(
       ? { keepRecentTokens: config.keepRecentTokens }
       : {}),
   };
+}
+
+export function selectInitialCompactEntriesForActiveConversation(input: {
+  activeEntries: readonly RuntimeMessageEntry[];
+  initialPromptTooLongCause?: unknown;
+  preserveRecent?: CompactRecentPreservationPolicy;
+  trigger: CompactTrigger;
+  useMidConversationSystem?: boolean;
+}) {
+  const baseSelection = selectCompactEntries({
+    entries: input.activeEntries,
+    ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
+    trigger: input.trigger,
+  });
+  if (input.initialPromptTooLongCause === undefined) {
+    return baseSelection;
+  }
+
+  return (
+    selectCompactEntriesForInitialPromptTooLong({
+      entries: input.activeEntries,
+      promptTooLongCause: input.initialPromptTooLongCause,
+      ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
+      trigger: input.trigger,
+      useMidConversationSystem: input.useMidConversationSystem,
+    }) ?? baseSelection
+  );
+}
+
+export function resolveCompactSummaryModelSelection(
+  config: AutoCompactPolicyConfig | undefined,
+): ModelSelection | undefined {
+  const providerId = config?.summaryProvider?.trim();
+  const modelId = config?.summaryModel?.trim();
+  if (!providerId || !modelId) return undefined;
+  return { providerId, modelId };
+}
+
+/** 截断请求同样消耗真实用量；只发计量事件，不把半截文字保存成有效摘要。 */
+export async function recordCompactModelCompletion(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  content: string,
+  trace: TraceContext,
+  events: SessionEvent[],
+): Promise<void> {
+  const event = runtime.createEvent(
+    SessionEventType.ModelComplete,
+    {
+      content,
+      stopReason: result.finishReason,
+      usage: result.usage,
+      querySource: "compact",
+      toolCallCount: 0,
+    },
+    trace,
+  );
+  await runtime.appendEvent(event, trace);
+  events.push(event);
 }

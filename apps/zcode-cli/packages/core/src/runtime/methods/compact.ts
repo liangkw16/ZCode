@@ -25,6 +25,7 @@ import {
 import type { TurnResult, RunModelTextRequestOptions } from "../types.js";
 import type { Model } from "../deps.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import { isCompactSummaryOutputLimitError } from "./compact-active-helpers.js";
 import { autoCompactDecisionLogContext } from "./compact-log-context.js";
 import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
 import type {
@@ -327,6 +328,8 @@ export async function autoCompactIfNeeded(
       throw error;
     }
     this.autoCompactConsecutiveFailures++;
+    // 输出恢复已经耗尽，不能先发相同主请求再通过 reactive compact 重置恢复预算。
+    if (isCompactSummaryOutputLimitError(error)) throw error;
     this.logger?.warn("Auto compact failed", {
       ...traceContextToLogContext(turnTraceContext),
       errorMessage: error instanceof Error ? error.message : String(error),
@@ -491,6 +494,8 @@ export async function reactiveCompactAfterContextExceeded(
       throw error;
     }
     this.autoCompactConsecutiveFailures++;
+    // 输出恢复已经耗尽，不能先发相同主请求再通过 reactive compact 重置恢复预算。
+    if (isCompactSummaryOutputLimitError(error)) throw error;
     this.logger?.warn("Reactive compact failed after model context overflow", {
       ...traceContextToLogContext(turnTraceContext),
       errorMessage: error instanceof Error ? error.message : String(error),

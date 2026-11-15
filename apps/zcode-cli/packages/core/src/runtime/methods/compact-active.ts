@@ -22,9 +22,7 @@ import {
   createCompactBoundaryId,
   getUsageTotalTokens,
 } from "../deps.js";
-import type { SessionEvent, TraceContext, ModelSelection } from "../deps.js";
-import type { CompactRecentPreservationPolicy } from "../helpers/index.js";
-import type { AutoCompactPolicyConfig } from "../deps.js";
+import type { SessionEvent, TraceContext } from "../deps.js";
 import {
   defaultCompactPhaseForTrigger,
   defaultCompactReasonForTrigger,
@@ -34,9 +32,7 @@ import {
   estimateRuntimeEntryTokens,
   getRuntimeEntriesToSummarize,
   hasEnoughRuntimeEntriesToCompact,
-  selectCompactEntries,
   selectCompactEntriesAfterPromptTooLong,
-  selectCompactEntriesForInitialPromptTooLong,
   throwIfTurnAborted,
   isTurnCancellationError,
   isModelContextExceededError,
@@ -65,13 +61,14 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import {
   legacySyntheticRuntimeMetadata,
   systemReminderAttachmentEntry,
-  type RuntimeMessageEntry,
 } from "../../agent/message-history.js";
 import { selectPersistedCompactTail } from "../helpers/compact-preservation.js";
 import {
   buildCompactSummaryRequestMessages,
   capCompactSummaryMaxOutputTokens,
   resolveCompactRecentPreservationPolicy,
+  resolveCompactSummaryModelSelection,
+  selectInitialCompactEntriesForActiveConversation,
   COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT,
   createCompactSummaryOutputLimitError,
   coerceToolSearchModeForModel,
@@ -80,6 +77,7 @@ import {
   formatCompactSummaryOrThrow,
   persistCompactTimelineEvent,
   publishCommittedCompactEvents,
+  recordCompactModelCompletion,
 } from "./compact-active-helpers.js";
 import { runCompactSummaryModelRequest } from "./compact-summary-model-request.js";
 import { createRefreshRuntimeHeadersBeforeModelAttempt } from "./model-runtime-headers.js";
@@ -210,6 +208,7 @@ async function compactActiveConversationImpl(
   const maxAttempts = trigger === CompactTrigger.Auto ? AUTO_COMPACT_MAX_ATTEMPTS : 1;
   let attempt = 1;
   let outputRecoveryUsed = false;
+  let compactRequestAttempt = 0;
   const compactTimeline: CompactTimelineContext = {
     operationId: `cmp_${crypto.randomUUID()}`,
     messageId: createMessageId(),
@@ -410,6 +409,8 @@ async function compactActiveConversationImpl(
           compactModel,
           this.config.compact,
         );
+        // 输出重生成和媒体重试也是真实请求，不能沿用 PTL 次数导致 usage 主键覆盖。
+        const usageAttemptIndex = compactRequestAttempt++;
         using statusSink = this.createModelStatusSink(modelTraceContext, events);
         const compactModelRequest = {
           abortSignal: options.abortSignal,
@@ -446,7 +447,7 @@ async function compactActiveConversationImpl(
           });
         } catch (error) {
           await recordModelUsageFact(this, {
-            attemptIndex: compactPromptTooLongAttempts,
+            attemptIndex: usageAttemptIndex,
             error,
             events,
             model: compactModel,
@@ -485,7 +486,7 @@ async function compactActiveConversationImpl(
         }
 
         await recordModelUsageFact(this, {
-          attemptIndex: compactPromptTooLongAttempts,
+          attemptIndex: usageAttemptIndex,
           events,
           model: compactModel,
           networkEventStartIndex,
@@ -506,8 +507,15 @@ async function compactActiveConversationImpl(
             readRawFinishReason(result.providerMetadata),
           )
         ) {
+          await recordCompactModelCompletion(this, result, "", modelTraceContext, events);
           if (outputRecoveryUsed) throw createCompactSummaryOutputLimitError(result);
           outputRecoveryUsed = true;
+          this.logger?.info("Compact summary output limit; regenerating a shorter handoff", {
+            ...traceContextToLogContext(modelTraceContext),
+            event: "compact.summary.output_limit.retry",
+            operationId: compactTimeline.operationId,
+            finishReason: result.finishReason,
+          });
           compactPrompt = `${buildCompactPrompt(customInstructions)}\n\n${COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT}`;
           continue;
         }
@@ -632,19 +640,7 @@ async function compactActiveConversationImpl(
         ...(compactSessionStart.entry ? [compactSessionStart.entry] : []),
       ];
 
-      const modelCompleteEvent = this.createEvent(
-        SessionEventType.ModelComplete,
-        {
-          content: summary,
-          stopReason: result.finishReason,
-          usage: result.usage,
-          querySource: "compact",
-          toolCallCount: 0,
-        },
-        modelTraceContext,
-      );
-      await this.appendEvent(modelCompleteEvent, modelTraceContext);
-      events.push(modelCompleteEvent);
+      await recordCompactModelCompletion(this, result, summary, modelTraceContext, events);
 
       const summaryMessageId = createMessageId();
       const summaryMessageContent = buildCompactSummaryMessage(persistedSummary, {
@@ -860,40 +856,4 @@ function isAutoCompactRetryableError(error: unknown): boolean {
 
 function canUseCompactSummaryTruncationFallback(trigger: CompactTrigger): boolean {
   return trigger !== CompactTrigger.Auto && trigger !== CompactTrigger.Reactive;
-}
-
-function selectInitialCompactEntriesForActiveConversation(input: {
-  activeEntries: readonly RuntimeMessageEntry[];
-  initialPromptTooLongCause?: unknown;
-  preserveRecent?: CompactRecentPreservationPolicy;
-  trigger: CompactTrigger;
-  useMidConversationSystem?: boolean;
-}) {
-  const baseSelection = selectCompactEntries({
-    entries: input.activeEntries,
-    ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
-    trigger: input.trigger,
-  });
-  if (input.initialPromptTooLongCause === undefined) {
-    return baseSelection;
-  }
-
-  return (
-    selectCompactEntriesForInitialPromptTooLong({
-      entries: input.activeEntries,
-      promptTooLongCause: input.initialPromptTooLongCause,
-      ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
-      trigger: input.trigger,
-      useMidConversationSystem: input.useMidConversationSystem,
-    }) ?? baseSelection
-  );
-}
-
-function resolveCompactSummaryModelSelection(
-  config: AutoCompactPolicyConfig | undefined,
-): ModelSelection | undefined {
-  const providerId = config?.summaryProvider?.trim();
-  const modelId = config?.summaryModel?.trim();
-  if (!providerId || !modelId) return undefined;
-  return { providerId, modelId };
 }

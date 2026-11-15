@@ -47,6 +47,7 @@ describe("compact persistence model selection", () => {
 // 通过真实 runtime + 录制 store 注入提交后的事件故障，断言活动上下文与持久化结果一致。
 import {
   CompactTrigger,
+  ModelErrorCode,
   SessionEventType,
   createRootTraceContext,
   createSessionId,
@@ -57,18 +58,37 @@ import { createTestModelFactory } from "./test-runtime-model.js";
 import { createRecordingMessageStore } from "./runtime-output-token-continuation-test-helpers.js";
 import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
 
-async function committedFixture() {
+async function committedFixture(outputLimit: "none" | "once" | "always" = "none") {
   const sessionId = createSessionId();
-  const store = createRecordingMessageStore();
+  const usageFacts: { id: string; querySource: string; inputTokens?: number }[] = [];
+  const store = Object.assign(createRecordingMessageStore(), {
+    async recordModelUsage(fact: (typeof usageFacts)[number]) {
+      usageFacts.push(fact);
+    },
+    async upsertTurnUsage() {},
+    async upsertToolUsage() {},
+  });
   let summaryCalls = 0;
   const factory = createTestModelFactory({
-    generateText: async (request) => ({
-      finishReason: "stop",
-      text: JSON.stringify(request.messages.at(-1)?.content).includes("create a detailed summary")
-        ? `<summary>committed summary ${++summaryCalls}</summary>`
-        : "setup response",
-      usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
-    }),
+    generateText: async (request) => {
+      const compact = JSON.stringify(request.messages.at(-1)?.content).includes(
+        "create a detailed summary",
+      );
+      if (!compact && outputLimit === "always" && summaryCalls > 0) {
+        const error = Object.assign(new Error("provider context window exceeded"), {
+          code: ModelErrorCode.ModelContextExceeded,
+        });
+        throw error;
+      }
+      return {
+        finishReason:
+          compact && (outputLimit === "always" || (outputLimit === "once" && summaryCalls === 0))
+            ? "length"
+            : "stop",
+        text: compact ? `<summary>committed summary ${++summaryCalls}</summary>` : "setup response",
+        usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+      };
+    },
   });
   const config = {
     mode: "yolo" as const,
@@ -105,6 +125,7 @@ async function committedFixture() {
     factory,
     eventStore,
     bundles,
+    usageFacts,
     summaryCalls: () => summaryCalls,
   };
 }
@@ -313,6 +334,44 @@ describe("committed compact boundary", () => {
     expect(
       h.store.savedParts.some((p) => p.type === "compaction" && p.timelineStatus === "completed"),
     ).toBe(true);
+  });
+
+  it("records each truncated and regenerated summary under a distinct usage identity", async () => {
+    const h = await committedFixture("once");
+    const result = await h.runtime.executeTurn("/compact");
+    const facts = h.usageFacts.filter((fact) => fact.querySource === "compact");
+    expect(facts).toHaveLength(2);
+    expect(new Set(facts.map((fact) => fact.id)).size).toBe(2);
+    expect(result.usage).toMatchObject({
+      modelRequestCount: 2,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+    });
+    expect(h.summaryCalls()).toBe(2);
+  });
+
+  it("ends the whole turn when automatic summary output recovery is exhausted", async () => {
+    const h = await committedFixture("always");
+    h.internal.config.compact = {
+      enabled: true,
+      contextWindow: 1,
+      outputReserveTokens: 0,
+      bufferTokens: 0,
+    };
+    await expect(h.runtime.executeTurn("continue the task")).rejects.toThrow(
+      "Compact summary exceeded the output limit",
+    );
+    expect(h.summaryCalls()).toBe(2);
+    expect(h.store.savedMessages.some((m) => m.summary)).toBe(false);
+    expect(historyText(h.internal)).toContain("old original prompt one");
+    expect(
+      (await h.eventStore.getEvents(h.sessionId)).filter(
+        (event) =>
+          event.type === SessionEventType.ModelRequest &&
+          (event.payload as { querySource?: string }).querySource === "main_turn",
+      ),
+    ).toHaveLength(3);
   });
 
   it("keeps old history when the summary/completion transaction fails", async () => {

@@ -13,12 +13,7 @@ import {
   prepareIncomingMessageCapability,
 } from "#e2e/helpers/incoming-message-capability";
 import { assertAppendOnly, assertPlainUserInput } from "#e2e/helpers/incoming-message-evidence";
-import {
-  TOTAL_TOKENS_BUDGET,
-  totalTokensAfterLastAssistant,
-  totalTokensReminders,
-  withoutTotalTokensReminders,
-} from "#e2e/helpers/total-tokens-evidence";
+import { totalTokensReminders } from "#e2e/helpers/total-tokens-evidence";
 import {
   E2E_READONLY_TOOL_FILE_CONTENT,
   ensureReadonlyToolFixtureFile,
@@ -106,7 +101,7 @@ describe("会话区修饰键单条 delivery E2E", () => {
   }
 
   for (const { label, mcs } of INCOMING_MESSAGE_MODES) {
-    it(`M06k ${label}：工具结果后 Cmd/Ctrl+Enter 抢占，新消息是普通用户文本，已发出的内容只多出新一轮的预算提醒`, async function () {
+    it(`M06k ${label}：工具结果后 Cmd/Ctrl+Enter 抢占，新消息是普通用户文本，已发出的内容原样保留`, async function () {
       this.timeout(TEST_TIMEOUT_MS);
       await prepareIncomingMessageCapability(mcs, "queue");
       await ensureReadonlyToolFixtureFile();
@@ -146,22 +141,10 @@ describe("会话区修饰键单条 delivery E2E", () => {
         excludes: [marker, "Generate a concise title"],
       });
       expect(heldRequest).toBeDefined();
-      // 新一轮的预算提醒按投影规则落在被抢占请求的末尾：MCS 关并进同一个 tool_result，
-      // MCS 开与原提醒合进同一条 system 消息（meta-user-context.md「Total-tokens reminder」）。
-      // 只有这一处会变；去掉预算提醒后，被抢占请求已发出的内容原样保留，新请求只在末尾追加。
-      expect(totalTokensAfterLastAssistant(evidence[0]!.requestJson)).toEqual([
-        TOTAL_TOKENS_BUDGET - 144,
-        TOTAL_TOKENS_BUDGET,
-      ]);
-      // 已发出的提醒数值也不变：新请求的提醒序列是被抢占请求的序列加上新一轮这一条。
-      expect(totalTokensReminders(evidence[0]!.requestJson).map((item) => item.value)).toEqual([
-        ...totalTokensReminders(heldRequest!.requestJson).map((item) => item.value),
-        TOTAL_TOKENS_BUDGET,
-      ]);
-      assertAppendOnly(
-        withoutTotalTokensReminders(heldRequest!.requestJson),
-        withoutTotalTokensReminders(evidence[0]!.requestJson),
-      );
+      // 移除虚拟余额后，不再先清洗请求来容忍历史变化：已发出的内容必须原样保留。
+      expect(totalTokensReminders(heldRequest!.requestJson)).toEqual([]);
+      expect(totalTokensReminders(evidence[0]!.requestJson)).toEqual([]);
+      assertAppendOnly(heldRequest!.requestJson, evidence[0]!.requestJson);
       expect((await getQueueItems()).some((item) => item.content.includes(marker))).toBe(false);
       const userRows = (await getV4Messages("user")).filter((message) =>
         message.text.includes(marker),

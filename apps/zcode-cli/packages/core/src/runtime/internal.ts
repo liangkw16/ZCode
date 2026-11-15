@@ -1,7 +1,6 @@
 import { PermissionService, ToolScheduler } from "./deps.js";
 import type { ModelRequestSessionFeature } from "@zcode/contracts";
 import type { PromptSnapshot } from "./helpers/prompt-snapshot.js";
-import type { TotalTokensBudgetState } from "./helpers/total-tokens-budget.js";
 import type { InstructionRefreshReason } from "../context/types.js";
 import type {
   Logger,
@@ -177,8 +176,6 @@ export interface AgentRuntimeInternal
   latestAssistantMessageId?: MessageId;
   latestAssistantTurnId?: TurnId;
   mainTurnCacheHitAggregate: MainTurnCacheHitAggregate;
-  /** token 预算倒数的计数器；只在内存，resume 时重新开始。 */
-  totalTokensBudget: TotalTokensBudgetState;
   currentTurnFileChanges: RuntimeTurnFileChangeMap;
   lastAssistantCompletedAtMs?: number;
   autoCompactConsecutiveFailures: number;

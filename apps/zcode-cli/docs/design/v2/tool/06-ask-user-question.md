@@ -6,6 +6,60 @@ TUI 落地规划见 [AskUserQuestion TUI 规划](../tui-ask-user-question.md)。
 
 `AskUserQuestion` 在执行过程中向用户提出选择题，用于澄清需求、收集偏好或让用户做实现决策。
 
+## 决策与未回答语义修订（2026-11-15，已实现）
+
+本节约束新生成的 provider-visible 描述和结果说明；文案与结果格式化已实现，交互 schema 和权限不变。
+目标是减少无必要的提问，同时保留真正依赖用户决策的边界。必要与可选由模型结合当前目标、
+已有授权、代码事实和合理默认值判断，不新增问题必填字段或交互状态。
+
+- **必要决策**：答案会实质改变下一步，且无法从用户指令、已批准方案、可调查事实或授权范围内的
+  合理默认值确定。只暂停依赖该答案的动作；能够独立完成的调查、准备和验证继续。
+- **可选澄清**：答案有助于优化结果，但已有合理默认值且不改变用户目标或授权范围。通常说明
+  采用的默认值并继续，不为这类问题调用工具制造强制等待。用户明确要求参与选择时遵循其要求。
+- 已有明确答案或用户已授权采用合理默认值时，不重复询问。缺少回复、跳过、等待超时和交互失败
+  都不产生新的偏好、决策或授权；实际的拒绝和取消仍按现有结果处理。
+- 工具收到空答案或部分答案后，只依据实际返回的答案推进；未答的必要决策保持未决，未答的
+  可选项可使用授权范围内的合理默认值。不能把“使用最佳判断”解释为自行补齐授权。
+- 澄清与计划批准继续分开：`AskUserQuestion` 不代替 `ExitPlanMode` 的既有审批，也不借此
+  重新审批已经获准的方案或普通实现步骤。
+
+所有者与入口保持现状：`packages/contracts/src/tools/ask-user-question.ts` 拥有 schema；
+`packages/core/src/tool/handlers/ask-user-question.ts` 的 `metadata.description` 和
+`formatAskUserQuestionModelContent` 分别拥有模型描述与结果说明；permission broker 和当前
+TUI / app-server 适配器仍负责收集并回填实际答案。
+
+```text
+模型判断有必要提问 → AskUserQuestion → 现有 permission broker / UI
+                                           │ 实际 answers / annotations
+                                           ▼
+                                  handler 校验并返回原有结果
+                                           ▼
+                            formatter → 既有投影 → 最终 provider 请求
+                                           ▼
+                       按实际答案与已有授权继续；必要未决依赖保持未决
+```
+
+本次不改变输入/输出 schema、权限、超时、事件顺序、存储、UI 或 Desktop continuous / 手机
+replayable 语义；不实现后文规划的独立 `UserInteractionPort`，也不增加异步提问能力。
+调用工具后的等待仍由现有交互链路承担；“独立工作继续”不承诺等待期间可并发执行工具。
+已持久化的问答与结果说明原样恢复，只更新新生成的描述和结果文本。
+
+后续验收使用既有 CLI 测试入口，覆盖 `ToolRegistry.toContracts()` 与结果投影后的最终
+provider 请求，不能只断言源文件含某一句提示词：
+
+| 场景                                     | 模型应获得的语义与行为边界                             |
+| ---------------------------------------- | ------------------------------------------------------ |
+| 有惯例默认值、已有批准方案或可从代码核实 | 直接继续或先调查，不重复提问，不额外审批               |
+| 全部问题有答案                           | 只按实际答案和已有授权继续，不把答题扩展为其他操作授权 |
+| 可选问题为空或部分未答                   | 可采用合理默认值继续，不把可选澄清变成强制暂停         |
+| 必要决策为空或部分未答                   | 标明未决，仅依赖该决策的动作等待，独立工作继续         |
+| 用户明确授权对未答问题采用合理默认值     | 在该授权范围内继续，不要求再批准同一默认选择           |
+| 缺少 `answers`、拒绝、取消或交互失败     | 保持现有错误/交互结果，不伪造答案或批准                |
+| Plan 模式与旧问答恢复                    | 不以 Ask 代替计划批准；历史结果不重写                  |
+
+文本与投影回归只能证明合同已送达；是否减少无效提问、是否正确保留必要依赖，仍需用上述
+场景进行真实模型对照评测，不在本批 spec 更新中声称已验证。
+
 ## 输入契约
 
 `AskUserQuestion` 输入是严格对象：
@@ -50,13 +104,14 @@ TUI 落地规划见 [AskUserQuestion TUI 规划](../tui-ask-user-question.md)。
 | `answers`     | `Record<string,string>` | 用户答案，key 是问题文本，多选答案用逗号分隔 |
 | `annotations` | optional record         | 选项 preview 和用户 notes                    |
 
-模型可见结果会转成一句说明：用户已经回答这些问题，后续可基于答案继续执行。每个答案按 `"question"="answer"` 序列化，并可附带 preview 和 notes。
+模型可见结果区分完整、部分和空答案，不统一声称“用户已经回答”。每个实际答案按
+`"question"="answer"` 序列化，并可附带 preview 和 notes；未答问题遵循上文的必要/可选决策语义。
 
 `answers` 表达用户实际提供的答案，不表达表单必填约束：
 
 - 全部回答时包含所有问题的 key。
 - 部分回答时只包含已回答问题，未回答问题不写入空字符串。
-- 用户主动提交但没有回答任何问题时使用空对象 `{}`，让模型根据现有信息继续。
+- 用户主动提交但没有回答任何问题时使用空对象 `{}`；这不是新授权或偏好，后续依照已有信息和未决依赖处理。
 - `answers` 字段完全缺失表示权限组件尚未完成交互，tool handler 不能提前执行。
 
 ## 行为语义
@@ -64,43 +119,34 @@ TUI 落地规划见 [AskUserQuestion TUI 规划](../tui-ask-user-question.md)。
 核心流程：
 
 1. 模型提交 1 到 4 个问题和 2 到 4 个选项。
-2. tool 自身 `checkPermissions` 永远返回 ask，用权限 UI 承担交互。
+2. tool 通过 `requiresUserInteraction` / `needsApproval` 进入现有 permission broker，由交互适配器收集答案。
 3. 用户在 UI 中选择任意数量的答案，可跳过部分或全部问题，也可输入 Other 或 notes。
 4. 权限组件把 `answers` 和 `annotations` 回填到 updated input。
 5. tool `call` 只回传问题和答案，不做外部 I/O。
-6. tool result 进入模型上下文，agent 继续执行。
+6. tool result 进入模型上下文，agent 根据实际答案继续可执行工作，保留未回答的必要决策。
 
 工具声明为：
 
-- `shouldDefer: true`
-- `isReadOnly: true`
-- `isConcurrencySafe: true`
+- `readOnly: true`
+- `concurrentSafe: true`
 - `requiresUserInteraction: true`
+- `needsApproval: true`
 
 ZCode 应把 `requiresUserInteraction` 作为调度层一等能力：非交互 session、远程 channel 或后台 agent 不能直接卡住等待 TUI。
 
 ## Prompt 约束
 
-ZCode 为 `AskUserQuestion` 提供完整的 tool prompt 语义，而不是只给模型一行
-短描述。provider-visible tool description 应由短 `description` 加 `modelInstructions`
-组成，投影后至少表达：
+provider-visible tool description 由现有 `metadata.description` 经工具合同投影提供，
+本次不新增 `modelInstructions` 接口。描述与结果说明须一致，至少表达：
 
 - 这是执行过程中向用户提问的工具。
-- 它可用于收集用户偏好或需求、澄清歧义、获取实现决策，以及提供后续方向选择。
+- 仅在确实需要用户决定、无法从已有指令、代码事实或合理默认值确定时使用；可选澄清不应阻断工作。
+- 空或部分答案不产生新的偏好、授权或必要决策；独立工作继续，必要未决依赖保持未决。
 - 用户总能选 Other 输入自定义文本。
 - 多选问题使用 `multiSelect: true`。
 - 推荐选项放第一个，并在 label 后加 `(Recommended)`。
 - plan mode 中只能用于计划定稿前澄清需求或选择方案；计划审批应走专用 plan
   approval flow/tool，不能用 `AskUserQuestion` 问“计划是否可以执行”。
-
-模型使用规则：
-
-- 用于收集偏好、澄清歧义、获取实现决策或给用户选择方向。
-- 用户总能选 Other 输入自定义文本。
-- 推荐选项放第一个，并在 label 后加 `(Recommended)`。
-- 多选问题设置 `multiSelect: true`。
-- plan mode 中只能用于计划定稿前澄清需求或选择方案。
-- 不应用它问计划是否可以执行，计划审批应该走专用 plan approval 工具。
 - 不要在用户还看不到计划时引用「这个计划」。
 
 ZCode 应把 plan approval 和 clarification 分开，避免 AskUserQuestion 被滥用成通用确认按钮。
@@ -143,9 +189,9 @@ HTML / doctype / comment 形态时，runtime schema 要求它必须是 HTML frag
 - 每一道题都允许不回答。桌面端的选项焦点只用于键盘导航，只有明确点击、空格或 Enter 选中才写入答案；直接点击“继续”或“提交”表示跳过当前题。
 - Bot 单选菜单必须提供独立“跳过”操作；跳过中间题后继续下一题，跳过最后一题则提交当前部分答案，全部跳过时提交 `{ answers: {} }`。
 
-- `checkPermissions` 返回 `ask` 是为了复用 permission request UI。
+- `requiresUserInteraction` / `needsApproval` 通过现有 permission broker 承载问答，不表示答案自动批准其他操作。
 - 用户拒绝时需要产生明确的 rejected projection。
-- 当远程 channel 模式启用且用户不在 TUI 时禁用该 tool，防止无人响应导致会话挂起。
+- 是否可用取决于当前交互适配器；远程 app-server 可承载问答，不能仅因用户不在 TUI 就禁用。无法承载交互时沿用现有不可用或错误路径。
 
 ZCode 应将它实现为 `UserInteractionPort`：
 
@@ -216,7 +262,7 @@ ZCode 应将它实现为 `UserInteractionPort`：
 - TUI 层支持单选、多选、自动 Other 自定义文本、拒绝、取消、文本 preview、preview
   annotation 和多问题 review。
 - tool handler 只接受权限组件已经回填 `answers` 字段的输入；字段缺失时返回结构化失败。
-  用户可提交完整、部分或空答案，未回答问题由模型使用最佳判断处理。
+  用户可提交完整、部分或空答案；未回答问题不伪造偏好或授权，后续按上文必要/可选决策语义处理。
 - markdown/html preview 字段作为契约字段透传；第一版 TUI 显示文本 preview，不做富渲染。
 
 第一版暂不实现图片粘贴、plan interview 特殊按钮、完整 HTML preview sandbox 和 analytics 事件；这些能力必须沿用同一 `Question` / `Annotation` 契约逐步扩展。

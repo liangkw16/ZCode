@@ -1,7 +1,6 @@
-// TT01–TT10 token 预算提醒（docs/conversation-session-case-catalog.md「token 预算提醒」）。
+// TT01–TT10 虚拟 token 余额移除（docs/conversation-session-case-catalog.md「token 预算提醒」）。
 // 规格见 apps/zcode-cli/docs/design/v2/loop/meta-user-context.md「Total-tokens reminder」。
-// 所有断言读取上游请求体。fixture 的 usage 写死，期望数值按规格的计数规则逐个算出。
-// tail 指最后一条 assistant 之后的提醒：本请求新追加的一条，或 compaction 保留下来的那一条。
+// 所有断言读取上游请求体；保留真实 usage fixture，以验证工具、续写和 Compact 控制流。
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { TID_V4_COMPOSER_INPUT } from "@zcode/shared/test-ids";
@@ -18,10 +17,8 @@ import { prepareIncomingMessageCapability } from "#e2e/helpers/incoming-message-
 import { restartIntoWorkspacePreservingProfile } from "#e2e/helpers/model-provider-restart-runtime";
 import { startDraftFromProject } from "#e2e/helpers/project-sidebar";
 import {
-  TOTAL_TOKENS_BUDGET as BUDGET,
-  TOTAL_TOKENS_LINE as LINE,
+  LEGACY_TOTAL_TOKENS_LINE as LINE,
   blocksOf,
-  totalTokensAfterLastAssistant,
   totalTokensReminders,
 } from "#e2e/helpers/total-tokens-evidence";
 import { selectUpstreamProviderModelById } from "#e2e/helpers/upstream-provider";
@@ -39,7 +36,7 @@ type Block = Record<string, unknown> & { type?: string };
 type Message = { role: string; content: unknown };
 type Request = { messages: Message[]; system?: unknown };
 
-describe("TT token 预算提醒", () => {
+describe("TT 虚拟 token 余额移除", () => {
   before(async () => {
     await ensureReadonlyToolFixtureFile();
   });
@@ -52,7 +49,7 @@ describe("TT token 预算提醒", () => {
     const M = mcs ? "MCS" : "PLAIN";
     const id = (step: number) => `tt-a${step}-${M.toLowerCase()}`;
 
-    it(`TT01–TT04 ${M}：轮内倒数、跨轮重新起算、输出续写不收集、冷恢复后计数器清零`, async function () {
+    it(`TT01–TT04 ${M}：新会话、工具批次、跨轮、输出续写与冷恢复均不生成余额`, async function () {
       this.timeout(480_000);
       await prepareIncomingMessageCapability(mcs);
 
@@ -65,46 +62,13 @@ describe("TT token 预算提醒", () => {
       await runTurn(`E2E_TT_A3_${M} Read it after resume.`, `TT_A3_DONE_${M}`);
 
       const requests = await requestsByFixture([1, 2, 3, 4, 5, 6, 7, 8].map(id));
-      // 工具批次之后按上下文增量倒数；真实用户消息重新起算；
-      // 输出续写的请求不收集新提醒；冷恢复后计数器清零，首条消息按持久化的 usage 重新起算。
-      expect(requests.map(tailValues)).toEqual([
-        [BUDGET],
-        [14_998_995],
-        [14_997_593],
-        [BUDGET],
-        [14_999_599],
-        [],
-        [BUDGET],
-        [14_999_799],
-      ]);
-      // 只追加：后一个请求按原样带着前面所有的提醒，冷恢复也一样。
-      expect(requests.map((request) => found(request).map((item) => item.value))).toEqual([
-        [BUDGET],
-        [BUDGET, 14_998_995],
-        [BUDGET, 14_998_995, 14_997_593],
-        [BUDGET, 14_998_995, 14_997_593, BUDGET],
-        [BUDGET, 14_998_995, 14_997_593, BUDGET, 14_999_599],
-        [BUDGET, 14_998_995, 14_997_593, BUDGET, 14_999_599],
-        [BUDGET, 14_998_995, 14_997_593, BUDGET, 14_999_599, BUDGET],
-        [BUDGET, 14_998_995, 14_997_593, BUDGET, 14_999_599, BUDGET, 14_999_799],
-      ]);
-      for (const request of requests)
-        expect(systemText(request).endsWith(`\n\n${LINE}`)).toBe(true);
-      // 重启前写入的提醒逐字节回放：所在消息、承载形态和所在文本都不变（tt-a6 是重启前最后一个请求）。
-      const placed = (request: Request) =>
-        found(request).map(({ message, role, container, text }) => [
-          message,
-          role,
-          container,
-          text,
-        ]);
-      const beforeRestart = placed(requests[5]!);
-      expect(placed(requests[6]!).slice(0, beforeRestart.length)).toEqual(beforeRestart);
-      expectProjection(requests, mcs);
+      expectNoVirtualBalance(requests);
+      // 冷恢复继续使用已持久化的默认 system，不补写旧版虚拟余额。
+      expect(systemText(requests[6]!)).toBe(systemText(requests[5]!));
     });
   }
 
-  it("TT05–TT07：auto 与 reactive compaction 累加压缩前的上下文，手动 /compact 不累加", async function () {
+  it("TT05–TT07：auto、manual 与 reactive compact 保留真实控制流且不生成余额", async function () {
     this.timeout(480_000);
     await prepareIncomingMessageCapability(true);
 
@@ -124,25 +88,11 @@ describe("TT token 预算提醒", () => {
     await runTurn("E2E_TT_C3 Read it before the reactive compact.", "TT_C3_DONE");
 
     const ids = ["tt-c1", "tt-c2", "tt-c3", "tt-c4", "tt-c5", "tt-c6", "tt-c7", "tt-c8-too-long"];
-    const requests = await requestsByFixture([...ids, "tt-c9", "tt-c10"]);
-    // 压缩后的首个请求和重试不收集新提醒，尾部是压缩前写入、保留下来的那一条。
-    // auto 累加 975007，手动不累加，reactive 累加压缩前最近一次 usage（3505）。
-    expect(requests.map(tailValues)).toEqual([
-      [BUDGET],
-      [14_998_995],
-      [14_024_993],
-      [14_021_983],
-      [BUDGET],
-      [14_996_696],
-      [BUDGET],
-      [14_999_901],
-      [14_999_901],
-      [14_996_195],
-    ]);
-    expectProjection(requests, true);
+    const requests = await requestsByFixture([...ids, "tt-c-reactive-summary", "tt-c9", "tt-c10"]);
+    expectNoVirtualBalance(requests);
   });
 
-  it("TT08：Explore 子 agent 首个请求没有提醒、从 0 计数；父会话的通知轮不收集", async function () {
+  it("TT08：父子 agent、工具批次和后台通知续跑均不生成余额", async function () {
     this.timeout(300_000);
     await prepareIncomingMessageCapability(true);
 
@@ -157,29 +107,18 @@ describe("TT token 预算提醒", () => {
       "tt-s-parent-launched",
       "tt-s-parent-notified",
     ]);
-    // 子 agent 的 system 同样以预算行结尾；它的首个请求不带提醒，工具批次之后按整个上下文倒数。
-    for (const child of [child1!, child2!])
-      expect(systemText(child).endsWith(`\n\n${LINE}`)).toBe(true);
-    expect(found(child1!)).toEqual([]);
-    expect(found(child2!).map((item) => item.value)).toEqual([14_998_995]);
-    // 父会话：Agent 结果是一个工具批次；子 agent 完成的通知开启新轮，不重新起算也不追加。
-    expect([parentAgent!, parentLaunched!, parentNotified!].map(tailValues)).toEqual([
-      [BUDGET],
-      [14_998_995],
-      [],
-    ]);
-    expectProjection([parentAgent!, parentLaunched!, child2!], true);
+    expectNoVirtualBalance([parentAgent!, child1!, child2!, parentLaunched!, parentNotified!]);
   });
 
-  it("TT09：旧快照会话保持旧 system，消息里照常追加；compaction 后 system 才带预算行", async function () {
+  it("TT09：冷恢复原样保留旧 system 余额，compact 后重建默认 system 且不追加余额", async function () {
     this.timeout(360_000);
     await prepareIncomingMessageCapability(true);
 
     await runTurn("E2E_TT_N1 hello.", "TT_N1_DONE");
     const sessionId = await idleSessionId("N 首轮没有完成");
-    // 应用退出后改写快照：去掉预算行，模拟加入这一行之前的版本写下的快照。
+    // 应用退出后播种迁移前快照：升级不回写旧字节，直到既有 Compact 边界才重建。
     await restartIntoWorkspacePreservingProfile(DEFAULT_WORKSPACE, {
-      afterElectronProcessExit: async () => rewriteSnapshotWithoutLine(sessionId),
+      afterElectronProcessExit: async () => seedLegacySnapshotLine(sessionId),
     });
     await selectV4TaskById(sessionId, 30_000);
     await waitForV4TimelineContaining("TT_N1_DONE");
@@ -194,16 +133,12 @@ describe("TT token 预算提醒", () => {
     await runTurn("E2E_TT_N3 after compact.", "TT_N3_DONE");
 
     const [n1, n2, n3] = await requestsByFixture(["tt-n1", "tt-n2", "tt-n3"]);
-    expect(systemText(n1!).endsWith(`\n\n${LINE}`)).toBe(true);
-    // 旧快照原样使用：system 就是首轮 system 去掉预算行，缓存前缀不变。
-    expect(systemText(n2!)).toBe(systemText(n1!).slice(0, -`\n\n${LINE}`.length));
-    expect(systemText(n2!)).not.toContain("<total_tokens>");
-    expect(systemText(n3!).endsWith(`\n\n${LINE}`)).toBe(true);
-    expect([n1!, n2!, n3!].map(tailValues)).toEqual([[BUDGET], [BUDGET], [BUDGET]]);
-    expect(found(n2!).map((item) => item.value)).toEqual([BUDGET, BUDGET]);
+    expectNoVirtualBalance([n1!, n3!]);
+    expect(systemText(n2!)).toBe(`${systemText(n1!)}\n\n${LINE}`);
+    expect(totalTokensReminders(n2!)).toEqual([]);
   });
 
-  it("TT10：openai chat completions 沿用现有提醒投影", async function () {
+  it("TT10：openai chat completions 的 system、工具批次和跨轮请求均不生成余额", async function () {
     this.timeout(300_000);
     await prepareV4ConversationE2E({ skipProvider: true });
     await seedCustomOpenAIChatCompletionsProvider({
@@ -225,15 +160,7 @@ describe("TT token 预算提醒", () => {
     await runTurn("E2E_TT_O2 hello again.", "TT_O2_DONE");
 
     const requests = await requestsByFixture(["tt-o1", "tt-o2", "tt-o3"]);
-    for (const request of requests) expect(systemText(request).endsWith(`\n\n${LINE}`)).toBe(true);
-    expect(requests.map(tailValues)).toEqual([[BUDGET], [14_998_995], [BUDGET]]);
-    // 每条提醒是单独的 user 消息，不并进 tool 消息。
-    for (const item of requests.flatMap(found)) {
-      expect([item.role, item.text]).toEqual([
-        "user",
-        `<system-reminder>\n${LINE.replace(String(BUDGET), String(item.value))}\n</system-reminder>`,
-      ]);
-    }
+    expectNoVirtualBalance(requests);
   });
 });
 
@@ -267,8 +194,12 @@ async function requestsByFixture(ids: string[]): Promise<Request[]> {
   });
 }
 
-const found = totalTokensReminders;
-const tailValues = totalTokensAfterLastAssistant;
+function expectNoVirtualBalance(requests: Request[]) {
+  for (const request of requests) {
+    expect(systemText(request)).not.toContain("<total_tokens>");
+    expect(totalTokensReminders(request)).toEqual([]);
+  }
+}
 
 function systemText(request: Request): string {
   if (Array.isArray(request.system)) {
@@ -283,39 +214,8 @@ function systemText(request: Request): string {
     : "";
 }
 
-/**
- * MCS 开：提醒在 role:system 消息里，单独一条，或与同一位置的其他附件用 \n\n 连接。
- * MCS 关：提醒是 <system-reminder> 包裹的文本。紧跟工具调用时并进 tool_result，接在结果文本的
- * \n\n 之后；否则（轮首）独立成一个文本块。是否紧跟工具调用按请求结构判断，不读 helper 的推断。
- */
-function expectProjection(requests: Request[], mcs: boolean) {
-  for (const request of requests) {
-    for (const item of found(request)) {
-      const tag = `<total_tokens>${item.value} tokens left</total_tokens>`;
-      if (mcs) {
-        expect([item.role, item.container]).toEqual(["system", "system"]);
-        expect(
-          item.text === tag ||
-            item.text.startsWith(`${tag}\n\n`) ||
-            item.text.includes(`\n\n${tag}`),
-        ).toBe(true);
-        continue;
-      }
-      const wrapped = `<system-reminder>\n${tag}\n</system-reminder>`;
-      const previous = request.messages[item.message - 1];
-      const afterToolUse =
-        previous?.role === "assistant" &&
-        blocksOf(previous.content).some((block) => block.type === "tool_use");
-      expect([item.role, item.container]).toEqual(["user", afterToolUse ? "tool_result" : "user"]);
-      if (afterToolUse) expect(item.text.endsWith(`\n\n${wrapped}`)).toBe(true);
-      // 独立块就是包裹本身；后面还有块时末尾多一个 \n。
-      else expect(item.text.trimEnd()).toBe(wrapped);
-    }
-  }
-}
-
-// 去掉快照 system 里的预算行。node:sqlite 只提供同步接口；调用时应用已退出，没有并发写入。
-function rewriteSnapshotWithoutLine(sessionId: string) {
+// 仅测试播种旧快照。node:sqlite 只提供同步接口；调用时应用已退出，没有并发写入。
+function seedLegacySnapshotLine(sessionId: string) {
   const home = process.env.ZCODE_E2E_HOME_DIR;
   if (!home) throw new Error("缺少 ZCODE_E2E_HOME_DIR");
   const database = new DatabaseSync(join(home, ".zcode", "cli", "db", "db.sqlite"));
@@ -325,11 +225,15 @@ function rewriteSnapshotWithoutLine(sessionId: string) {
       | { data: string }
       | undefined;
     if (!row) throw new Error(`没有 ${id}`);
-    const needle = JSON.stringify(`\n\n${LINE}`).slice(1, -1);
-    if (!row.data.includes(needle)) throw new Error("快照里没有预算行");
+    const snapshot = JSON.parse(row.data) as { system: Message[] };
+    const lastSystem = snapshot.system.at(-1);
+    if (!lastSystem || typeof lastSystem.content !== "string")
+      throw new Error("快照末尾不是预期的 system 文本");
+    if (row.data.includes("<total_tokens>")) throw new Error("新快照意外含旧余额");
+    lastSystem.content += `\n\n${LINE}`;
     database
       .prepare("update session_entry set data = ? where id = ?")
-      .run(row.data.replaceAll(needle, ""), id);
+      .run(JSON.stringify(snapshot), id);
   } finally {
     database.close();
   }

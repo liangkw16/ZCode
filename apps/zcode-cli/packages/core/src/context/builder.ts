@@ -26,7 +26,6 @@ import {
   buildContextManagementSection,
   buildDynamicBehaviorSection,
   buildSessionGuidanceSection,
-  buildTotalTokensSection,
 } from "./dynamic-sections.js";
 
 // -----------------------------------------------
@@ -170,7 +169,6 @@ export class ContextBuilder {
 
       // Context Management
       sections.push(buildContextManagementSection());
-      sections.push(buildTotalTokensSection());
 
       const gitSystemContextSection = buildGitSystemContextSection(this.config.envInfo);
       if (gitSystemContextSection) {

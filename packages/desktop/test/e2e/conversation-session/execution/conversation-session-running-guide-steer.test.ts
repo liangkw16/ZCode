@@ -18,10 +18,7 @@ import {
 } from "#e2e/helpers/conversation-session-network";
 import { getQueueItems } from "#e2e/helpers/conversation-session-queue";
 import { waitForTaskStoreSnapshot } from "#e2e/helpers/conversation-session-store";
-import {
-  TOTAL_TOKENS_BUDGET,
-  totalTokensAfterLastAssistant,
-} from "#e2e/helpers/total-tokens-evidence";
+import { totalTokensReminders } from "#e2e/helpers/total-tokens-evidence";
 import {
   E2E_REPLY_TOKEN,
   clickV4Stop,
@@ -115,18 +112,18 @@ describe("会话区 Running Guide / Steer E2E", () => {
       expect(JSON.stringify(firstWire.messages.slice(0, firstWire.index + 1))).toContain(
         '"type":"tool_result"',
       );
-      // 工具批次之后的 guide 不重新起算：提醒按 Read 响应的上下文（默认 usage 128/16）倒数，排在 guide 之后。
-      expect(totalTokensAfterLastAssistant(firstEvidence[0]!.requestJson)).toEqual([
-        TOTAL_TOKENS_BUDGET - 144,
-      ]);
+      // 移除虚拟余额后，工具批次和 guide 的真实投影顺序保持；不再追加倒数附件。
+      expect(totalTokensReminders(firstEvidence[0]!.requestJson)).toEqual([]);
       const firstTail = JSON.stringify(
         firstWire.messages.slice(
           firstWire.messages.findLastIndex((message) => message.role === "assistant") + 1,
         ),
       );
-      // 先确认 guide 在尾部：indexOf 找不到时是 -1，顺序比较会空过。
-      expect(firstTail.indexOf(guideOneMarker)).toBeGreaterThanOrEqual(0);
-      expect(firstTail.indexOf(guideOneMarker)).toBeLessThan(firstTail.indexOf("<total_tokens>"));
+      expect(firstTail).toContain(guideOneMarker);
+      expect(firstTail.indexOf(E2E_READONLY_TOOL_FILE_CONTENT)).toBeGreaterThanOrEqual(0);
+      expect(firstTail.indexOf(E2E_READONLY_TOOL_FILE_CONTENT)).toBeLessThan(
+        firstTail.indexOf(guideOneMarker),
+      );
       await waitForV4UserMessageContaining(guideOneMarker);
       await waitForV4ConversationState(
         (snapshot) => snapshot.state === "streaming",
@@ -163,10 +160,8 @@ describe("会话区 Running Guide / Steer E2E", () => {
       expect(JSON.stringify(secondWire.messages[secondWire.index - 1]?.content)).toContain(
         middleAssistantMarker,
       );
-      // 纯文本回复之后取出的 guide 按用户发言处理，预算提醒重新起算。
-      expect(totalTokensAfterLastAssistant(secondEvidence[0]!.requestJson)).toEqual([
-        TOTAL_TOKENS_BUDGET,
-      ]);
+      // 纯文本回复之后的 guide 保留用户发言语义，不生成虚拟余额。
+      expect(totalTokensReminders(secondEvidence[0]!.requestJson)).toEqual([]);
       await waitForV4UserMessageContaining(guideTwoMarker);
       await waitForV4AssistantMessageContaining(finalAssistantMarker);
       await waitForV4ConversationState(

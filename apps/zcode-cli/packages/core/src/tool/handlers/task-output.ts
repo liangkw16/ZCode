@@ -25,11 +25,7 @@ import type {
   ToolInputValidationResult,
   ToolPersistedModelContentInput,
 } from "../types.js";
-import {
-  formatCompactFileSize,
-  projectTask,
-  throwIfAborted,
-} from "./task-output-projection.js";
+import { formatCompactFileSize, projectTask, throwIfAborted } from "./task-output-projection.js";
 
 const TASK_OUTPUT_DEFAULT_LENGTH = 32_000;
 const TASK_OUTPUT_MAX_LENGTH = 160_000;
@@ -37,10 +33,22 @@ const TASK_OUTPUT_PERSIST_THRESHOLD_CHARS = 100_000;
 const TASK_OUTPUT_RESULT_BUDGET_BYTES = 400_000;
 const TASK_OUTPUT_PERSIST_PREVIEW_CHARS = 2_000;
 const TASK_OUTPUT_POLL_INTERVAL_MS = 100;
+const TASK_OUTPUT_CAPABILITY =
+  "query task status, wait for completion, and read background task output/logs";
 const TASK_OUTPUT_ERROR_CODE = {
   TASK_ID_REQUIRED: 1,
   TASK_NOT_FOUND: 2,
 } as const;
+
+// 查询成功与任务成功是两个事实；超时也只表示等待结束，不能诱导模型重复启动任务。
+const TASK_OUTPUT_RETRIEVAL_NOTES: Record<TaskOutputResult["retrieval_status"], string> = {
+  success:
+    "Retrieval succeeded; this does not mean the task succeeded. Check task status, exit code, and error.",
+  not_ready:
+    "The task is still active. Continue independent work or use TaskOutput to wait when its result is needed; do not use sleep or no-op calls to poll.",
+  timeout:
+    "This wait did not obtain a terminal result; it does not mean the task failed or stopped. If no task snapshot is available, verify the original task ID and current runtime before deciding whether a retry is safe.",
+};
 
 const taskOutputHandler: ToolHandler = async (input, context) => {
   const parsed = TaskOutputInputSchema.parse(input) as TaskOutputInput;
@@ -51,10 +59,7 @@ const taskOutputHandler: ToolHandler = async (input, context) => {
 
   const initialTask = registry.get(parsed.task_id);
   if (!initialTask) {
-    return taskOutputFailure(
-      TASK_OUTPUT_ERROR_CODE.TASK_NOT_FOUND,
-      `No task found with ID: ${parsed.task_id}`,
-    );
+    return taskNotFoundFailure(parsed.task_id);
   }
 
   if (!parsed.block) {
@@ -86,12 +91,12 @@ const taskOutputHandler: ToolHandler = async (input, context) => {
 
 export const taskOutputToolEntry: ToolEntry = {
   aliases: TASK_OUTPUT_ALIASES,
-  capability: "read output/logs from a background task",
+  capability: TASK_OUTPUT_CAPABILITY,
   maxModelChars: TASK_OUTPUT_PERSIST_THRESHOLD_CHARS,
   metadata: {
     shouldDefer: true,
     name: TASK_OUTPUT_TOOL_NAME,
-    searchHint: "read output/logs from a background task",
+    searchHint: TASK_OUTPUT_CAPABILITY,
     description: TASK_OUTPUT_PROVIDER_DESCRIPTION,
     readOnly: true,
     destructive: false,
@@ -153,6 +158,14 @@ function taskOutputFailure(errorCode: number, message: string): ToolHandlerFailu
   return { result: false, errorCode, message };
 }
 
+function taskNotFoundFailure(taskId: string): ToolHandlerFailure {
+  // 错误句柄不会因延长等待而恢复；仍保留原错误码和前缀，只补实际可行的核对路径。
+  return taskOutputFailure(
+    TASK_OUTPUT_ERROR_CODE.TASK_NOT_FOUND,
+    `No task found with ID: ${taskId}. Verify the exact ID returned by the original launch or notification and the current runtime. Increasing timeout cannot repair a wrong ID. If the runtime restarted or the outcome is unknown, check existing results and side effects before retrying the task.`,
+  );
+}
+
 function validateTaskOutputInput(
   input: unknown,
   context: ToolInputValidationContext,
@@ -169,17 +182,17 @@ function getTaskOutputInputFailure(
     return taskOutputFailure(TASK_OUTPUT_ERROR_CODE.TASK_ID_REQUIRED, "Task ID is required");
   }
   if (registry && !registry.get(input.task_id)) {
-    return taskOutputFailure(
-      TASK_OUTPUT_ERROR_CODE.TASK_NOT_FOUND,
-      `No task found with ID: ${input.task_id}`,
-    );
+    return taskNotFoundFailure(input.task_id);
   }
   return undefined;
 }
 
 export function formatTaskOutputModelContent(output: unknown): string {
   const parsed = TaskOutputResultSchema.parse(output);
-  const blocks = [`<retrieval_status>${parsed.retrieval_status}</retrieval_status>`];
+  const blocks = [
+    `<retrieval_status>${parsed.retrieval_status}</retrieval_status>`,
+    `<retrieval_note>${TASK_OUTPUT_RETRIEVAL_NOTES[parsed.retrieval_status]}</retrieval_note>`,
+  ];
   const task = parsed.task;
   if (task) {
     blocks.push(`<task_id>${task.task_id}</task_id>`);

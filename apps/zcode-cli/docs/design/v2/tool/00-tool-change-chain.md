@@ -1,5 +1,57 @@
 # Tool Change Chain Spec
 
+## 主动执行提示词对齐（2026-11-15，已实现）
+
+目标合同见 [System Prompt Contract](../loop/system-prompt-contract.md#主动执行与任务完成修订2026-11-15已实现)。
+以下链路已实现；历史内容不追溯改写，真实模型效果仍需任务集评测。
+
+```text
+用户目标、阶段与已有授权
+  → ContextBuilder 的 Main dynamic_behavior / 共享 Harness（移除独立 security notice）
+  → Enter/ExitPlanMode、Skill、TaskOutput、AskUserQuestion 的描述与结果说明
+  → runtime mode + 完整工具候选表 → 全量/稀疏 Plan reminder / compact 交接 / context preview
+  → 后续 Skill 交接与验证合同；新请求不再生成虚拟 token 余额
+  → ToolRegistry.toContracts + 既有 MCS/user-reminder 投影 → 最终模型请求
+  → 既有权限审批、执行器、结果和持久化（不变）
+```
+
+- Plan 不按复杂度、文件数或普通调查自动触发。用户要求只读讨论或先审方案，以及确有
+  关键未决方案时才使用；已授权写 spec 的任务仅产出文档，不自动进入禁止文件写入的模式。
+  进入免审批、退出走现有计划审批；描述、工具结果、运行时提醒和预览必须一致。
+- Plan 提醒不虚构用户意图，不强制五阶段、Explore 或固定子代理数量；纯研究可直接交付。
+  依据完整候选表判断 Ask/Exit 是否可用，不把 deferred 当作缺失。缺失时只说明可行的
+  澄清/计划展示方式，不声称已取得批准或已切换模式。细则见 [16-plan-mode](16-plan-mode.md)。
+- Skill 自动加载要求明确匹配且有实际收益；显式调用保留。打包版 using-superpowers 的
+  SessionStart 注入与 brainstorming、writing-plans、executing-plans、verification-before-completion
+  正文需同步，避免后续交接重新引入固定审批、执行方式选择或失败即求助。
+  Skill 不改变权限，不创造授权；保留发现、按需加载、取消、trace 与错误处理，目录预算按
+  [skill](../skill.md) 修订，不能通过删除全部用途描述使匹配规则失效。
+  `args` 仍是未消费的兼容字段，文案不得承诺正文透传；provider inputSchema 中 `skill` / `args`
+  的字段 description 同步精确名字来源和兼容未消费语义，字段、类型、必填性及验证规则不变。
+  细则见 [skill](../skill.md)。
+- 默认主提示词补齐主动执行、授权延续、失败恢复及完成标准；删除 `SECURITY_NOTICE` /
+  `buildSecurityNotice` 及 Main、workflow actor 的注入，不以另一段安全类任务规则替代，
+  内容边界由底层模型处理。通用操作授权与工具权限保留。Main 用户交互规则不注入 workflow actor；custom system
+  覆盖、快照更新及 MCS 两种投影保持既有合同。
+- TaskOutput 保留真实的等待/状态查询能力，不再以笼统的 deprecated 文案引导用 Read 替代；
+  `retrieval_status` 与任务成败分别解释，错误句柄不能靠增加 timeout 恢复。AskUserQuestion
+  的空答案或部分答案不产生用户偏好、授权或必要决策；独立工作继续，依赖未决事项的动作等待。
+  细则见 [后台任务](07-subagent.md) 与 [问答工具](06-ask-user-question.md)。
+- Compact 交接优先保留目标、约束、证据、未决事项和真实任务句柄；新生成的 system 与附件
+  删除虚拟 token 余额。旧快照和已持久化提醒仍按原合同恢复，不重写历史；详见
+  [Rewind & Compact](../rewind-compact.md) 与 [Meta User Context](../loop/meta-user-context.md)。
+- 工具 schema 的字段、类型与验证规则、权限标记、handler 副作用、事件、UI/V4、存储与 Desktop continuous / 手机
+  replayable 语义不变；调整 provider 描述、结果说明、目录预算、摘要与新提醒生成，
+  不新增工具、任务账本、权限或队列投递模式。
+
+离线验收覆盖 `ToolRegistry.toContracts()`、最终模型请求、Enter 结果与 full/sparse reminder、
+无 Ask/Exit 与 deferred 工具、主/子会话、compact 重发和预览，以及 Main/output-style/workflow
+默认请求移除安全段后的顺序和空行；既有进入免审批、退出需审批、
+拒绝保持 Plan 的权限回归继续通过。bootstrap 读取实际打包技能验证触发/授权规则。
+另覆盖 TaskOutput 的运行中/成功/失败/错误句柄、问答空答案/部分答案、后续 Skill 交接、
+目录超预算仍可按用途选择、compact 保留约束与已推翻结论，以及新生成请求不含虚拟余额、
+旧提醒恢复不变。真实主动性以主 spec 的任务集评测，文本断言通过不代表行为收益已验证。
+
 工具 schema、顺序与描述是固定字节（tools 段字节进入缓存前缀）：`toToolJsonSchema` 按
 zod v4 toJSONSchema 的 key 顺序输出——`$schema` 在最前，`description`、`default` 在 `type` 前，
 数组的 `minItems`/`maxItems` 在 `type` 前，属性声明顺序不变；ToolSearch 输入 schema 走同一入口。

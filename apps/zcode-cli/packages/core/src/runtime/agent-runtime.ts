@@ -93,10 +93,6 @@ import type {
 } from "./methods/background.js";
 import { initializeRuntimeTooling } from "./helpers/runtime-tools.js";
 import {
-  createTotalTokensBudgetState,
-  type TotalTokensBudgetState,
-} from "./helpers/total-tokens-budget.js";
-import {
   resolveInitialDynamicWorkflowToolsActivated,
   type DynamicWorkflowActivationSource,
 } from "./methods/dynamic-workflow-activation.js";
@@ -260,7 +256,6 @@ export class AgentRuntime {
     totalCacheReadTokens: 0,
     totalCacheWriteTokens: 0,
   };
-  private totalTokensBudget: TotalTokensBudgetState = createTotalTokensBudgetState();
   private currentTurnFileChanges: RuntimeTurnFileChangeMap = new Map();
   private lastAssistantCompletedAtMs?: number;
   private autoCompactConsecutiveFailures = 0;

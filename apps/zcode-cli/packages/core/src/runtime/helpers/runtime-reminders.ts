@@ -14,7 +14,6 @@ import type {
   TodoItem,
 } from "../deps.js";
 import { ASK_USER_QUESTION_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME } from "@zcode/contracts";
-import { EXPLORE_AGENT_TYPE } from "../../subagent/explore.js";
 import { isUserTurnInput } from "./provider-entry-origins.js";
 
 export const RUNTIME_MODE_REMINDER_CONFIG = Object.freeze({
@@ -22,72 +21,44 @@ export const RUNTIME_MODE_REMINDER_CONFIG = Object.freeze({
   FULL_REMINDER_EVERY_N_ATTACHMENTS: 5,
 });
 
-const planResearchAgentCount = 3;
+const PLAN_MODE_ACTIVE_PREFIX = "Plan mode is active.";
+const PLAN_MODE_READ_ONLY = `${PLAN_MODE_ACTIVE_PREFIX} Only take read-only actions. Do not write or edit files, change configuration, or make commits.`;
 
-function buildPlanWorkflow() {
-  return `## Plan Workflow
-
-### Phase 1: Initial Understanding
-Goal: Gain a comprehensive understanding of the user's request by reading through code and asking them questions. Critical: In this phase you should only use the ${EXPLORE_AGENT_TYPE} subagent type.
-
-1. Focus on understanding the user's request and the code associated with their request. Actively search for existing functions, utilities, and patterns that can be reused \u2014 avoid proposing new code when suitable implementations already exist.
-
-2. **Launch up to ${planResearchAgentCount} ${EXPLORE_AGENT_TYPE} agents IN PARALLEL** (single message, multiple tool calls) to efficiently explore the codebase.
-   - Use 1 agent when the task is isolated to known files, the user provided specific file paths, or you're making a small targeted change.
-   - Use multiple agents when: the scope is uncertain, multiple areas of the codebase are involved, or you need to understand existing patterns before planning.
-   - Quality over quantity - ${planResearchAgentCount} agents maximum, but you should try to use the minimum number of agents necessary (usually just 1)
-   - If using multiple agents: Provide each agent with a specific search focus or area to explore. Example: One agent searches for existing implementations, another explores related components, a third investigating testing patterns
-
-### Phase 2: Design
-Goal: Design an implementation approach based on the user's intent and your exploration results from Phase 1.
-
-- Provide comprehensive background context from Phase 1 exploration including filenames and code path traces
-- Describe requirements and constraints
-- Produce a detailed implementation plan
-
-### Phase 3: Review
-Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's intentions.
-1. Read the critical files you identified during exploration to deepen your understanding
-2. Ensure that the plans align with the user's original request
-3. Use ${ASK_USER_QUESTION_TOOL_NAME} to clarify any remaining questions with the user
-
-### Phase 4: Final Plan
-Goal: Prepare your complete final plan for the \`plan\` parameter of ${EXIT_PLAN_MODE_TOOL_NAME}.
-- Begin with a **Context** section: explain why this change is being made \u2014 the problem or need it addresses, what prompted it, and the intended outcome
-- Include only your recommended approach, not all alternatives
-- Ensure that the final plan is concise enough to scan quickly, but detailed enough to execute effectively
-- Name the critical files to be modified. For changes that repeat a pattern across many files, describe the pattern once and list a few representative paths \u2014 do not enumerate every file or line number
-- Reference existing functions and utilities you found that should be reused, with their file paths
-- Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
-
-### Phase 5: Call ${EXIT_PLAN_MODE_TOOL_NAME}
-At the very end of your turn, once you have asked the user questions and are happy with your final plan - you should always call ${EXIT_PLAN_MODE_TOOL_NAME} to indicate to the user that you are done planning. When calling ${EXIT_PLAN_MODE_TOOL_NAME}, pass the complete final plan in its \`plan\` parameter.
-This is critical - your turn should only end with either using the ${ASK_USER_QUESTION_TOOL_NAME} tool OR calling ${EXIT_PLAN_MODE_TOOL_NAME}. Do not stop unless it's for these 2 reasons
-
-**Important:** Use ${ASK_USER_QUESTION_TOOL_NAME} ONLY to clarify requirements or choose between approaches. Use ${EXIT_PLAN_MODE_TOOL_NAME} to request plan approval. Do NOT ask about plan approval in any other way - no text questions, no AskUserQuestion. Phrases like "Is this plan okay?", "Should I proceed?", "How does this plan look?", "Any changes before we start?", or similar MUST use ${EXIT_PLAN_MODE_TOOL_NAME}.
-
-NOTE: At any point in time through this workflow you should feel free to ask the user questions or clarifications using the ${ASK_USER_QUESTION_TOOL_NAME} tool. Don't make large assumptions about user intent. The goal is to present a well researched plan to the user, and tie any loose ends before implementation begins.`;
+interface PlanModeReminderOptions {
+  subagent?: boolean;
+  askUserQuestionAvailable?: boolean;
+  exitPlanModeAvailable?: boolean;
 }
 
-const PLAN_MODE_FULL_REMINDER = [
-  "Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supercedes any other instructions you have received.",
-  buildPlanWorkflow(),
-];
+function buildPlanClarificationReminder(askUserQuestionAvailable: boolean): string {
+  const action = askUserQuestionAvailable
+    ? `use ${ASK_USER_QUESTION_TOOL_NAME}`
+    : "ask the user directly";
+  return `Resolve routine choices from the request, code, and reasonable defaults. Only when a necessary decision must come from the user, ${action}.`;
+}
 
-const PLAN_MODE_SPARSE_REMINDER = [
-  `Plan mode still active (see full instructions earlier in conversation). Read-only. Follow 5-phase workflow. End turns with ${ASK_USER_QUESTION_TOOL_NAME} (for clarifications) or ${EXIT_PLAN_MODE_TOOL_NAME} (for plan approval). Never ask about plan approval via text or AskUserQuestion.`,
-];
-
-/** 子会话的 Plan 提醒：只保留只读约束，不含主会话的五阶段流程与收尾要求。 */
-function buildSubagentPlanModeReminder(askUserQuestionAvailable: boolean): string {
+function buildMainPlanModeReminder(full: boolean, options: PlanModeReminderOptions): string {
   return [
-    PLAN_MODE_FULL_REMINDER[0],
-    "Only take read-only actions, and answer the delegated query comprehensively.",
-    ...(askUserQuestionAvailable
+    full ? PLAN_MODE_READ_ONLY : "Plan mode still active. Read-only; do not write or edit files.",
+    ...(full
       ? [
-          `If you need clarification, use the ${ASK_USER_QUESTION_TOOL_NAME} tool and ask all of your clarifying questions before proceeding.`,
+          "Read the code needed for the task and reuse existing implementations. Keep the plan proportional to the task: state the goal, key change paths, recommended approach, and verification method.",
         ]
       : []),
+    buildPlanClarificationReminder(options.askUserQuestionAvailable === true),
+    options.exitPlanModeAvailable
+      ? `When an implementation plan is ready for approval, call ${EXIT_PLAN_MODE_TOOL_NAME} with the complete plan in its \`plan\` parameter. The tool requests approval even if the previous mode was yolo; do not request the same approval in a separate question.`
+      : "When an implementation plan is ready, show the complete plan and explain that plan mode remains active because its exit tool is unavailable. A text reply does not switch modes or authorize implementation.",
+    "For a research-only task, return the findings directly; no implementation approval or final tool call is required.",
+  ].join("\n\n");
+}
+
+/** 子会话只完成委派查询，不承担主会话的实现审批，也不要求再次派生 Agent。 */
+function buildSubagentPlanModeReminder(askUserQuestionAvailable: boolean): string {
+  return [
+    PLAN_MODE_READ_ONLY,
+    "Answer the delegated query comprehensively using read-only actions.",
+    ...(askUserQuestionAvailable ? [buildPlanClarificationReminder(true)] : []),
   ].join("\n\n");
 }
 
@@ -271,7 +242,7 @@ export function buildTodoReminderBody(todos: readonly TodoItem[]): string {
 
 /**
  * Plan 提醒按会话类型选择正文；轮内收集与 compact 后重发共用，避免一处漏掉子会话。
- * tools 传本轮可见工具，用来判断子会话能否用 AskUserQuestion。
+ * tools 传请求曝光前的完整候选表（含 deferred），不能拿 surfaced schemas 判断能力缺席。
  */
 export function buildRuntimeModeReminderBodyForTask(
   entries: readonly RuntimeMessageEntry[],
@@ -282,26 +253,18 @@ export function buildRuntimeModeReminderBodyForTask(
     tools: readonly { name: string }[];
   },
 ): string | null {
-  return buildRuntimeModeReminderBody(
-    entries,
-    input.mode,
-    input.planEnabled,
-    input.taskType === "subagent_child"
-      ? {
-          askUserQuestionAvailable: input.tools.some(
-            (tool) => tool.name === ASK_USER_QUESTION_TOOL_NAME,
-          ),
-        }
-      : undefined,
-  );
+  return buildRuntimeModeReminderBody(entries, input.mode, input.planEnabled, {
+    subagent: input.taskType === "subagent_child",
+    askUserQuestionAvailable: input.tools.some((tool) => tool.name === ASK_USER_QUESTION_TOOL_NAME),
+    exitPlanModeAvailable: input.tools.some((tool) => tool.name === EXIT_PLAN_MODE_TOOL_NAME),
+  });
 }
 
 export function buildRuntimeModeReminderBody(
   entries: readonly RuntimeMessageEntry[],
   mode: CollaborationMode,
   planEnabled = mode === "plan",
-  /** 子会话传入：只发精简提醒；askUserQuestionAvailable 表示子会话能看到 AskUserQuestion。 */
-  subagent?: { askUserQuestionAvailable: boolean },
+  options: PlanModeReminderOptions = {},
 ): string | null {
   if (!planEnabled) return null;
 
@@ -314,16 +277,15 @@ export function buildRuntimeModeReminderBody(
     return null;
   }
 
-  // 修复原因：子会话继承父会话 Plan 后收到了主会话的五阶段提醒，被要求再派生 Explore、只能以
-  // AskUserQuestion 或 ExitPlanMode 收尾，而子会话没有 ExitPlanMode，也不能再派生子 agent。
-  if (subagent) return buildSubagentPlanModeReminder(subagent.askUserQuestionAvailable);
+  // 修复原因：旧提醒虚构用户意图、强制五阶段与工具收尾，且未按主/子会话的实际能力降级。
+  if (options.subagent) {
+    return buildSubagentPlanModeReminder(options.askUserQuestionAvailable === true);
+  }
 
   const nextReminderCount = countRuntimeModeReminders(entries) + 1;
-  const reminderLines =
-    nextReminderCount % RUNTIME_MODE_REMINDER_CONFIG.FULL_REMINDER_EVERY_N_ATTACHMENTS === 1
-      ? PLAN_MODE_FULL_REMINDER
-      : PLAN_MODE_SPARSE_REMINDER;
-  return reminderLines.join("\n\n");
+  const full =
+    nextReminderCount % RUNTIME_MODE_REMINDER_CONFIG.FULL_REMINDER_EVERY_N_ATTACHMENTS === 1;
+  return buildMainPlanModeReminder(full, options);
 }
 
 export function buildPlanModeExitReminderBody(): string {
@@ -338,7 +300,8 @@ export function hasFullRuntimeModeReminder(entries: readonly RuntimeMessageEntry
     if (
       isRuntimeAttachmentEntry(entry) &&
       entry.metadata.source === "runtime_mode" &&
-      entry.content.startsWith(PLAN_MODE_FULL_REMINDER[0]!)
+      // 旧会话的完整提醒使用同一前缀；保留段原文不重写，也不因模板升级重复注入。
+      entry.content.startsWith(PLAN_MODE_ACTIVE_PREFIX)
     ) {
       return true;
     }

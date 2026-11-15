@@ -1,70 +1,41 @@
 ---
 name: executing-plans
-description: Use when you have a written implementation plan to execute in a separate session with review checkpoints
+description: Use to execute an authorized implementation plan, recover from ordinary failures, and verify the requested outcome
 ---
 
 # Executing Plans
 
-## Overview
-
-Load plan, review critically, execute all tasks, report when complete.
+Load the plan, confirm the current scope and constraints, execute authorized tasks, and report the verified result.
 
 **Announce at start:** "I'm using the executing-plans skill to implement this plan."
 
-**Note:** Tell your human partner that Superpowers works much better with access to subagents. The quality of its work will be significantly higher if run on a platform with subagent support (such as Claude Code or Codex). If subagents are available, use superpowers:subagent-driven-development instead of this skill.
+## Review the Existing Plan
 
-## The Process
+Read the plan and relevant repository instructions. Preserve decisions and approvals already made, including the selected execution method and the user's requested phase. Skill transitions and context continuations do not require another approval.
 
-### Step 1: Load and Review Plan
-1. Read plan file
-2. Review critically - identify any questions or concerns about the plan
-3. If concerns: Raise them with your human partner before starting
-4. If no concerns: Create TodoWrite and proceed
+Resolve discoverable gaps by inspecting the code and environment. Ask only when a consequential user choice remains necessary and cannot reasonably be resolved within the existing authorization. Continue independent work that does not depend on the answer. If the user asked to review the plan before implementation, honor that stage.
 
-### Step 2: Execute Tasks
+## Execute and Recover
 
 For each task:
-1. Mark as in_progress
-2. Follow each step exactly (plan has bite-sized steps)
-3. Run verifications as specified
-4. Mark as completed
 
-### Step 3: Complete Development
+1. Identify the intended behavior and the evidence that will establish completion.
+2. Follow the plan and repository rules, adapting routine implementation details when evidence warrants it.
+3. Implement within the approved scope and perform the necessary checks.
+4. Record completion only when the relevant result is established, preserving unresolved work.
 
-After all tasks complete and verified:
-- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
-- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
-- Follow that skill to verify tests, present options, execute choice
+A missing dependency, a failing test, or an unclear local step is a reason to diagnose the cause, not automatically to stop and ask for help. Read the error, check the environment and relevant code, and repair ordinary failures within scope. Change strategy when evidence disproves the current approach; do not repeat an ineffective action without a changed condition.
 
-## When to Stop and Ask for Help
+Pause dependent work when progress needs a necessary unresolved user decision, additional authority, or an external prerequisite you cannot establish. Explain the specific blocker and completed independent work. Respect actual permission denials, user cancellation, and phase boundaries; persistence does not override them.
 
-**STOP executing immediately when:**
-- Hit a blocker (missing dependency, test fails, instruction unclear)
-- Plan has critical gaps preventing starting
-- You don't understand an instruction
-- Verification fails repeatedly
+## Choose an Execution Method
 
-**Ask for clarification rather than guessing.**
+Keep an already selected method. Otherwise, use subagents when there is independent work and a concrete benefit to quality or elapsed time. If work is tightly coupled or delegation would add overhead, execute it directly. The availability of subagents does not require a skill switch or a question about execution style.
 
-## When to Revisit Earlier Steps
+Use a worktree or a related skill when it helps preserve workspace changes and fits repository requirements. Do not introduce a fixed chain of required skills or another approval solely to change execution methods.
 
-**Return to Review (Step 1) when:**
-- Partner updates the plan based on your feedback
-- Fundamental approach needs rethinking
+## Complete the Authorized Work
 
-**Don't force through blockers** - stop and ask.
+Use verification-before-completion when its guidance helps assess the evidence. Evidence must match the current version, environment, inputs, and acceptance criteria. Reuse still-valid results; rerun affected checks after relevant changes or when evidence is insufficient. Complete repository-required checks.
 
-## Remember
-- Review plan critically first
-- Follow plan steps exactly
-- Don't skip verifications
-- Reference skills when plan says to
-- Stop when blocked, don't guess
-- Never start implementation on main/master branch without explicit user consent
-
-## Integration
-
-**Required workflow skills:**
-- **superpowers:using-git-worktrees** - Ensures isolated workspace (creates one or verifies existing)
-- **superpowers:writing-plans** - Creates the plan this skill executes
-- **superpowers:finishing-a-development-branch** - Complete development after all tasks
+Report what changed, what was verified, and any remaining limitation or blocker. Branch finishing, commits, pull requests, and external changes remain subject to the user's scope and authorization; a completion skill does not authorize them. Do not stop at offering to continue work that is already authorized and necessary.

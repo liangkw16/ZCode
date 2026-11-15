@@ -146,7 +146,7 @@ const SYSTEM_REMINDER_DESCRIPTORS: Record<SystemReminderSource, DescriptorShape>
     true,
     "sr.silent_turn_reminder",
   ),
-  // token 预算倒数：收集时写库再提交，后续请求只追加；冷恢复按原文回放。
+  // 仅兼容旧虚拟预算提醒：新请求不生成，历史持久化记录仍按原文恢复和投影。
   total_tokens_reminder: descriptor(
     "current_turn",
     "resume_history",

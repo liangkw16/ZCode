@@ -269,7 +269,7 @@ describe("AgentRuntime Dream handler", () => {
     await runtime.executeTurn("next");
     const expectedUpdate = MEMORY_UPDATE_FIXTURE.replaceAll("<MEMORY_ROOT>", memoryRoot);
     // 同一条 MCS system 里，轮首的 token 预算提醒排在 memory_update 之前。
-    const expectedSystem = `<total_tokens>15000000 tokens left</total_tokens>\n\n${expectedUpdate}`;
+    const expectedSystem = expectedUpdate;
     const nextRequest = mainRequests[1] ?? [];
     const updateIndex = nextRequest.findIndex(
       (message) => message.role === "system" && message.content === expectedSystem,

@@ -1,21 +1,22 @@
 ---
 name: writing-plans
-description: Use when you have a spec or requirements for a multi-step task, before touching code
+description: Use when a concrete implementation plan would help execute a spec or multi-step requirement
 ---
 
 # Writing Plans
 
 ## Overview
 
-Write comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.
+Write an implementation plan that an engineer without the conversation context can execute. Include the affected files, intended behavior, relevant interfaces, tests, and necessary documentation. Scale the detail to the task. DRY. YAGNI. Follow repository testing requirements and user authorization for commits.
 
 Assume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.
 
 **Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
 
-**Context:** If working in an isolated worktree, it should have been created via the `superpowers:using-git-worktrees` skill at execution time.
+**Context:** Reuse a suitable existing workspace. Use an isolated worktree or a related skill when the task and repository requirements benefit from it; do not require a skill transition just because worktrees are available.
 
 **Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
+
 - (User preferences for plan location override this default)
 
 ## Scope Check
@@ -36,11 +37,12 @@ This structure informs the task decomposition. Each task should produce self-con
 ## Bite-Sized Task Granularity
 
 **Each step is one action (2-5 minutes):**
+
 - "Write the failing test" - step
 - "Run it to make sure it fails" - step
 - "Implement the minimal code to make the test pass" - step
 - "Run the tests and make sure they pass" - step
-- "Commit" - step
+- "Commit, when authorized" - optional delivery step
 
 ## Plan Document Header
 
@@ -49,7 +51,7 @@ This structure informs the task decomposition. Each task should produce self-con
 ```markdown
 # [Feature Name] Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Preserve the approved scope and execution method. Use executing-plans or subagent-driven-development when it helps the task; delegation requires independent work and a concrete benefit. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** [One sentence describing what this builds]
 
@@ -66,6 +68,7 @@ This structure informs the task decomposition. Each task should produce self-con
 ### Task N: [Component Name]
 
 **Files:**
+
 - Create: `exact/path/to/file.py`
 - Modify: `exact/path/to/existing.py:123-145`
 - Test: `tests/exact/path/to/test.py`
@@ -95,7 +98,7 @@ def function(input):
 Run: `pytest tests/path/test.py::test_name -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit, only when authorized**
 
 ```bash
 git add tests/path/test.py src/path/file.py
@@ -106,6 +109,7 @@ git commit -m "feat: add specific feature"
 ## No Placeholders
 
 Every step must contain the actual content an engineer needs. These are **plan failures** — never write them:
+
 - "TBD", "TODO", "implement later", "fill in details"
 - "Add appropriate error handling" / "add validation" / "handle edge cases"
 - "Write tests for the above" (without actual test code)
@@ -114,10 +118,11 @@ Every step must contain the actual content an engineer needs. These are **plan f
 - References to types, functions, or methods not defined in any task
 
 ## Remember
+
 - Exact file paths always
 - Complete code in every step — if a step changes code, show the code
 - Exact commands with expected output
-- DRY, YAGNI, TDD, frequent commits
+- DRY, YAGNI, meaningful verification, and authorized delivery
 
 ## Self-Review
 
@@ -133,20 +138,10 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 ## Execution Handoff
 
-After saving the plan, offer execution choice:
+If implementation is already authorized, continue with the approved plan without asking again whether to execute or requiring a choice between subagent and inline execution. Keep an execution method the user already selected. Otherwise choose a reasonable method based on task dependencies and available capabilities.
 
-**"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
+Use subagents only when there is independent work and a concrete benefit to quality or elapsed time. Tightly coupled tasks can proceed directly. Use executing-plans or subagent-driven-development when the selected workflow would help; their existence does not mandate another skill transition.
 
-**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
+If the user asked to review the plan first, deliver the concrete plan and wait for that decision. If a consequential choice remains genuinely unresolved, ask only about that choice and continue independent authorized work. A plan-only or spec-only request ends with that phase's deliverable, not product implementation.
 
-**2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
-
-**Which approach?"**
-
-**If Subagent-Driven chosen:**
-- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
-- Fresh subagent per task + two-stage review
-
-**If Inline Execution chosen:**
-- **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
-- Batch execution with checkpoints for review
+Creating or saving a plan does not create new approval or Git commit requirements. Honor existing authorization, repository instructions, actual permissions, and user phase boundaries across the handoff.

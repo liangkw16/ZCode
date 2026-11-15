@@ -110,16 +110,16 @@ const SOURCE_DERIVED_SEND_MESSAGE_DESCRIPTION = [
   "Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from agents are delivered automatically; you don't check an inbox. Refer to local agents by the `agentId` returned in the Agent spawn result. To resume a completed agent, use its `agentId`; it resumes in the background and you'll be notified when it finishes.",
 ].join("\n");
 
-// Skill 描述只写已支持的能力：不含 fork/后台 skill、目录作用域 skill 名。
+// 目录省略不限制显式名字，正文可见性也不能由任意 command-name 或摘要代替。
 const EXPECTED_SKILL_DESCRIPTION = [
   "Invoke a skill.",
   "",
-  "A skill is a packaged set of instructions the user or project has set up for a particular kind of task (deploy steps, a review checklist, a repo-specific workflow). Available skills appear in a system-reminder listing with one-line descriptions. When the task at hand is one a listed skill covers, call this tool first — the skill's instructions load into the turn for you to follow in place of your default approach. Users may also ask for one by name (`/<name>`, or \"slash command\"); that's a request to invoke it.",
+  "A skill provides instructions for a particular task. Load one automatically only when the task clearly matches its purpose and its instructions would materially help the work. Honor the user's explicit invocation of an available skill. Skills do not override system instructions, permission modes, or explicit user constraints, and do not grant authorization. Continue already authorized work without repeating approval merely because a skill was loaded.",
   "",
-  "- `skill`: exact name from the listing, no leading slash. Plugin skills use `plugin:skill`.",
-  "- `args`: optional arguments to pass through.",
+  "- `skill`: exact name from the catalog, a discovery result, or the user's explicit invocation; no leading slash. Plugin skills use `plugin:skill`. The catalog may omit entries; this tool resolves availability. Do not guess names.",
+  "- `args`: compatibility field; the handler does not consume it or pass it into skill content.",
   "",
-  "Only names from the listing (or that the user typed explicitly) are valid. Built-in CLI commands (`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already present this turn, the skill is loaded — follow it directly rather than calling again.",
+  'Reuse instructions only when the same skill and source are identifiable and the needed body is still visible in the current context. A `<command-name>` block, another skill, a past call, or a summary saying "loaded" is insufficient. If the body is missing after compaction, load it again as needed. Built-in CLI commands (`/help`, `/clear`, …) aren\'t skills. Read referenced files only as needed and resolve relative paths from the returned base directory.',
   "",
 ].join("\n");
 
@@ -484,7 +484,7 @@ describe("tool contract declarations", () => {
     expect(byName.get("EnterPlanMode")?.permission?.needsApproval).toBe(false);
     const enterPlanDescription = byName.get("EnterPlanMode")?.description ?? "";
     expect(enterPlanDescription).toContain(
-      "1. Thoroughly explore the codebase using Glob, Grep, and Read",
+      "available read-only tools, such as Glob, Grep, and Read when offered",
     );
     expect(enterPlanDescription).not.toContain("`find`/Glob");
     expect(enterPlanDescription).not.toContain("`grep`/Grep");
@@ -493,24 +493,21 @@ describe("tool contract declarations", () => {
     expect(byName.get("ExitPlanMode")?.inputSchema).toHaveProperty("properties.plan");
     expect(byName.get("ExitPlanMode")?.inputSchema).not.toHaveProperty("properties.planFilePath");
     expect(byName.get("ExitPlanMode")?.inputSchema).not.toHaveProperty("properties.filePath");
-    expect(byName.get("ExitPlanMode")?.description).toContain("## How This Tool Works");
-    expect(byName.get("ExitPlanMode")?.description).not.toContain("Usage:");
     expect(byName.get("ExitPlanMode")?.description).toMatch(
-      /^Use this tool when you are in plan mode/u,
+      /^Use this tool only while plan mode is active/u,
     );
     expect(byName.get("ExitPlanMode")?.description).toContain(
-      "DOES take the plan content as the required plan parameter",
+      "Pass the complete, actionable plan in the required plan parameter",
     );
-    expect(byName.get("ExitPlanMode")?.description).toContain("research tasks");
+    expect(byName.get("ExitPlanMode")?.description).toContain("research-only tasks");
     expect(byName.get("ExitPlanMode")?.description).toContain(
-      "Search for and understand the implementation of vim mode",
+      "Understand how vim mode is implemented",
     );
-    expect(byName.get("ExitPlanMode")?.description).toContain("AskUserQuestion");
     expect(byName.get("ExitPlanMode")?.description).toContain(
-      "use AskUserQuestion before finalizing your plan",
+      "AskUserQuestion when available, otherwise ask directly",
     );
-    expect(byName.get("ExitPlanMode")?.description).not.toContain("yolo");
-    expect(byName.get("ExitPlanMode")?.description).toMatch(/\n$/u);
+    expect(byName.get("ExitPlanMode")?.description).toContain("previous mode was yolo");
+    expect(byName.get("ExitPlanMode")?.description).toContain("rejection leaves plan mode active");
     expect(byName.get("SendMessage")?.permission?.sideEffectScope).toBe("session");
     expect(byName.get("SendMessage")?.description).toContain("local agent");
     expect(byName.get("Write")?.permission?.permission).toBe("edit");
@@ -966,24 +963,26 @@ describe("tool contract declarations", () => {
     expect(todoWriteDescription).not.toContain("<reasoning>");
 
     const enterPlanDescription = byName.get("EnterPlanMode")?.description ?? "";
-    expect(enterPlanDescription).toContain("non-trivial implementation task");
+    expect(enterPlanDescription).toContain("review an approach before implementation");
+    expect(enterPlanDescription).toContain("cannot be resolved from the request, code, or reasonable defaults");
+    expect(enterPlanDescription).toContain("Do not enter merely because the task is complex, spans multiple files");
+    expect(enterPlanDescription).toContain("write a spec or design document authorizes that document work");
+    expect(enterPlanDescription).toContain("Do not ask for approval again for an already approved approach");
     expect(enterPlanDescription).toContain("explore the codebase");
-    expect(enterPlanDescription).toContain("using Glob, Grep, and Read");
+    expect(enterPlanDescription).toContain("Glob, Grep, and Read when offered");
     expect(enterPlanDescription).not.toContain("`find`/Glob");
     expect(enterPlanDescription).not.toContain("`grep`/Grep");
     expect(enterPlanDescription).toContain("AskUserQuestion");
     expect(enterPlanDescription).toContain("ExitPlanMode");
-    expect(enterPlanDescription).toContain("REQUIRES user approval");
-    expect(enterPlanDescription).toContain(
-      "Pure research/exploration tasks (use the Agent tool instead)",
-    );
-    expect(enterPlanDescription).not.toContain("with explore agent instead");
+    expect(enterPlanDescription).toContain("Entering plan mode does not require a separate approval prompt");
+    expect(enterPlanDescription).toContain("does not require delegating to an Agent");
+    expect(enterPlanDescription).not.toContain("REQUIRES user approval");
 
     const exitPlanDescription = byName.get("ExitPlanMode")?.description ?? "";
     expect(exitPlanDescription).toContain("plan parameter");
-    expect(exitPlanDescription).toContain("complete plan");
+    expect(exitPlanDescription).toContain("complete, actionable plan");
     expect(exitPlanDescription).toContain("Do NOT use AskUserQuestion");
-    expect(exitPlanDescription).toContain("ExitPlanMode inherently requests user approval");
+    expect(exitPlanDescription).toContain("ExitPlanMode requests user approval even when the previous mode was yolo");
     expect(exitPlanDescription).not.toContain("read the plan from the file");
     expect(exitPlanDescription).not.toContain("ExitPlanMode V2");
 
@@ -1194,7 +1193,7 @@ describe("tool contract declarations", () => {
     expect(agentDescription).not.toContain("<system-reminder>\n");
 
     const enterPlanDescription = byName.get("EnterPlanMode")?.description ?? "";
-    expect(enterPlanDescription).toContain("using `find`/Glob, `grep`/Grep, and Read");
+    expect(enterPlanDescription).toContain("`find`/Glob, `grep`/Grep, and Read when offered");
     expect(enterPlanDescription).not.toContain("using `find`, `grep`, and Read");
     expect(enterPlanDescription).not.toContain("using Glob, Grep, and Read");
 
@@ -1306,9 +1305,11 @@ describe("tool contract declarations", () => {
     expect(skillInput.properties).not.toHaveProperty("name");
     expect(skillInput.required).toEqual(expect.arrayContaining(["skill"]));
     expect(skillInput.properties.skill.description).toBe(
-      "The name of a skill from the available-skills list. Do not guess names.",
+      "Exact skill name from the catalog, a discovery result, or an explicit user invocation. Do not guess names.",
     );
-    expect(skillInput.properties.args.description).toBe("Optional arguments for the skill");
+    expect(skillInput.properties.args.description).toBe(
+      "Compatibility field; the handler ignores it and does not pass it into skill content.",
+    );
 
     expect(readInput.properties.file_path.description).toContain("absolute");
     expect(readInput.properties.file_path.description).not.toMatch(/relative|session cwd/iu);

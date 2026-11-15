@@ -169,8 +169,8 @@ describe("AgentRuntime session persistence", () => {
             }),
           },
         );
-      const full = "Plan mode is active. The user indicated";
-      const sparse = "Plan mode still active (see full instructions";
+      const full = "Plan mode is active. Only take read-only actions.";
+      const sparse = "Plan mode still active. Read-only;";
       const exited = "You have exited plan mode.";
       const count = (marker: string) =>
         providerMessagesToText(requests.at(-1)!).split(marker).length - 1;

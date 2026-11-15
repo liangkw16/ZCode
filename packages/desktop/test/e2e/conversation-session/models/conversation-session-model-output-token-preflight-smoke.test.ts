@@ -1,10 +1,11 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ESTIMATED_TOKEN_CHAR_DIVISOR } from "@zcode/shared";
-import { clearAppData, getE2EAppDataPaths } from "#e2e/helpers/desktop-app";
+import { clearAppData, DEFAULT_WORKSPACE, getE2EAppDataPaths } from "#e2e/helpers/desktop-app";
+import { restartIntoWorkspacePreservingProfile } from "#e2e/helpers/model-provider-restart-runtime";
 import { selectUpstreamProviderModelById } from "#e2e/helpers/upstream-provider";
 import { waitForSelectedModel } from "#e2e/helpers/model-provider-restart";
-import { totalTokensAfterLastAssistant } from "#e2e/helpers/total-tokens-evidence";
+import { totalTokensReminders } from "#e2e/helpers/total-tokens-evidence";
 import type {
   E2ENetworkCaptureArtifact,
   E2ENetworkCaptureRecord,
@@ -81,6 +82,26 @@ const SMOKE_SCENARIOS = [
 const paths = getE2EAppDataPaths();
 
 describe("模型上下文预算混合长度 smoke E2E", () => {
+  before(async () => {
+    await prepareV4ConversationE2E({ skipProvider: true });
+    await restartIntoWorkspacePreservingProfile(DEFAULT_WORKSPACE, {
+      afterElectronProcessExit: async () => {
+        // 生产默认 Info 不落盘 compact.auto.skipped；本场景通过现有用户配置显式开启
+        // debug 取证，并在进程退出后写入，避免旧 Host 仍使用启动时的日志级别。
+        const configDir = join(paths.storageRoot, "cli");
+        const configPath = join(configDir, "config.json");
+        await mkdir(configDir, { recursive: true });
+        const content = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return "{}";
+          throw error;
+        });
+        const config = JSON.parse(content) as Record<string, unknown>;
+        config.logging = { ...parseJsonObject(config.logging), level: "debug" };
+        await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+      },
+    });
+  });
+
   after(async () => {
     await browser.electron.restoreAllMocks();
     await clearAppData();
@@ -128,6 +149,7 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     expect(completedSessionId).toBe(sessionId);
 
     const request = await waitForCapturedRequest({ latestUserMarker: marker });
+    expect(totalTokensReminders(request.record.requestJson)).toEqual([]);
     const maxTokens = readMaxTokens(request.record);
     expect(maxTokens).toBeGreaterThan(0);
     expect(maxTokens).toBeLessThanOrEqual(scenario.baselineMaxOutputTokens);
@@ -140,11 +162,9 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     });
     assertCommonDecision(decision, "below_threshold", scenario);
     // provider fixture 给出已覆盖上一轮 assistant 的精确 context usage；生产 estimator
-    // 只叠加本轮 user 与同轮 token 预算提醒。日志中的 tokenCount 会被归档脱敏，
+    // 移除虚拟余额后只叠加本轮 user。日志中的 tokenCount 会被归档脱敏，
     // 因此 wire cap 应从这组同源输入独立计算，不能依赖脱敏日志反推。
-    const estimatedCurrentUsage =
-      estimateUsageBeforeTurn(scenario, turn, messageLengths[index]!) +
-      estimateTotalTokensReminderRow(request.record.requestJson);
+    const estimatedCurrentUsage = estimateUsageBeforeTurn(scenario, turn, messageLengths[index]!);
     const expectedMaxTokens = Math.min(
       scenario.baselineMaxOutputTokens,
       scenario.contextWindow - estimatedCurrentUsage - PREFLIGHT_BUFFER,
@@ -201,7 +221,7 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     sessionId,
   });
   assertCommonDecision(compactDecision, undefined, scenario);
-  // 只作下界：未计入同轮 token 预算提醒（29 tokens），少算只会更低，仍应已达阈值。
+  // 真实 usage 加当前用户输入必须独立跨过阈值，不依赖虚拟提醒凑足输入长度。
   expect(
     estimateUsageBeforeTurn(scenario, finalTurn, messageLengths[finalTurn - 1]!),
   ).toBeGreaterThanOrEqual(scenario.threshold);
@@ -328,20 +348,6 @@ function estimateUsageBeforeTurn(
 
 function estimateTextTokens(value: string): number {
   return Math.ceil(value.length / ESTIMATED_TOKEN_CHAR_DIVISOR);
-}
-
-/**
- * 本轮 token 预算提醒在 CLI 侧是一条独立隐藏 user 行，preflight 和用户消息一起计入
- * usage 锚点之后的增量（apps/zcode-cli/docs/design/v2/loop/meta-user-context.md）。
- * 修复原因：引入该提醒后 spec 只叠加用户消息，期望 cap 比实际高 29 token
- * （86 字符 / 3）。N 取本轮请求里的实际值，按投影后的 system-reminder 文本估算。
- */
-function estimateTotalTokensReminderRow(requestJson: unknown): number {
-  const values = totalTokensAfterLastAssistant(requestJson);
-  expect(values).toHaveLength(1);
-  return estimateTextTokens(
-    `<system-reminder>\n<total_tokens>${values[0]} tokens left</total_tokens>\n</system-reminder>`,
-  );
 }
 
 /**

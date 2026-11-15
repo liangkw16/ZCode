@@ -853,7 +853,7 @@ export async function executeTurnCommand(
           backgroundSubagentResultConsumed: options?.backgroundSubagentResultConsumed === true,
           workflowResultConsumed: options?.workflowResultConsumed === true,
           completedRealToolResultBatch: false,
-          inputAttachmentCollectionPending: "turn_input",
+          inputAttachmentCollectionPending: true,
           ...(userPromptHookContext ? { userPromptHookContext } : {}),
           currentUserMessageId: userMessageId,
           events,

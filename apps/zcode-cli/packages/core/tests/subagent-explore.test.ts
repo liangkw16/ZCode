@@ -85,7 +85,7 @@ const subagentLauncherMessages =
 const exploreSystemMessages = [
   "You are ZCode, an interactive agent",
   // 专用正文和 Notes 逐字保留，末尾是固定的 token 预算行；环境与模型另走共享动态公告。
-  `\n${exploreAgentPrompt}\n\n${subagentLauncherMessages}\n\n${subagentCommonNotes}\n\n<total_tokens>15000000 tokens left</total_tokens>`,
+  `\n${exploreAgentPrompt}\n\n${subagentLauncherMessages}\n\n${subagentCommonNotes}`,
 ];
 
 async function waitForCondition(check: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -3420,14 +3420,12 @@ describe("Explore subagent", () => {
     expect(launchResult.response).toBe("background launched");
     expect(sendResult.response).toBe("message sent");
     expect(capturedAgentId).toMatch(/^agent_/u);
-    // 文本回复后取出的协调方消息之后是子 agent 的 token 预算提醒：子 agent 不重新起算，
-    // 从 0 计到当前上下文（usage 1 + 1）。
-    expect(childRequests[1].messages.slice(-3).map((message: any) => message.role)).toEqual([
+    // 协调方消息继续送达，但不再插入虚拟 token 提醒。
+    expect(childRequests[1].messages.slice(-2).map((message: any) => message.role)).toEqual([
       "assistant",
       "user",
-      "user",
     ]);
-    expect(secondChildRequestText).toContain("<total_tokens>14999998 tokens left</total_tokens>");
+    expect(secondChildRequestText).not.toContain("<total_tokens>");
     expect(secondChildRequestText).toContain(
       "The coordinator sent a message while you were working:",
     );

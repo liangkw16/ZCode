@@ -7,10 +7,18 @@ import type { ToolCallId, TraceId } from "../interfaces/shared.js";
 import { toToolJsonSchema } from "./json-schema.js";
 
 const SkillCurrentInputSchema = z.object({
+  // 目录可能按预算省略条目；字段说明不能反向限制显式名字，也不能承诺 handler 未实现的参数透传。
   skill: z
     .string()
-    .describe("The name of a skill from the available-skills list. Do not guess names."),
-  args: z.string().optional().describe("Optional arguments for the skill"),
+    .describe(
+      "Exact skill name from the catalog, a discovery result, or an explicit user invocation. Do not guess names.",
+    ),
+  args: z
+    .string()
+    .optional()
+    .describe(
+      "Compatibility field; the handler ignores it and does not pass it into skill content.",
+    ),
 });
 
 const LegacySkillInputSchema = z.object({

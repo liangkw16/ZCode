@@ -913,12 +913,18 @@ composer 逐轮发送各自固定 seed 生成的不同长度 ASCII 文本，不�
 
 压缩后的首条主请求仍携带系统提示、项目指令和 pending user。其 cap 独立按该次 model-io 记录的适配前完整纯文本消息逐条估算：`min(baseline, context - sum(ceil(message.length / 3)) - 1000)`；保留高于压缩前末轮 cap 的断言，不假定系统上下文增长后必然回到 baseline。
 
-OTB11/OTB12 的本轮文本增量统一按共享 `ESTIMATED_TOKEN_CHAR_DIVISOR = 3` 计算。增量包含两条消息：
+OTB11/OTB12 的本轮文本增量统一按共享 `ESTIMATED_TOKEN_CHAR_DIVISOR = 3` 计算。迁移前增量包含两条消息：
 本轮用户消息，以及同轮输入收集写入的 token 预算提醒（独立隐藏 user 行，投影为
 `<system-reminder>\n<total_tokens>N tokens left</total_tokens>\n</system-reminder>`，N 取该轮请求里的实际值），
 两条各自向上取整。固定 seed
 仍只负责生成确定性长度；估算常量迁移时允许机械校准长度区间，以保持既有 cap 序列和 Compact
 阈值两侧的测试设计不变。
+
+2026-11-15 修订：按 [虚拟 token 提醒移除合同](../apps/zcode-cli/docs/design/v2/loop/meta-user-context.md)，
+新会话不再生成上述隐藏提醒。OTB11/OTB12 的增量计算已同步，固定 seed 的真实用户输入仍能跨越阈值，
+仍按真实完整请求估算 cap 并跨越既有阈值，不保留虚构提醒凑测试长度；旧 fixture 的通过不代表新行为已验证。
+该场景需要 `compact.auto.skipped` debug 诊断；在隔离的 E2E profile 中显式设置现有
+`logging.level=debug` 并重启 Host 后取证，不改变生产默认日志级别或预算行为。
 
 ## OTC. Output-limit Continue
 
@@ -1664,7 +1670,7 @@ attachment 使用 `web-remote-replayable` 会话恢复，但当前没有独立 b
 
 2026-10-26 立即发送改为普通用户消息：M06k 的直接抢占和 M07a/M07m 的手动队列立即发送在 Core 停止旧执行后，与空闲时发送一样以普通 user 消息开新一轮，不带中途提示；中途提示只属于 guide。M06k 覆盖首个输出前和工具结果后的抢占，M07a 覆盖 text-only 输出后的抢占，MCS 开关两种能力结果相同。工具结果后抢占时，新消息是独立的 user 文本，不并入已发出的 tool_result，新请求只在上一次请求后追加内容。全文单次出现与原始 UI 气泡为验收点；附件和自动 drain 不变，由 CLI 单测固定。此处不改变调度与端侧 continuous/replayable 边界。
 
-2026-11-05 token 预算提醒：工具结果后抢占时，新一轮的预算提醒（15000000）按提醒的投影规则落在被停止请求的末尾：MCS 关时并进同一个 tool_result、排在原提醒之后；MCS 开时与原提醒用 `\n\n` 合进同一条 system 消息，这条消息移到新 prompt 之后。所以被停止请求的最后一个 tool_result（或 system 消息）会变；新消息仍是独立的 user 文本，去掉预算提醒后其余内容只追加。规格见 [Total-tokens reminder](../apps/zcode-cli/docs/design/v2/loop/meta-user-context.md)。
+2026-11-05 token 预算提醒：工具结果后抢占时，新一轮的预算提醒（15000000）按提醒的投影规则落在被停止请求的末尾：MCS 关时并进同一个 tool_result、排在原提醒之后；MCS 开时与原提醒用 `\n\n` 合进同一条 system 消息，这条消息移到新 prompt 之后。所以被停止请求的最后一个 tool_result（或 system 消息）会变；新消息仍是独立的 user 文本，去掉预算提醒后其余内容只追加。规格见 [虚拟 token 余额移除](../apps/zcode-cli/docs/design/v2/loop/meta-user-context.md)。
 
 这里的 steer 不表示改写已经发给 provider 的 in-flight 请求。交互行为有两种：`queue` 模式下，用户在同一个 running session 里继续输入的是“未来意图”，普通文本、`/goal` 和 `/compact` 经 CLI 串行 admission 进入同一个权威 `CommandInbox` FIFO；`guide` 模式下，普通文本进入 agent-side turn steering：完整 tool result batch 后内联注入；若当前 model step 正常 text-only 收口，则在 assistant 后追加 `user` role 并沿同一 active turn 续发下一次 provider request。已有普通 queue 仍只表达未来 product turn，不阻塞显式 guide，也不因 guide 改变相对顺序。只有 stop/interrupted 等无法继续当前 turn 的终态才把同一 guide intent 回退权威 queue。两种模式都必须保留完整 `ConversationInputIntent`，不能出现 UI 已清空但 queue/guided row/transcript/显式失败都没有权威记录的状态。
 
@@ -5988,11 +5994,25 @@ IPE05 追加：按住绘图时 Escape 请求关闭，将当前可见半笔一次
 
 IPE05/IPE06：图库导航位于底角，与侧边工具栏分离；390/1100px验证展开时下一张和切图后收起状态上一张可真实点击，脏状态下一张仍打开三选。
 
-## token 预算提醒（TT，2026-11-05 accepted / pending）
+## 虚拟 token 预算移除（TT，2026-11-15）
 
-规格：[Total-tokens reminder](../apps/zcode-cli/docs/design/v2/loop/meta-user-context.md)、[system 末尾的预算行](../apps/zcode-cli/docs/design/v2/loop/system-prompt-contract.md)、[prompt 快照](../apps/zcode-cli/docs/design/v2/loop/prompt-snapshot.md)、[compaction](../apps/zcode-cli/docs/design/v2/rewind-compact.md)。
+规格：[虚拟 token 余额移除](../apps/zcode-cli/docs/design/v2/loop/meta-user-context.md)、[主提示词合同](../apps/zcode-cli/docs/design/v2/loop/system-prompt-contract.md)、[prompt 快照](../apps/zcode-cli/docs/design/v2/loop/prompt-snapshot.md)、[compaction](../apps/zcode-cli/docs/design/v2/rewind-compact.md)。
 
-system 末尾固定为 `<total_tokens>15000000 tokens left</total_tokens>`；每个收集点追加一条倒数提醒，写库后只追加。fixture 的 usage 写死，期望数值逐个写死。「尾部提醒」指最后一条 assistant 之后的提醒。
+新目标：默认 system 和新收集附件不再生成虚拟 token 余额；真实 usage、context limit 和 compact
+保持。已有快照与提醒不回写，旧会话仍可恢复旧字节，既有刷新边界再生成不含余额的新正文。
+生成路径与相关测试断言已迁移；原 TT 编号继续用于下列验收，实际执行记录见覆盖矩阵：
+
+- TT01/TT02/TT04/TT10：新会话、跨轮、工具批次、output-limit 续写及 MCS/非 MCS/chat-completions
+  均无新余额行/附件；真实工具结果和其他提醒的内容、投影次序不变。
+- TT03/TT09：用旧版快照与提醒启动并冷恢复，旧字节原样保留且不追加新倒数；既有 compact/模型
+  切换边界产生新默认正文。不得把缺少余额的旧快照“修复”为带余额的快照，也不清洗 custom system。
+- TT05/TT06/TT07：auto/manual/reactive compact 照常工作，不新增余额、不再累加虚拟预算；
+  真实 usage、输出预算和必要保留段保持，保留段中的旧提醒按历史处理。
+- TT08：新主/子会话、后台通知和续跑不生成虚拟余额；不改变实际任务状态、取消或调度。
+
+下表仅保留 **2026-11-05 迁移前断言**，用于定位旧测试和回放，不再作为目标合同。
+当时 system 末尾固定为 `<total_tokens>15000000 tokens left</total_tokens>`，收集点追加倒数。
+fixture 的 usage 与期望数值逐个写死；“尾部提醒”指最后一条 assistant 之后的提醒。
 
 | ID   | 前置与动作                                                                                                 | 必须断言                                                                                                                                               |
 | ---- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -6007,7 +6027,10 @@ system 末尾固定为 `<total_tokens>15000000 tokens left</total_tokens>`；每
 | TT09 | 首轮后退出应用，把 prompt 快照里的预算行删掉（旧版本写下的快照），重启后再发一轮，然后 `/compact` 再发一轮 | 旧快照原样使用：system 是首轮 system 去掉预算行；消息里照常追加 15000000；压缩后 system 按当前代码重建，带预算行                                       |
 | TT10 | openai chat completions provider：一轮 Read 后收尾，再发一轮                                               | messages[0] 的 system 以预算行结尾；尾部提醒依次为 15000000、14998995、15000000；每条提醒是单独的 user 消息 `<system-reminder>\n…\n</system-reminder>` |
 
-候选 spec 位于 `conversation-session/goals/manual-review/pending/conversation-session-total-tokens-reminder.test.ts`，使用 case-local replay。guide（工具批次后不重新起算、纯文本回复后用户发的 guide 重新起算）、send-now 与排队消息由 running-guide-steer 与 running-send-now 的断言覆盖；信箱等非用户 guide 不重新起算、goal 续跑与 Stop hook 续跑、自定义 system prompt 由 CLI 测试覆盖。
+待迁移的候选 spec 位于 `conversation-session/goals/manual-review/pending/conversation-session-total-tokens-reminder.test.ts`，使用 case-local replay。
+实现时同时迁移 running-guide-steer、running-send-now 的倒数关联断言，以及 CLI 对信箱、goal/Stop hook
+续跑、custom system 的断言：验证不再生成余额，并保留既有输入投递/授权/真实用量语义。
+未运行迁移后的测试前保持 pending，不据旧回放晋升覆盖状态。
 
 ## 归档暂停定时任务（AAP，2026-11-10 accepted）
 

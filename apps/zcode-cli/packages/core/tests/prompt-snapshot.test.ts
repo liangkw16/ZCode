@@ -179,6 +179,16 @@ describe("prompt snapshot", () => {
     expect(toolShape(resumed).find((tool) => tool.name === "Probe")?.description).toBe("Probe v2");
   });
 
+  it("keeps user-authored token-like text unchanged in a custom system", async () => {
+    const custom = "Custom rules\n<total_tokens>123 tokens left</total_tokens>";
+    const runtime = createRuntime({ systemPrompt: custom });
+    await runtime.executeTurn("first");
+    expect(recordedSystem(store)).toContain(custom);
+    const { runtime: cold } = await resume({ systemPrompt: "New rules" });
+    await cold.executeTurn("resumed");
+    expect(systemTexts(requests.at(-1)).join("")).toContain(custom);
+  });
+
   it("re-records for a new session model and leaves it alone for a temporary model", async () => {
     const runtime = createRuntime();
     await runtime.executeTurn("first");
@@ -251,11 +261,16 @@ describe("prompt snapshot", () => {
   });
 
   it("copies the snapshot to a forked child session", async () => {
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      systemPrompt: "Legacy <total_tokens>15000000 tokens left</total_tokens>",
+    });
     await runtime.executeTurn("first");
     const internal = runtime as unknown as AgentRuntimeInternal;
     const childId = createSessionId();
     const entry = buildForkedPromptSnapshotEntry(internal, childId);
+    expect(JSON.stringify(entry?.data)).toContain(
+      "<total_tokens>15000000 tokens left</total_tokens>",
+    );
     expect(entry).toMatchObject({
       id: `${childId}:runtime-prompt-snapshot`,
       sessionID: childId,
@@ -323,7 +338,9 @@ describe("prompt snapshot", () => {
   });
 
   it("keeps the snapshot when a rewind cuts the history", async () => {
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      systemPrompt: "Rules v1 <total_tokens>15000000 tokens left</total_tokens>",
+    });
     await runtime.executeTurn("first");
     await runtime.executeTurn("second");
     const recorded = structuredClone(snapshotOf(store));
@@ -338,7 +355,9 @@ describe("prompt snapshot", () => {
       traceContext: trace(),
     });
     await cold.executeTurn("edited");
-    expect(systemTexts(requests.at(-1)).join("")).toContain("Rules v1");
+    expect(systemTexts(requests.at(-1)).join("")).toContain(
+      "Rules v1 <total_tokens>15000000 tokens left</total_tokens>",
+    );
     expect(snapshotOf(coldStore)).toEqual(recorded);
   });
 
@@ -346,7 +365,9 @@ describe("prompt snapshot", () => {
     ["no snapshot (an older session)", undefined],
     ["unreadable snapshot data", { model: "broken" }],
   ])("records the current code when a resumed session has %s", async (_label, data) => {
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      systemPrompt: "Rules v1 <total_tokens>15000000 tokens left</total_tokens>",
+    });
     await runtime.executeTurn("first");
     const id = `${sessionId}:runtime-prompt-snapshot`;
     if (data === undefined) store.entries.delete(id);

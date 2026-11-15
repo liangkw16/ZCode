@@ -3084,6 +3084,8 @@ Session 真实执行多轮 composer send；两组固定 seed 只决定各自消�
 紧随其后的 Compact 同时覆盖 threshold 两侧，不扩展成高轮次 fuzz。强证据同时来自 provider
 capture 中逐轮 `max_tokens`、`compact.auto.started` 日志和最终 UI 完成态。该 spec 已进入默认
 conversation E2E glob；Docker preset 仍需单独通过 replay-isolated 准入。
+2026-11-15 取证前提：OTB smoke 在隔离 profile 显式开启现有 `logging.level=debug` 并重启 Host，
+以捕获默认 Info 不落盘的 `compact.auto.skipped`；这不是生产预算或日志默认值变更。
 
 2026-11-09：assistant 回复改为按块保存后，compact 保留的 assistant content 是
 `[{ type: "text", text, blockIndex }]` 数组，旧断言只接受字符串而在重算 cap 前失败。spec 改为按
@@ -6948,9 +6950,24 @@ XSG02 未闭合扫光补验（2026-11-05）：工具/思考完成后保留真实
 
 2026-11-05 补充：跨分类同步状态提示的浏览器验收连同既有用例 19/19 通过；现有 DSYNC-04 真实 SSH 桌面回归 3/3 通过，证据 `packages/desktop/.e2e-artifacts/local-docker-20261105104306-0e7d06`。保持 pending 人工审核，未扩大整机平台覆盖。
 
-## token 预算提醒 TT（2026-11-05）
+## 虚拟 token 预算移除 TT（2026-11-15）
 
-case 定义见 `docs/conversation-session-case-catalog.md`「token 预算提醒」。候选 spec：`packages/desktop/test/e2e/conversation-session/goals/conversation-session-total-tokens-reminder.test.ts`。
+目标与迁移映射见 [case catalog](../conversation-session-case-catalog.md) 的 TT 修订：新生成请求不再
+含虚拟 token 余额，旧快照/提醒仍原样恢复，真实 usage/context/compact 不变。下表、2026-11-05
+回放证据及相关 guide/send-now 数值均只描述迁移前实现，不得据此宣称新合同通过。
+测试断言已同步到不生成余额的新合同；OTB11/OTB12 仍检查真实输入增量和上下文阈值，
+旧快照/提醒兼容另由 CLI 回归验证。新桌面运行记录单独追加，未实跑部分继续保留缺口。
+
+2026-11-15 实现回放：`packages/desktop/.e2e-artifacts/desktop-e2e-20261115-045455-641/summary.md`
+记录 TT 六例、P06 两路、M07a 两路 / M07m、M06k 两路 × 两触发共 **15 项通过**。
+同批 OTB11/12 在缺少 debug 诊断时失败，未到达新预算断言；补齐上述隔离取证前提后，
+`packages/desktop/.e2e-artifacts/desktop-e2e-20261115-050350-636/summary.md` 记录 **2/2 通过**。
+这些是 macOS Electron scripted replay 证据，不是模型主动性 A/B。TT09 播种旧 system 快照，
+旧持久化 reminder 附件字节保留由 CLI MCS 开/关回归另证；没有据此扩大手机、Windows/Linux 或 Docker 覆盖。
+其余仅删除余额清洗的 tools/workflow/permission UI 用例完成 fixture/typecheck，本轮未回放。
+下表继续保留迁移前编号与证据说明，不将旧倒数断言算作新合同验收。
+
+case 定义见 `docs/conversation-session-case-catalog.md`「虚拟 token 预算移除」。当前 spec：`packages/desktop/test/e2e/conversation-session/goals/conversation-session-total-tokens-reminder.test.ts`。
 
 | ID   | 覆盖状态 | 自动化                          | 备注                                 |
 | ---- | -------- | ------------------------------- | ------------------------------------ |

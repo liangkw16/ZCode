@@ -7168,7 +7168,7 @@ describe("AgentRuntime tool loop", () => {
     expect(realUserMessage?.cacheControl).toEqual({ type: "ephemeral" });
     expect(planModeReminderText).not.toContain("<system-reminder>");
     expect(planModeReminderText).toContain("Plan mode is active");
-    expect(planModeReminderText).toContain("MUST NOT make any edits");
+    expect(planModeReminderText).toContain("Do not write or edit files");
     expect(realUserContent).toBe("看看项目里是啥");
   });
 
@@ -8604,17 +8604,14 @@ describe("AgentRuntime tool loop", () => {
 
     expect(result.response).toBe("done after queued input");
     expect(modelCallCount).toBe(2);
-    // 工具批次之后的 token 预算提醒冒泡到保留 user 形态的输入之前，停在 tool result 后。
-    expect(secondRequestMessages.slice(-5).map((message) => message.role)).toEqual([
+    // 新输入仍在完整工具批次之后交付，不再插入虚拟 token 余额提醒。
+    expect(secondRequestMessages.slice(-4).map((message) => message.role)).toEqual([
       "assistant",
       "tool",
       "tool",
       "user",
-      "user",
     ]);
-    expect(providerContentToText(secondRequestMessages.at(-2)?.content)).toContain(
-      "<total_tokens>",
-    );
+    expect(providerMessagesToText(secondRequestMessages)).not.toContain("<total_tokens>");
     expect(providerContentToText(secondRequestMessages.at(-1)?.content)).toContain("note body");
     const drainIndex = eventTypes.indexOf(SessionEventType.TurnSteerDrained);
     const toolResultIndexes = eventTypes.flatMap((type, index) =>
@@ -8719,16 +8716,12 @@ describe("AgentRuntime tool loop", () => {
 
     const events = await eventStore.getEvents(sessionId);
     expect(modelCallCount).toBe(2);
-    // 纯文本回复后取出 guide 时收集预算提醒，排在这条 user 输入之前。这条 guide 直接调 steerTurn、
-    // 不带 user_steer，不重新起算：已用 = 上一次响应的 1 + 1。
-    expect(secondRequestMessages.slice(-3).map((message) => message.role)).toEqual([
+    // 纯文本回复后 guide 仍在同一 turn 交付，不再新建余额提醒。
+    expect(secondRequestMessages.slice(-2).map((message) => message.role)).toEqual([
       "assistant",
       "user",
-      "user",
     ]);
-    expect(providerContentToText(secondRequestMessages.at(-2)?.content)).toContain(
-      "<total_tokens>14999998 tokens left</total_tokens>",
-    );
+    expect(providerMessagesToText(secondRequestMessages)).not.toContain("<total_tokens>");
     expect(providerContentToText(secondRequestMessages.at(-1)?.content)).toContain(
       "guide without a tool boundary",
     );
@@ -9169,13 +9162,8 @@ describe("AgentRuntime tool loop", () => {
     expect(result.response).toBe("answer after both queued follow-ups");
     // 同一边界一次取出全部已等待的 guide；下一次请求归因到最后一条的 query。
     expect(requestQueryIds).toEqual(["query_original_request", "query_second_steer"]);
-    // 默认测试模型不合并相邻 user 内容，不补换行。这批工具的 token 预算提醒按冒泡规则
-    // 越过保留 user 形态的 guide，停在 tool result 之后。
-    expect(trailingUserTexts[1]).toEqual([
-      "<system-reminder>\n<total_tokens>14999998 tokens left</total_tokens>\n</system-reminder>",
-      "first queued follow-up",
-      "second queued follow-up",
-    ]);
+    // 默认测试模型不合并相邻 user 内容，不补换行；不插入虚拟余额，guide 顺序仍保持。
+    expect(trailingUserTexts[1]).toEqual(["first queued follow-up", "second queued follow-up"]);
     // 一起取出，但每条各自落库并各发一个 drained 事件。
     const drainedPayloads = drainedEvents.map((event) => event.payload as any);
     expect(drainedPayloads.map((payload) => payload.queryIds)).toEqual([
@@ -9404,12 +9392,7 @@ describe("AgentRuntime tool loop", () => {
     );
 
     // 已被 send-now 预留的 guide 归预留方提升；按 FIFO 取到它为止，后面的 guide 也不越过它。
-    // 这些 guide 直接调 steerTurn、不带 user_steer，纯文本回复后的预算提醒不重新起算：
-    // 已用 = 上一次响应的 1 + 1。
-    expect(trailingUserTexts[1]).toEqual([
-      "<system-reminder>\n<total_tokens>14999998 tokens left</total_tokens>\n</system-reminder>",
-      "guide a",
-    ]);
+    expect(trailingUserTexts[1]).toEqual(["guide a"]);
     expect(drainedEvents).toHaveLength(1);
     expect(
       (drainedEvents[0]!.payload as any).drainedInputs.map((input: any) => input.text),
@@ -9568,7 +9551,7 @@ describe("AgentRuntime tool loop", () => {
     expect((await runtime.getProjection()).pendingSteerInputs).toEqual([]);
 
     // 下一轮照常：tool call 后紧跟它的结果，之后依次是三条 guide、中断标记与新输入。
-    // 新输入轮首的 token 预算提醒按冒泡规则越过这些 user 输入，停在 tool result 之后。
+    // 新输入不再附加虚拟余额；guide 与中断标记的交付顺序仍保持。
     await expect(runtime.executeTurn("next request")).resolves.toMatchObject({
       response: "next answer",
     });
@@ -9585,14 +9568,7 @@ describe("AgentRuntime tool loop", () => {
         .slice(toolCallIndex + 2)
         .filter((message: any) => message.role === "user")
         .map((message: any) => providerContentToText(message.content)),
-    ).toEqual([
-      "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
-      "guide a",
-      "guide b",
-      "guide c",
-      "[Request interrupted by user]",
-      "next request",
-    ]);
+    ).toEqual(["guide a", "guide b", "guide c", "[Request interrupted by user]", "next request"]);
   });
 
   it("rejects steering when the expected turn id is stale", async () => {
@@ -10783,18 +10759,13 @@ describe("AgentRuntime tool loop", () => {
       content: [{ type: "reasoning", text: "thinking before tool" }],
       toolCalls: [{ id: "stream-read", name: "StreamRead", input: {} }],
     });
-    expect(secondRequest.messages.at(-2)).toMatchObject({
+    expect(secondRequest.messages.at(-1)).toMatchObject({
       content: "stream-read-ok",
       role: "tool",
       toolCallId: "stream-read",
       toolName: "StreamRead",
     });
-    // 工具批次之后的 token 预算提醒：首轮从 0 计到上一次响应的 usage（1 + 1）。
-    expect(secondRequest.messages.at(-1)).toMatchObject({
-      content:
-        "<system-reminder>\n<total_tokens>14999998 tokens left</total_tokens>\n</system-reminder>",
-      role: "user",
-    });
+    expect(providerMessagesToText(secondRequest.messages)).not.toContain("<total_tokens>");
     expect(events.map((event) => event.type)).toContain(SessionEventType.ModelStreaming);
     expect(events.map((event) => event.type)).toContain(SessionEventType.ToolCallScheduled);
     expect(events.map((event) => event.type)).toContain(SessionEventType.ToolCallResult);
@@ -11354,18 +11325,13 @@ describe("AgentRuntime tool loop", () => {
       modelId: requestModel.modelId,
       toolCalls: [{ id: "recover-read", name: "RecoverRead", input: {} }],
     });
-    expect(secondRequest.messages.at(-2)).toMatchObject({
+    expect(secondRequest.messages.at(-1)).toMatchObject({
       content: "recover-read-ok",
       role: "tool",
       toolCallId: "recover-read",
       toolName: "RecoverRead",
     });
-    // 流恢复结算的工具结果也算完整工具批次；失败的流没有 usage，预算提醒保持满额。
-    expect(secondRequest.messages.at(-1)).toMatchObject({
-      content:
-        "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
-      role: "user",
-    });
+    expect(providerMessagesToText(secondRequest.messages)).not.toContain("<total_tokens>");
     expect(recoveryEventTypes).toEqual([
       SessionEventType.StreamRecoveryStarted,
       SessionEventType.StreamRecoveryAnchorSelected,
@@ -12364,11 +12330,9 @@ describe("AgentRuntime tool loop", () => {
 
     const result = await runtime.executeTurn("recover streamed write tool");
     const events = await eventStore.getEvents(sessionId);
-    // 最后一条是这批工具之后的 token 预算提醒，工具结果在它之前。
-    const toolMessage = secondRequest.messages.at(-2);
-    expect(providerContentToText(secondRequest.messages.at(-1)?.content)).toContain(
-      "<total_tokens>",
-    );
+    // 合成失败结果仍与原工具调用配对，后面不再追加虚拟余额。
+    const toolMessage = secondRequest.messages.at(-1);
+    expect(providerMessagesToText(secondRequest.messages)).not.toContain("<total_tokens>");
     const ledgerPayloads = events
       .filter((event) => event.type === SessionEventType.StreamingToolLedgerUpdated)
       .map((event) => event.payload as any);
@@ -14655,16 +14619,15 @@ describe("AgentRuntime tool loop", () => {
       .join("\n");
 
     // 复制数包含首轮持久化的 environment、model、date 公告，fork 后无需重新宣告；
-    // 还包含轮首与每个工具批次后的 token 预算提醒。整个 assistant 回合都被复制，
-    // 回合内的隐藏提醒不会截断回合。
-    expect(fork.response).toContain("copied 11 messages");
+    // 不再生成虚拟余额提醒，整个 assistant 回合仍被复制。
+    expect(fork.response).toContain("copied 8 messages");
     // Bugfix 回归：fork 历史包含目标回合，工作区必须保留该回合的产出，
     // 不能恢复目标回合自身 checkpoint 的 beforeContent。
     expect(fileSystemPort.files.get("/work/src/demo.ts")).toBe("export const value = 2;\n");
     expect(fork.targetMessageId).toBe(editedAssistants[0]!.info.id);
     expect(forkEvent?.payload).toMatchObject({
-      // 与复制数一致，含 environment、model、date 公告与 token 预算提醒。
-      forkPoint: 11,
+      // 与复制数一致，含 environment、model、date 公告。
+      forkPoint: 8,
       targetMessageId: editedAssistants[0]!.info.id,
       restoredFileCount: 0,
     });
@@ -14784,9 +14747,8 @@ describe("AgentRuntime tool loop", () => {
     );
 
     expect(fork).toMatchObject({
-      // 用户输入、environment、model、agent listing、轮首 token 预算提醒、date 公告、
-      // 两条 assistant 消息，以及它们之间工具批次后的 token 预算提醒。
-      copiedMessageCount: 9,
+      // 用户输入、environment、model、agent listing、date 公告与两条 assistant 消息。
+      copiedMessageCount: 7,
       parentSessionId: sessionId,
       targetMessageId: target!.info.id,
       restoredFiles: [],

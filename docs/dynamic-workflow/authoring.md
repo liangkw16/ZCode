@@ -928,6 +928,12 @@ size budget per description; `core/tests/workflow-skill-gate.test.ts` and
 
 ### The system prompt
 
+2026-11-15 revision implemented: the shared security-task notice has been removed
+from the default main and workflow-actor prompts. The sequence below describes the
+current contract; tool permissions and general action authorization are unchanged.
+Real-model task-completion improvements still require a separate controlled evaluation.
+See the [system prompt contract](../../apps/zcode-cli/docs/design/v2/loop/system-prompt-contract.md).
+
 A workflow subagent does not get the interactive agent's identity. The context builder
 takes a third path when the runtime config carries `workflowActor` (mutually exclusive
 with a custom system prompt; both present is a wiring error). The CLI prefix ("You are
@@ -940,8 +946,8 @@ ZCode, an interactive coding agent") is skipped, and the identity section is rep
    The name clause appears only when the subagent has a name.
 2. The author's persona, if any. It sits after the opening sentence so the role is
    prominent, and after it so the opening cannot be overridden.
-3. The security notice and the `# Harness` block, reused verbatim from the interactive
-   identity.
+3. The `# Harness` block, reused verbatim from the interactive identity. No separate
+   security-task notice or equivalent replacement is injected.
 4. The workflow contract, `# Working inside a workflow`:
    - You have the regular working tools (reading, searching, editing, running commands)
      plus `submit_result` and `escalate`. There is no tool that asks a person anything.

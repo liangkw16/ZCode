@@ -41,8 +41,7 @@ import type {
   ReactiveCompactLoopContext,
 } from "./turn-loop-state.js";
 import { recordTurnUsageFact } from "./usage-observability.js";
-import { findLatestCommittedAssistantUsage, latestContextTokens } from "./turn-model-step-usage.js";
-import { rollOverTotalTokensBudget } from "../helpers/total-tokens-budget.js";
+import { findLatestCommittedAssistantUsage } from "./turn-model-step-usage.js";
 
 export async function executeManualCompact(
   this: AgentRuntimeInternal,
@@ -301,7 +300,6 @@ export async function autoCompactIfNeeded(
       return "skipped";
     }
     context.turnRequestState.entries = compactResult.entries;
-    rollOverTotalTokensBudgetAfterCompact(this, activeEntries);
     this.autoCompactConsecutiveFailures = 0;
     this.logger?.info("Auto compact completed", {
       ...traceContextToLogContext(turnTraceContext),
@@ -331,20 +329,6 @@ export async function autoCompactIfNeeded(
     });
     return "failed";
   }
-}
-
-/**
- * 主循环里的 auto / reactive compaction 提交后，把 compact 前的上下文加进预算计数，数值不会跳回；
- * 手动 compact 不调用，下一条真实用户消息会重新起算。
- */
-function rollOverTotalTokensBudgetAfterCompact(
-  runtime: AgentRuntimeInternal,
-  compactedEntries: readonly RuntimeMessageEntry[],
-): void {
-  runtime.totalTokensBudget = rollOverTotalTokensBudget(
-    runtime.totalTokensBudget,
-    latestContextTokens(compactedEntries),
-  );
 }
 
 function buildProviderUsageTokenOverride(
@@ -476,7 +460,6 @@ export async function reactiveCompactAfterContextExceeded(
       return "skipped";
     }
     context.turnRequestState.entries = compactResult.entries;
-    rollOverTotalTokensBudgetAfterCompact(this, activeEntries);
     this.autoCompactConsecutiveFailures = 0;
     this.logger?.info("Reactive compact completed; retrying model request", {
       ...traceContextToLogContext(turnTraceContext),

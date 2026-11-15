@@ -49,7 +49,7 @@ const REMOVED_AUTONOMY_PARAGRAPHS = [
 ];
 
 const EXPECTED_ACTION_CAUTION_PROMPT =
-  "For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.";
+  "Reuse the user's authorization for the same target, scope, and effects across steps and turns.";
 
 // 环境、模型、日期只产出 section，由运行时宣告；其余来源读 meta user carrier。
 const RUNTIME_ANNOUNCED_SECTIONS = {
@@ -118,7 +118,7 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("# Environment");
     expect(stableBody).not.toContain("# Context management");
     expect(stableBody).not.toContain("Write code that reads like the surrounding code");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(stableBody).not.toContain("# Task Behavior");
     expect(stableBody).not.toContain("# Risky Actions");
     expect(stableBody).not.toContain("# Communication Style");
@@ -127,22 +127,22 @@ describe("ContextBuilder meta user context", () => {
     const dynamicSystem = String(result.systemMessages[2]?.content ?? "");
     expect(dynamicSystem.startsWith(`\n\n${DEFAULT_COMMUNICATION_PROMPT}`)).toBe(true);
     expect(dynamicSystem).toContain(
-      `${DEFAULT_COMMUNICATION_PROMPT}\n\n${EXPECTED_PRONOUNS_PROMPT}\n\nFor actions that are hard to reverse or outward-facing`,
+      `${DEFAULT_COMMUNICATION_PROMPT}\n\n${EXPECTED_PRONOUNS_PROMPT}\n\nReuse the user's authorization for the same target, scope, and effects`,
     );
     expect(dynamicSystem.split(DEFAULT_COMMUNICATION_PROMPT)).toHaveLength(2);
     expect(dynamicSystem.split(EXPECTED_PRONOUNS_PROMPT)).toHaveLength(2);
     const behavior = result.sections.find((section) => section.source === "dynamic_behavior");
-    expect(behavior?.content).toBe(
+    expect(behavior?.content).toContain(
       `${DEFAULT_COMMUNICATION_PROMPT}\n\n${EXPECTED_PRONOUNS_PROMPT}\n\n${EXPECTED_ACTION_CAUTION_PROMPT}`,
     );
     expect(dynamicSystem).not.toContain("# Communicating with the user");
     expect(dynamicSystem).not.toContain("Only write a code comment");
     expect(dynamicSystem).not.toContain("if what you find contradicts how it was described");
     expect(result.systemMessages[2]?.content).toContain(
-      "For actions that are hard to reverse or outward-facing",
+      "Reuse the user's authorization for the same target, scope, and effects",
     );
     expect(
-      result.systemMessages[2]?.content.indexOf("For actions that are hard to reverse"),
+      result.systemMessages[2]?.content.indexOf("Reuse the user's authorization"),
     ).toBeLessThan(result.systemMessages[2]?.content.indexOf("# Context management") ?? -1);
     expect(result.systemMessages[2]?.content).not.toContain("# Session-specific guidance");
     expect(result.systemMessages[2]?.content).not.toContain("`! <command>`");
@@ -181,11 +181,15 @@ describe("ContextBuilder meta user context", () => {
     expect(contextManagement?.content).toBe(
       `${DEFAULT_CONTEXT_MANAGEMENT_PROMPT}\n\n${ADDITIONAL_ACT_DONT_REDERIVE_PROMPT}`,
     );
-    expect(
-      dynamicSystem.endsWith(`${ADDITIONAL_ACT_DONT_REDERIVE_PROMPT}\n\n${TOTAL_TOKENS_LINE}`),
-    ).toBe(true);
+    expect(dynamicSystem.endsWith(ADDITIONAL_ACT_DONT_REDERIVE_PROMPT)).toBe(true);
     expect(dynamicSystem.split(ADDITIONAL_ACT_DONT_REDERIVE_PROMPT)).toHaveLength(2);
-    expect(dynamicSystem.split(TOTAL_TOKENS_LINE)).toHaveLength(2);
+    expect(dynamicSystem).not.toContain(TOTAL_TOKENS_LINE);
+    expect(dynamicSystem).toContain("# Task execution");
+    expect(dynamicSystem).toContain("silence is not approval");
+    expect(dynamicSystem).toContain("Running, unchanged, or inconclusive results are not passes");
+    expect(dynamicSystem).toContain(
+      "Progress updates, plans, and offers to continue are not completion",
+    );
     for (const paragraph of REMOVED_AUTONOMY_PARAGRAPHS) {
       expect(dynamicSystem).not.toContain(paragraph);
     }
@@ -300,29 +304,32 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).toContain("Independent tool calls can run in parallel");
     expect(stableBody).toContain("Reference code as `file_path:line_number`");
     expect(stableBody).not.toContain("match local style, naming, patterns, and comment density");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(stableBody).not.toContain("Sending content to an external service publishes it");
-    expect(stableBody).not.toContain("Before deleting or overwriting, look at the target");
+    expect(stableBody).not.toContain("Before deleting or overwriting, inspect the target");
     expect(stableBody).not.toContain("Report outcomes faithfully");
     expect(stableBody).not.toContain("`! <command>`");
-    expect(stableBody).not.toContain("When the user types `/<skill-name>`");
+    expect(stableBody).not.toContain("When the user explicitly names a skill");
     expect(stableBody).not.toContain("# Task Behavior");
     expect(stableBody).not.toContain("# Risky Actions");
     expect(stableBody).not.toContain("# Communication Style");
 
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
     expect(dynamicSystem).toContain("match its comment density, naming, and idiom");
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
-    expect(dynamicSystem).toContain("Sending content to an external service publishes it");
-    expect(dynamicSystem).toContain("Before deleting or overwriting, look at the target");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
+    expect(dynamicSystem).not.toContain("Sending content to an external service publishes it");
+    expect(dynamicSystem).toContain("publishing publicly have different effects");
+    expect(dynamicSystem).toContain("Before deleting or overwriting, inspect the target");
     expect(dynamicSystem).toContain("Report outcomes faithfully");
-    expect(dynamicSystem.indexOf("For actions that are hard to reverse")).toBeLessThan(
+    expect(dynamicSystem.indexOf("Reuse the user's authorization")).toBeLessThan(
       dynamicSystem.indexOf("# Context management"),
     );
     expect(dynamicSystem).not.toContain("# Session-specific guidance");
     expect(dynamicSystem).not.toContain("`! <command>`");
     expect(dynamicSystem).not.toContain("Use the Agent tool with specialized agents");
-    expect(dynamicSystem).not.toContain("When the user types `/<skill-name>`");
+    expect(dynamicSystem).not.toContain("When the user explicitly names a skill");
     expect(dynamicSystem).not.toContain("Use AskUserQuestion");
     expect(dynamicSystem).not.toContain("spawn Agent with subagent_type=Explore");
     expect(dynamicSystem).not.toContain("Use TodoWrite");
@@ -463,9 +470,9 @@ describe("ContextBuilder meta user context", () => {
     expect(stable).not.toContain("# Environment");
     expect(stable).not.toContain("# Context management");
     expect(stable).not.toContain("Write code that reads like the surrounding code");
-    expect(stable).not.toContain("For actions that are hard to reverse");
+    expect(stable).not.toContain("Reuse the user's authorization");
     expect(dynamic).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamic.indexOf("For actions that are hard to reverse")).toBeLessThan(
+    expect(dynamic.indexOf("Reuse the user's authorization")).toBeLessThan(
       dynamic.indexOf("# Memory"),
     );
     expect(dynamic).not.toContain("# Session-specific guidance");
@@ -633,10 +640,12 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("**Is a git repository**: yes");
     expect(stableBody).not.toContain("# Context management");
     expect(stableBody).not.toContain("Write code that reads like the surrounding code");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(dynamicSystem).not.toContain("## Current Environment");
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).not.toContain("# Environment");
     expect(metaAttachment(result, "model")).toBe(
       "You are powered by the model named openai/gpt-5.",
@@ -687,10 +696,12 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("# Environment");
     expect(stableBody).not.toContain("# Context management");
     expect(stableBody).not.toContain("Write code that reads like the surrounding code");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     const dynamicSystem = String(result.systemMessages[2]?.content ?? "");
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).not.toContain("# Session-specific guidance");
     expect(dynamicSystem).not.toContain("# Environment");
     expect(dynamicSystem).toContain("# Context management");
@@ -719,7 +730,9 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).toContain("# Harness");
     expect(stableBody).toContain("Tools run behind a user-selected permission mode");
     expect(dynamicSystem.startsWith(`\n\n${DEFAULT_COMMUNICATION_PROMPT}`)).toBe(true);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).toContain(EXPECTED_PRONOUNS_PROMPT);
     expect(dynamicSystem).not.toContain("# Output Style");
   });
@@ -838,7 +851,9 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("## Current Environment");
     expect(dynamicSystem).not.toContain("## Current Environment");
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).not.toContain("# Session-specific guidance");
     expect(dynamicSystem).not.toContain("# Environment");
     expect(dynamicSystem).toContain("# Context management");
@@ -1062,12 +1077,12 @@ describe("ContextBuilder meta user context", () => {
     expect(result.systemMessages[1]?.content).not.toContain(
       "Write code that reads like the surrounding code",
     );
-    expect(result.systemMessages[1]?.content).not.toContain("For actions that are hard to reverse");
+    expect(result.systemMessages[1]?.content).not.toContain("Reuse the user's authorization");
     expect(result.systemMessages[2]?.content).toMatch(
       /^\n\nWrite code that reads like the surrounding code/,
     );
     expect(result.systemMessages[2]?.content).toContain(
-      "For actions that are hard to reverse or outward-facing",
+      "Reuse the user's authorization for the same target, scope, and effects",
     );
     expect(result.systemMessages[2]?.content).not.toContain("# Session-specific guidance");
     expect(result.systemMessages[2]?.content).not.toContain("# Language");
@@ -1149,7 +1164,7 @@ describe("ContextBuilder meta user context", () => {
     expect(result.systemMessages[0]?.content).not.toContain("demo-skill");
     expect(result.systemMessages[2]?.content).toContain("# Session-specific guidance");
     expect(result.systemMessages[2]?.content).toContain(
-      "# Session-specific guidance\n - When the user types `/<skill-name>`",
+      "# Session-specific guidance\n - When the user explicitly names a skill",
     );
     expect(result.systemMessages[2]?.content).not.toContain("`! <command>`");
     expect(result.systemMessages[2]?.content).not.toContain(
@@ -1413,8 +1428,9 @@ describe("ContextBuilder meta user context", () => {
     );
     expect(section.content).not.toContain("# Agent Identity");
     expect(section.content).toContain("# Harness");
-    expect(section.content).toContain("IMPORTANT:");
-    expect(section.content).toContain("authorized security testing");
+    expect(section.content).not.toContain("IMPORTANT:");
+    expect(section.content).not.toContain("authorized security testing");
+    expect(section.content).toContain("user decision, mode restriction, or policy rule");
     expect(section.content).toContain("Tools run behind a user-selected permission mode");
     expect(section.content).toContain(
       "The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.",
@@ -1423,7 +1439,7 @@ describe("ContextBuilder meta user context", () => {
       "<system-reminder> tags in messages and tool results are injected by the harness",
     );
     expect(section.content).not.toContain("Write code that reads like the surrounding code");
-    expect(section.content).not.toContain("For actions that are hard to reverse");
+    expect(section.content).not.toContain("Reuse the user's authorization");
     expect(section.content).not.toContain("Report results plainly");
     expect(section.content).not.toContain("# Session-specific guidance");
     expect(section.content).not.toContain("`! <command>`");
@@ -1484,7 +1500,7 @@ describe("ContextBuilder meta user context", () => {
     });
 
     expect(section?.content).toContain("superpowers:test-driven-development");
-    expect(section?.content).toContain("also loadable as test-driven-development");
+    expect(section?.content).not.toContain("also loadable as");
   });
 });
 
@@ -1519,18 +1535,19 @@ describe("context builder — workflow actor identity", () => {
     }).build();
     const text = result.systemMessages.map((message) => String(message.content)).join("\n");
 
-    // 开场句 → persona → 安全行 → Harness → 契约，且顺序固定。
+    // 开场句 → persona → Harness → 契约，且顺序固定。
     const opening = text.indexOf(
       'You are a subagent inside a dynamic workflow run, named "reviewer".',
     );
     const persona = text.indexOf("You are a strict reviewer.");
-    const security = text.indexOf("IMPORTANT: Assist with authorized security testing");
     const harness = text.indexOf("# Harness");
     const contract = text.indexOf("# Working inside a workflow");
     expect(opening).toBeGreaterThanOrEqual(0);
     expect(opening).toBeLessThan(persona);
-    expect(persona).toBeLessThan(security);
-    expect(security).toBeLessThan(harness);
+    expect(persona).toBeLessThan(harness);
+    expect(text).not.toContain("authorized security testing");
+    expect(text).not.toContain("# Task execution");
+    expect(text).not.toContain("<total_tokens>");
     expect(harness).toBeLessThan(contract);
 
     // 基座里保住的纪律。
@@ -1543,7 +1560,7 @@ describe("context builder — workflow actor identity", () => {
     expect(text).not.toContain("agent working with the user toward their goals");
     expect(text).not.toContain("# Communicating with the user");
     expect(text).not.toContain(EXPECTED_PRONOUNS_PROMPT);
-    expect(text).not.toContain("For actions that are hard to reverse");
+    expect(text).not.toContain("Reuse the user's authorization");
     expect(text).not.toContain("# Session-specific guidance");
     expect(text).not.toContain("ZCode Desktop");
     // 后续段照常。
@@ -1680,10 +1697,10 @@ describe("context builder — workflow actor identity", () => {
     ).toThrow(/mutually exclusive/);
   });
 
-  it("keeps the general-purpose main identity before the security and harness sections", () => {
+  it("keeps the general-purpose main identity immediately before the harness section", () => {
     const text = systemText({ workingDirectory: "/workspace", envInfo });
     expect(text).toContain(
-      "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing",
+      "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\n# Harness",
     );
     expect(text).toContain("\n\n# Harness\n - Text you output outside of tool use");
   });

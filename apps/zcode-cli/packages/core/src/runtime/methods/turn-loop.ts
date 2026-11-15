@@ -36,15 +36,8 @@ import {
 } from "../../agent/message-history.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { runModelBackedTurnStep } from "./turn-model-step.js";
-import { latestContextTokens, querySourceForTask } from "./turn-model-step-usage.js";
-import { inputRoleOf, isRealUserPrompt } from "../helpers/provider-entry-origins.js";
-import {
-  consumeTotalTokensBudget,
-  decideTotalTokensReminder,
-  reanchorTotalTokensBudget,
-  type InputAttachmentCollectionReason,
-} from "../helpers/total-tokens-budget.js";
-import { formatTotalTokensReminder } from "../../context/total-tokens.js";
+import { querySourceForTask } from "./turn-model-step-usage.js";
+import { inputRoleOf } from "../helpers/provider-entry-origins.js";
 import {
   evaluateRapidRefill,
   MAX_CONSECUTIVE_RAPID_REFILLS,
@@ -111,21 +104,14 @@ export async function runRegularTurnLoop(
     // 新轮通知的首个请求跳过。
     // Stop hook 续跑、模型降级、流恢复、Start Plan 排队重试、上下文超限恢复、闲时换票
     // 都重发同一份输入，不收集：每次收集都会多出一条 output_style 等不去重的附件。
-    const collectionReason = state.inputAttachmentCollectionPending;
-    if (collectionReason) {
+    if (state.inputAttachmentCollectionPending) {
       state.inputAttachmentCollectionPending = false;
-      // 收集只追加附件，最新的非附件 entry 在收集期间不变；只查一次，跳过规则和预算提醒共用。
+      // 收集只追加附件，按最新的非附件 entry 判断是否跳过新轮通知。
       const latestMessage = state.turnRequestState.entries.findLast(
         (entry) => !isRuntimeAttachmentEntry(entry),
       );
       if (!isNewTurnInput(latestMessage)) {
-        // 触发收集的输入是否出自用户本人：纯文本回复后看本次取出的 guide（历史 metadata 不可靠，
-        // 见 isUserSteer），其余看最新输入。
-        const fromUser =
-          collectionReason === "text_guide"
-            ? drainedSteerForNextRequest?.userSteered === true
-            : latestMessage !== undefined && isRealUserPrompt(latestMessage);
-        await collectInputAttachments(this, state, tools, collectionReason, fromUser);
+        await collectInputAttachments(this, state, tools);
       }
     }
 
@@ -284,8 +270,6 @@ async function collectInputAttachments(
   runtime: AgentRuntimeInternal,
   state: RegularTurnLoopState,
   tools: ReturnType<typeof getTurnTools>,
-  reason: InputAttachmentCollectionReason,
-  fromUser: boolean,
 ): Promise<void> {
   await appendRuntimeContextAnnouncements(
     runtime,
@@ -373,7 +357,6 @@ async function collectInputAttachments(
       state.turnTraceContext,
     );
   }
-  await appendTotalTokensReminder(runtime, state, reason, fromUser);
   // （2026-09-12）：原"回合开始注入 plugin_ui_state reminder"已删除，插件给模型的信息
   // 一律走 ui/update-model-context。
   // output_style 每次收集都产出，不去重。修复原因：只在首步发且不落 session 时，
@@ -412,42 +395,6 @@ async function collectInputAttachments(
     );
     state.userPromptHookContext = undefined;
   }
-}
-
-/**
- * token 预算倒数：数值来自 runtime 计数器与最近一条带 usage 的 assistant。
- * 先写库再提交并更新计数器；写库失败时计数器保持原值，错误向上冒泡。
- */
-async function appendTotalTokensReminder(
-  runtime: AgentRuntimeInternal,
-  state: RegularTurnLoopState,
-  reason: InputAttachmentCollectionReason,
-  fromUser: boolean,
-): Promise<void> {
-  const entries = state.turnRequestState.entries;
-  const decision = decideTotalTokensReminder({
-    reason,
-    mainSession: querySourceForTask(runtime.config.taskType) === "main_turn",
-    fromUser,
-  });
-  if (!decision.emit) return;
-  const context = latestContextTokens(entries);
-  const budget = decision.reanchor
-    ? reanchorTotalTokensBudget(runtime.totalTokensBudget, context)
-    : runtime.totalTokensBudget;
-  const consumed = consumeTotalTokensBudget(budget, context);
-  await persistAnnouncements(
-    runtime,
-    state.turnRequestState,
-    [
-      systemReminderAttachmentEntry(
-        "total_tokens_reminder",
-        formatTotalTokensReminder(consumed.remaining),
-      ),
-    ],
-    state.turnTraceContext,
-  );
-  runtime.totalTokensBudget = consumed.state;
 }
 
 async function appendToolSearchAnnouncement(

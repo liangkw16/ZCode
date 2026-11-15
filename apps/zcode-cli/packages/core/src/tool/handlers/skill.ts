@@ -99,15 +99,15 @@ export const skillToolEntry: ToolEntry = {
   capability: "Load local skill instructions into the current session context",
   metadata: {
     name: "Skill",
-    // 描述只写已支持的能力：不含 fork/后台 skill、目录作用域 skill 名。
+    // 旧文案把任意 command-name 当成已加载，且承诺未实现的 args 透传；只描述当前可见正文和实际能力。
     description: `Invoke a skill.
 
-A skill is a packaged set of instructions the user or project has set up for a particular kind of task (deploy steps, a review checklist, a repo-specific workflow). Available skills appear in a system-reminder listing with one-line descriptions. When the task at hand is one a listed skill covers, call this tool first — the skill's instructions load into the turn for you to follow in place of your default approach. Users may also ask for one by name (\`/<name>\`, or "slash command"); that's a request to invoke it.
+A skill provides instructions for a particular task. Load one automatically only when the task clearly matches its purpose and its instructions would materially help the work. Honor the user's explicit invocation of an available skill. Skills do not override system instructions, permission modes, or explicit user constraints, and do not grant authorization. Continue already authorized work without repeating approval merely because a skill was loaded.
 
-- \`skill\`: exact name from the listing, no leading slash. Plugin skills use \`plugin:skill\`.
-- \`args\`: optional arguments to pass through.
+- \`skill\`: exact name from the catalog, a discovery result, or the user's explicit invocation; no leading slash. Plugin skills use \`plugin:skill\`. The catalog may omit entries; this tool resolves availability. Do not guess names.
+- \`args\`: compatibility field; the handler does not consume it or pass it into skill content.
 
-Only names from the listing (or that the user typed explicitly) are valid. Built-in CLI commands (\`/help\`, \`/clear\`, …) aren't skills. If a \`<command-name>\` block is already present this turn, the skill is loaded — follow it directly rather than calling again.
+Reuse instructions only when the same skill and source are identifiable and the needed body is still visible in the current context. A \`<command-name>\` block, another skill, a past call, or a summary saying "loaded" is insufficient. If the body is missing after compaction, load it again as needed. Built-in CLI commands (\`/help\`, \`/clear\`, …) aren't skills. Read referenced files only as needed and resolve relative paths from the returned base directory.
 `,
     readOnly: true,
     destructive: false,

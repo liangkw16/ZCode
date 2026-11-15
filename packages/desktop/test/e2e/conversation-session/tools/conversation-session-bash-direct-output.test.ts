@@ -16,7 +16,6 @@ import {
   getLatestUpstreamToolResultByToolCallId,
   countUpstreamRequests,
 } from "#e2e/helpers/conversation-session-network";
-import { withoutTotalTokensReminderText } from "#e2e/helpers/total-tokens-evidence";
 import {
   listToolCallBlocks,
   waitForFoldedToolCallBlockByToolCallId,
@@ -90,9 +89,8 @@ async function done(marker: string) {
 async function result(id: string) {
   const value = await getLatestUpstreamToolResultByToolCallId(id);
   expect(value).not.toBeNull();
-  // 修复原因：工具批次后的 token 预算提醒以 `\n\n` 段并进 tool_result 文本，按原样比较
-  // Bash 结果会多出提醒段；这里只断言 Bash 结果本身，按完整形态去掉提醒段。
-  return { ...value!, content: withoutTotalTokensReminderText(value!.content) };
+  // 虚拟余额移除后直接检查完整工具结果，避免清洗掩盖多余附件。
+  return value!;
 }
 async function outputPath(id: string) {
   const sessionId = (await getV4PaneSnapshot()).sessionId;

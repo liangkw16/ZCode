@@ -17,7 +17,6 @@ import type { ModelToolContract, SubagentRunOptions } from "@zcode/contracts";
 import type { DrainedPendingInputDiagnostics, ModelExecutionContext } from "../types.js";
 import type { TurnMachineImpl } from "../deps.js";
 import type { RuntimeAttachmentEntry, RuntimeMessageEntry } from "../../agent/message-history.js";
-import type { InputAttachmentCollectionReason } from "../helpers/total-tokens-budget.js";
 
 export type PendingStreamRecoveryRequest = ModelStreamRecoveryStatus;
 
@@ -118,11 +117,8 @@ export interface RegularTurnLoopState {
   /** 当前 query 已成功写入 provider 可见持久历史的 assistant/compact 产物数量。 */
   historyRoundCount: number;
   completedRealToolResultBatch: boolean;
-  /**
-   * 下一次 loop 迭代要收集输入附件时记录原因：轮首、完整工具批次之后、文本回复后续上 guide。
-   * 原因是唯一来源，total_tokens_reminder 按它决定是否提醒与重新起算。
-   */
-  inputAttachmentCollectionPending: InputAttachmentCollectionReason | false;
+  /** 轮首、完整工具批次或文本 guide 后收集一次输入附件；重发同一请求时不重复收集。 */
+  inputAttachmentCollectionPending: boolean;
   /** 本轮 UserPromptSubmit 的上下文，等第一次输入附件收集写在输入附件批次末尾。 */
   userPromptHookContext?: RuntimeAttachmentEntry;
   /** 工具批次结算时本轮已被停止；决定中断标记用工具阶段的文字。 */
@@ -205,7 +201,7 @@ export function recordCompactSuccess(
 }
 
 export function recordCompletedToolBatch(state: RegularTurnLoopState): void {
-  state.inputAttachmentCollectionPending = "tool_batch";
+  state.inputAttachmentCollectionPending = true;
   // 旧 guard 活在整个用户 turn，完整工具批次结束后仍保持 used，导致后续真实 overflow 无法再次 reactive compact。
   state.reactiveCompactAttemptedInCurrentModelStep = false;
   if (state.compactTracking) {

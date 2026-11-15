@@ -47,99 +47,54 @@ non-empty list adds two more newlines, the existing list heading, two newlines,
 and numbered items inside brackets. Provider projection preserves this body for
 both MCS and user-side reminder delivery.
 
-## Total-tokens reminder
+## 虚拟 token 余额移除（2026-11-15，已实现）
 
-The model sees a token budget in two places. The budget is fixed at 15000000;
-there are no modes and no configuration. It applies to every provider and model.
+本节替代原固定 15,000,000 token 倒数的生成与内存计数合同；新生成路径和专用计数器
+已移除。该数值不代表 provider context 容量、真实账户余额或用户设置的执行预算，不能
+用来宣称还能完成多少工作，也不应以虚拟余额耗尽作为停止任务的依据。
 
-1. The system prompt ends with the line
-   `<total_tokens>15000000 tokens left</total_tokens>`. See
-   [System prompt contract](system-prompt-contract.md). A custom system prompt
-   does not get this line, but the reminders below are still collected.
-2. Input attachment collection adds a `total_tokens_reminder` with the body
-   `<total_tokens>N tokens left</total_tokens>`.
+实现合同：
 
-The runtime keeps one counter per runtime: one for the main session and one per
-subagent or workflow child. "Context" is the `input + output` usage of the
-latest assistant entry that has usage, or 0 when there is none (for example
-right after a compaction, whose kept assistants carry no usage). The input
-already includes cache reads and writes. When the output is 0 (old records store
-a missing output as 0), the context is the total if the total is at least the
-input; otherwise it is the input alone.
+- 默认 system 不再追加 `<total_tokens>… tokens left</total_tokens>`，动态附件不再新建
+  `total_tokens_reminder`。Main、普通子代理和 workflow 子运行时使用同一移除合同；custom
+  system 不被自动补入余额，也不清洗用户自行提供的文字。
+- 移除仅服务该虚拟余额的 runtime 内存计数与 reset、re-anchor、compact 累加逻辑，不以
+  新计数器、持久化字段、配置或其他名称的虚拟额度替代。
+- 保留真实 provider usage、费用统计、context 水位、本地估算 fallback、auto/reactive
+  compact 和显式资源限制。虚拟余额移除不改变用户输入、queue/guide、通知、Stop、
+  恢复或权限语义；不新增一条“额度无限”提示。
+- 其他附件仍由既有 collector 按原触发点收集；仅撤销该来源的新内容生成。摘要不得把
+  历史余额提升为新的资源事实，摘要的内容取舍见
+  [任务接续摘要修订](../rewind-compact.md#任务接续摘要修订2026-11-15已实现)。
 
-Two kinds of assistant entries carry no usage, so the counter keeps using the
-earlier usage after them:
+### 所有者与升级兼容
 
-- A response with server-side tool rounds. Its usage is the sum of several
-  internal requests, not the size of one context.
-- An assistant that stream recovery builds from the tool calls that finished
-  before the stream failed.
+默认文本由既有 ContextBuilder/system section 生成，动态附件由既有 runtime attachment
+collector 生成；usage 和 compact 沿用各自所有者。SessionStore 与 prompt snapshot 继续
+保存、恢复历史内容，provider projection 继续解释原 source 和角色，不建立平行状态。
 
-```text
-counter (runtime memory, reset by resumeFromStore)
-  anchor  = rolled + context at the latest re-anchor
-  rolled  = sum of the pre-compaction context of every auto or reactive compaction
-  used    = max(previous used, rolled + context - anchor); a re-anchor sets it to 0
-  N       = max(0, 15000000 - used)
-```
+已经持久化的 `total_tokens_reminder`、已有摘要以及带旧余额的 prompt snapshot 不修改、
+不删除、不迁移。恢复旧会话时，同模型快照仍可能保留旧 system；原文保留段和历史提醒
+仍可经 MCS 或非 MCS 路径送入请求，字节与顺序沿用既有合同。新内容在既有 snapshot
+更新或 compact 流程之后生效，但 compact 仍可能原样保留旧提醒，因此**不承诺升级后的
+所有请求立即不含旧余额**。移除的是新生成路径，不是对历史请求的清洗。
 
-The collection reason decides the outcome. It is recorded where collection is
-requested, not guessed from history:
+### 验收
 
-| Collection reason                                                                                                                                                                                                 | Reminder                      | Re-anchor            |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | -------------------- |
-| `turn_input`, main session, the turn input is a real user prompt: a user input with no input presentation (typed, queued, send-now, modified submit, remote or bot input, expanded slash command, scheduled turn) | yes                           | yes, so N = 15000000 |
-| `turn_input`, other inputs (goal continuation, coordinator input, subagent or workflow task)                                                                                                                      | no                            | no                   |
-| `tool_batch` (after a completed tool batch, also when guides or notifications were drained with it)                                                                                                               | yes, after the drained inputs | no                   |
-| `text_guide` (guides drained after a text-only reply), main session, at least one drained guide was typed by the user (`user_steer`: App, remote or bot input)                                                    | yes                           | yes                  |
-| `text_guide`, other guides only (session mailbox, tool follow-up, coordinator), or a subagent or workflow child                                                                                                   | yes                           | no                   |
+以下为验收要求；实际执行范围以验证报告为准：
 
-A new-turn `task_notification` or `subagent_reply` skips all input attachments
-on its first request, so it gets no reminder and does not re-anchor. Requests
-that resend the same input (Stop hook continuation, model fallback, stream
-recovery, context-exceeded recovery, output-token recovery) do not collect.
-
-Compaction:
-
-- Only auto and reactive compaction add the pre-compaction context to `rolled`.
-  A manual `/compact` does not; the next real prompt re-anchors anyway.
-- The reminder collected before an auto compaction sits in the kept tail. The
-  summary request and the first request after compaction add no new reminder.
-  The next tool batch includes `rolled`.
-
-Resume, fork and idle release start a fresh counter. Until the next real
-prompt, the value counts from 0 (for example, a notification turn that calls a
-tool after resume shows 15000000 minus the whole current context). Rewind does
-not change the counter.
-
-The body is persisted like `silent_turn_reminder` (persist, then commit), so
-resume restores the same bytes and later requests only append. Projection
-follows the common rules: with MCS it joins the run's system message with
-`\n\n` (before `Today's date` on the first request); without MCS it is a
-`<system-reminder>` user block, folded into the tool result on Anthropic and a
-separate user message on OpenAI-compatible protocols.
-
-```text
-<total_tokens>15000000 tokens left</total_tokens>          first request of a turn
-ok\n\n<system-reminder>\n<total_tokens>14998995 tokens left</total_tokens>\n</system-reminder>
-                                                            tool result, MCS off, input 1000 + output 5
-```
-
-A turn can stop after its tool results (user Stop, send-now, modified submit).
-The next turn's reminder follows the same rules. It moves back past the user
-inputs after those results (drained guides, the `[Request interrupted by user]`
-marker, the new prompt) and stops after the tool result. So the last part of the
-stopped request changes: without MCS it folds into the same tool result after
-the earlier reminder, if there is one; with MCS it joins the earlier reminder in
-the run's system message, which now comes after the new prompt. The new prompt
-and the marker stay separate user text, and all other content only appends.
-
-```text
-stopped request   user[ tool_result("ok\n\n<sr>14998995</sr>") ]
-next request      user[ tool_result("ok\n\n<sr>14998995</sr>\n\n<sr>15000000</sr>"), prompt ]     MCS off
-stopped request   user[ tool_result("ok") ], system("<tt>14998995")
-next request      user[ tool_result("ok"), prompt ], system("<tt>14998995\n\n<tt>15000000")    MCS on
-```
+- 新会话、无旧快照的 Main、子代理、workflow/default 与 custom-system 路径，不再由
+  runtime 生成虚拟余额；custom 原文含相同字样时不得误删。
+- 覆盖 `turn_input`、`tool_batch`、`text_guide`、goal/通知续行及各种请求重试，均不增加
+  新余额提醒。busy/running 用户输入和 guide 的 admission、投递顺序与次数不变。
+- 有旧快照与已持久化提醒的会话经冷恢复、rewind、fork、idle release 后恢复，历史字节
+  不变且不追加新余额；由既有流程替换 snapshot 后，新生成 system 不含 runtime 余额。
+- manual、auto、reactive compact 及连续多次 compact 不生成新余额或新内存累计；历史
+  提醒位于保留段时原文仍在，位于被总结区时不作为资源事实写入新摘要。
+- MCS 开/关、Anthropic 工具结果折叠与 OpenAI-compatible 独立 user reminder 路径检查
+  最终 provider 请求：区别“没有新提醒”和“存在历史提醒”，其余提醒角色与顺序不变。
+- 真实 usage、context threshold、context-exceeded recovery 与显式资源限制的原有行为
+  仍成立；不能仅凭 `<total_tokens>` 字符串消失就判定验收通过。
 
 ## Ownership and assembly
 
@@ -314,6 +269,10 @@ per-request context announcements. Both read the
 canonical history, append missing or changed context, and reuse the existing
 provider projection. No independent announced-state cache is maintained.
 
+The layout below reflects the pending removal of newly generated virtual-token
+reminders described above. Other collection points and ordering are unchanged;
+restored legacy reminders still use the existing projection.
+
 ```text
 loop iteration (one model request)
   drain mid-turn steers                      (human guides first, then notifications and agent
@@ -323,7 +282,7 @@ loop iteration (one model request)
                       -> tool_search_announcement
                       -> agent_listing_delta -> skills_listing -> plan_mode_exit
                       -> runtime_mode -> todo_reminder
-                      -> silent_turn_reminder -> total_tokens_reminder
+                      -> silent_turn_reminder
                       -> output_style -> memory_update
                       -> hook_context (UserPromptSubmit, first collection of the turn only)
   settled project-memory recall              (memory prefetch after attachments)
@@ -337,7 +296,7 @@ the first request for the turn input, the first request after a completed tool
 batch (this includes tool results that stream recovery or model fallback
 settles), and the first request after a text-only reply drains a guide. The
 loop state records which of the three points requested the collection
-(`turn_input`, `tool_batch`, `text_guide`); `total_tokens_reminder` reads it. Items
+(`turn_input`, `tool_batch`, `text_guide`). Items
 produced for the turn input or the last tool batch therefore belong to the
 history that compaction keeps or summarizes. The other loop iterations send the
 same input again and do not collect: Stop hook continuation, model fallback,

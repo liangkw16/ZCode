@@ -262,7 +262,7 @@ describe("compact retained input persistence", () => {
             // 只放宽 agent 描述和环境正文。
             expect(requestText(matches)).toMatch(
               new RegExp(
-                `^${escapeRegExp(grouped)}\\n\\nAvailable agent types for the Agent tool:\\n[\\s\\S]*\\n\\n# Environment\\n[\\s\\S]*\\n\\nYou are powered by the model named test/default-runtime-model\\.\\n\\n<total_tokens>15000000 tokens left</total_tokens>\\n\\npersisted attachment payload$`,
+                `^${escapeRegExp(grouped)}\\n\\nAvailable agent types for the Agent tool:\\n[\\s\\S]*\\n\\n# Environment\\n[\\s\\S]*\\n\\nYou are powered by the model named test/default-runtime-model\\.\\n\\npersisted attachment payload$`,
               ),
             );
             expect(request.messages.at(-1)).toBe(matches[0]);

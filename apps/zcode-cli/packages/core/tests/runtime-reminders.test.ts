@@ -6,6 +6,8 @@ import {
   buildDateChangeReminderBody,
   buildPlanModeExitReminderBody,
   buildRuntimeModeReminderBody,
+  buildRuntimeModeReminderBodyForTask,
+  hasFullRuntimeModeReminder,
   buildRuntimeOutputStyleReminderBody,
   buildTodoReminderBody,
   buildSilentTurnReminderBody,
@@ -229,7 +231,7 @@ describe("runtime request reminders", () => {
         })),
       ];
       const full = buildRuntimeModeReminderBody(entries, "plan");
-      expect(full).toContain("## Plan Workflow");
+      expect(full).toContain("recommended approach, and verification method");
       entries.push(systemReminderAttachmentEntry("runtime_mode", full!));
       expect(buildRuntimeModeReminderBody(entries, "plan")).toBeNull();
       for (let count = 1; count <= 5; count++) {
@@ -243,7 +245,7 @@ describe("runtime request reminders", () => {
           ]).flat(),
         );
         const next = buildRuntimeModeReminderBody(entries, "plan")!;
-        expect(next).toContain(count === 5 ? "## Plan Workflow" : "Plan mode still active");
+        expect(next).toContain(count === 5 ? "verification method" : "Plan mode still active");
         entries.push(systemReminderAttachmentEntry("runtime_mode", next));
       }
     },
@@ -528,8 +530,8 @@ describe("runtime request reminders", () => {
     expect(firstBody).toContain("Plan mode is active");
     expect(firstBody).not.toContain("<system-reminder>");
 
-    expect(firstBody).toContain("MUST NOT make any edits");
-    expect(firstBody).toContain("## Plan Workflow");
+    expect(firstBody).toContain("Do not write or edit files");
+    expect(firstBody).toContain("recommended approach, and verification method");
     expect(firstBody).not.toContain("ExitPlanModeV2");
 
     const recent = buildRuntimeModeReminderBody(
@@ -569,9 +571,9 @@ describe("runtime request reminders", () => {
       "plan",
     );
     expect(sparse).toContain("Plan mode still active");
-    expect(sparse).toContain("Read-only.");
-    expect(sparse).toContain("Follow 5-phase workflow.");
-    expect(sparse).not.toContain("## Plan Workflow");
+    expect(sparse).toContain("Read-only;");
+    expect(sparse).toContain("research-only task");
+    expect(sparse).not.toContain("verification method");
     expect(sparse).not.toContain("<system-reminder>");
 
     const nextFull = buildRuntimeModeReminderBody(
@@ -599,36 +601,84 @@ describe("runtime request reminders", () => {
     expect(buildRuntimeModeReminderBody([], "build")).toBeNull();
   });
 
-  it("prepares a complete plan argument across five phases without a file-writing exception", () => {
-    const body = buildRuntimeModeReminderBody([], "plan")!;
-    expect(body.match(/^### Phase \d: .+$/gm)).toEqual([
-      "### Phase 1: Initial Understanding",
-      "### Phase 2: Design",
-      "### Phase 3: Review",
-      "### Phase 4: Final Plan",
-      "### Phase 5: Call ExitPlanMode",
-    ]);
-    expect(body).toContain(
-      "Provide comprehensive background context from Phase 1 exploration including filenames and code path traces",
+  it.each([
+    [true, true],
+    [true, false],
+    [false, true],
+    [false, false],
+  ])(
+    "uses available plan capabilities (Ask=%s Exit=%s) in full and sparse reminders",
+    (ask, exit) => {
+      const tools = [
+        ...(ask ? [{ name: "AskUserQuestion", deferred: true }] : []),
+        ...(exit ? [{ name: "ExitPlanMode", deferred: true }] : []),
+      ];
+      const sparseHistory: RuntimeMessageEntry[] = [
+        systemReminderAttachmentEntry("runtime_mode", "prior reminder"),
+        ...Array.from({ length: 5 }, (_, index) => [
+          {
+            message: { role: "user" as const, content: `follow up ${index}` },
+            metadata: realUserRuntimeMetadata(),
+          },
+          { message: { role: "assistant" as const, content: "answer" } },
+        ]).flat(),
+      ];
+      for (const entries of [[], sparseHistory]) {
+        const body = buildRuntimeModeReminderBodyForTask(entries, {
+          mode: "plan",
+          planEnabled: true,
+          taskType: undefined,
+          tools,
+        })!;
+        expect(body).toMatch(/read-only/i);
+        expect(body).toContain("research-only task");
+        expect(body).toContain("no implementation approval or final tool call is required");
+        expect(body).not.toMatch(
+          /The user indicated|### Phase|5-phase|Explore agents|should only end with/,
+        );
+        if (ask) expect(body).toContain("use AskUserQuestion");
+        else {
+          expect(body).not.toContain("AskUserQuestion");
+          expect(body).toContain("ask the user directly");
+        }
+        if (exit) {
+          expect(body).toContain(
+            "call ExitPlanMode with the complete plan in its `plan` parameter",
+          );
+          expect(body).toContain("even if the previous mode was yolo");
+        } else {
+          expect(body).not.toContain("ExitPlanMode");
+          expect(body).toContain("plan mode remains active");
+          expect(body).toContain("A text reply does not switch modes");
+        }
+      }
+    },
+  );
+
+  it("recognizes preserved legacy full reminders without treating sparse reminders as full", () => {
+    const old = systemReminderAttachmentEntry(
+      "runtime_mode",
+      "Plan mode is active. The user indicated that they do not want you to execute yet",
     );
-    expect(body).toContain("Read the critical files you identified during exploration");
-    expect(body).toContain(
-      "Prepare your complete final plan for the `plan` parameter of ExitPlanMode.",
-    );
-    expect(body).toContain("Begin with a **Context** section");
-    expect(body).toContain("Include only your recommended approach, not all alternatives");
-    expect(body).toContain("describe the pattern once and list a few representative paths");
-    expect(body).toContain("Reference existing functions and utilities");
-    expect(body).toContain("Include a verification section");
-    expect(body).toContain("pass the complete final plan in its `plan` parameter");
-    expect(body).not.toMatch(/plan file|Launch Plan|Phase 6/i);
+    expect(hasFullRuntimeModeReminder([old])).toBe(true);
+    expect(
+      hasFullRuntimeModeReminder([old, systemReminderAttachmentEntry("plan_mode_exit", "exited")]),
+    ).toBe(false);
+    expect(
+      hasFullRuntimeModeReminder([
+        systemReminderAttachmentEntry("runtime_mode", "Plan mode still active. Read-only."),
+      ]),
+    ).toBe(false);
   });
 
   // 修复原因：子会话继承 Plan 后收到主会话的五阶段提醒，被要求再派生 Explore、以
   // AskUserQuestion 或 ExitPlanMode 收尾，而子会话没有这些工具。
   it("gives subagent children a read-only plan reminder without the main workflow", () => {
     for (const askUserQuestionAvailable of [true, false]) {
-      const body = buildRuntimeModeReminderBody([], "build", true, { askUserQuestionAvailable })!;
+      const body = buildRuntimeModeReminderBody([], "build", true, {
+        subagent: true,
+        askUserQuestionAvailable,
+      })!;
       expect(body).toContain("Plan mode is active.");
       expect(body).toContain("read-only");
       expect(body).not.toMatch(/### Phase|ExitPlanMode|Explore agents|should only end with/);
@@ -636,9 +686,12 @@ describe("runtime request reminders", () => {
       else expect(body).not.toContain("AskUserQuestion");
     }
     expect(
-      buildRuntimeModeReminderBody([], "build", false, { askUserQuestionAvailable: true }),
+      buildRuntimeModeReminderBody([], "build", false, {
+        subagent: true,
+        askUserQuestionAvailable: true,
+      }),
     ).toBeNull();
-    expect(buildRuntimeModeReminderBody([], "plan")).toContain("### Phase 5: Call ExitPlanMode");
+    expect(buildRuntimeModeReminderBody([], "plan")).toContain("verification method");
   });
 
   it("builds model anomaly reminder bodies without wrapping", () => {

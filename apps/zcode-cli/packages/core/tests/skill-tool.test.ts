@@ -32,6 +32,48 @@ const skillOutcome: SkillLoadOutcome = {
 };
 
 describe("Skill integration", () => {
+  it("preserves explicit invocation while limiting automatic loading and visible-body reuse", () => {
+    const registry = createToolRegistry();
+    registerBuiltInTools(registry, { includeSkill: true });
+    const description = registry.toContracts().find((tool) => tool.name === "Skill")!.description;
+    expect(description).toContain("clearly matches");
+    expect(description).toContain("materially help");
+    expect(description).toContain("user's explicit invocation");
+    expect(description).toContain("same skill and source");
+    expect(description).toContain("body is still visible");
+    expect(description).toContain("summary");
+    expect(description).toContain("does not consume");
+    expect(description).not.toContain("optional arguments to pass through");
+    expect(description).not.toContain("the skill is loaded — follow it directly");
+  });
+
+  it("loads an explicit name through SkillPort even when omitted from the directory, ignoring args", async () => {
+    const requested: SkillLoadRequest[] = [];
+    const loaded = await skillHandler(
+      { skill: "omitted-skill", args: "do not interpolate this" },
+      contextWithSkillPort({
+        async discoverSkills() {
+          return { skills: [], diagnostics: [], totalDiscovered: 0 };
+        },
+        async loadSkill(request) {
+          requested.push(request);
+          return {
+            metadata: { ...skillOutcome.skills[0]!, name: request.name },
+            content: "Task arguments: $ARGUMENTS",
+            baseDirectory: "/workspace/.zcode/skills/omitted-skill",
+            bytesRead: 26,
+            sizeBytes: 26,
+            truncated: false,
+          };
+        },
+      }),
+    );
+    expect(requested[0]?.name).toBe("omitted-skill");
+    expect(requested[0]).not.toHaveProperty("args");
+    expect(loaded).toContain("$ARGUMENTS");
+    expect(loaded).not.toContain("do not interpolate this");
+  });
+
   it("renders available skills in context without loading body", () => {
     const builder = createContextBuilder({
       workingDirectory: "/workspace",

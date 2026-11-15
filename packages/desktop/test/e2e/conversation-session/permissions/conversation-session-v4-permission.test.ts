@@ -14,7 +14,6 @@ import {
   waitForV4TimelineContaining,
 } from "#e2e/helpers/v4-conversation";
 import { getLatestUpstreamToolResultByToolCallId } from "#e2e/helpers/conversation-session-network";
-import { withoutTotalTokensReminderText } from "#e2e/helpers/total-tokens-evidence";
 
 const V4_PERMISSION_CASE = "conversation-session-v4-permission";
 const V4_PERMISSION_DIR = resolveE2ERuntimePath(V4_PERMISSION_CASE);
@@ -36,14 +35,9 @@ const V4_PERMISSION_DENY_FEEDBACK =
 const V4_PERMISSION_DENY_BASE_CONTENT =
   "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
 
-/**
- * 读取模型面的拒绝结果。
- * 修复原因：工具批次后的 token 预算提醒以 `\n\n` 段并进 tool_result 文本，按原样比较
- * 拒绝文案会多出提醒段；这里只断言拒绝文案本身，按完整形态去掉提醒段。
- */
+/** 直接验证模型面的拒绝结果；虚拟余额移除后不再清洗尾部文本。 */
 async function getDeniedToolResult(toolCallId: string) {
-  const result = await getLatestUpstreamToolResultByToolCallId(toolCallId);
-  return result && { ...result, content: withoutTotalTokensReminderText(result.content) };
+  return getLatestUpstreamToolResultByToolCallId(toolCallId);
 }
 
 describe("v4 M4 门禁：resolveInteraction 收口权限请求", () => {

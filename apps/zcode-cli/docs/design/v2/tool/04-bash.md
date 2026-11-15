@@ -137,6 +137,7 @@ Bash prompt 对模型有几类强约束：
 - 多个独立命令可并行发多个 Bash tool call。
 - 有依赖关系的命令才用 `&&`。
 - 避免不必要 sleep，长任务用 background 或 Monitor。
+- 后台任务的状态查询与有界等待遵循 [TaskOutput 合同](07-subagent.md#taskoutput-状态查询与等待修订2026-11-15已实现)（2026-11-15，已实现）；`Read` 查看日志不替代任务状态，不用 sleep 或空命令催生完成通知。
 - git destructive 操作必须有用户明确指令。
 - 不跳过 hooks 或 signing，除非用户明确要求。
 - sandbox 模式下临时文件用 `$TMPDIR`，不直接写 `/tmp`。

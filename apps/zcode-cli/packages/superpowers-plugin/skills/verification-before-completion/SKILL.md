@@ -1,139 +1,42 @@
 ---
 name: verification-before-completion
-description: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always
+description: Use before claiming work complete to check that actual evidence matches the current version, environment, inputs, and acceptance criteria
 ---
 
 # Verification Before Completion
 
-## Overview
+Make completion claims only when observable evidence supports them. State what was verified, what was not, and what remains blocked or unknown.
 
-Claiming work is complete without verification is dishonesty, not efficiency.
+## Evidence Must Match the Claim
 
-**Core principle:** Evidence before claims, always.
+Before claiming success:
 
-**Violating the letter of this rule is violating the spirit of this rule.**
+1. Identify the acceptance criterion and the kind of evidence needed to establish it.
+2. Check whether existing evidence covers the current code or artifact version, environment, inputs, execution stage, and acceptance type.
+3. Reuse valid evidence. Run the missing or affected checks when relevant conditions changed, results are inconclusive, or the user requested another verification. Complete repository-required checks.
+4. Read the result and exit status, investigate failures, and distinguish successful execution from successful acceptance.
+5. Report the supported outcome and its limits. Never describe a skipped, failed, blocked, or unknown check as passing.
 
-## The Iron Law
+A new message, status question, skill transition, or compaction does not by itself invalidate evidence. Do not rerun a full suite merely to refresh the conversation. A relevant code change, environment change, changed input, or unmet acceptance criterion can invalidate prior results and requires the appropriate verification.
 
-```
-NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
-```
+## Match Coverage and Acceptance Type
 
-If you haven't run the verification command in this message, you cannot claim it passes.
+| Claim                   | Required evidence                                                          | Insufficient evidence                                        |
+| ----------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Targeted tests pass     | Actual results for the relevant tests and version                          | Confidence or an unrun command                               |
+| All required tests pass | Results covering the required suite and current conditions                 | One targeted test extrapolated to the whole suite            |
+| Build succeeds          | Successful build result for the relevant version and environment           | Lint passing                                                 |
+| Bug fixed               | The original failure scenario or an appropriate regression no longer fails | Code changed or a process exited                             |
+| UI behavior works       | The requested interaction and visible result were checked                  | API success does not prove UI success                        |
+| Requirements met        | Each acceptance criterion has matching evidence                            | Todo items checked off or tests unrelated to the requirement |
+| Delegated work complete | Inspectable artifacts and relevant validation evidence                     | A subagent's unsupported success report                      |
 
-## The Gate Function
+A partial check can establish a partial claim. Do not broaden it into a full-completion claim. If the user specified a verification method, another method does not automatically satisfy it; explain an actual limitation and preserve the remaining acceptance work.
 
-```
-BEFORE claiming any status or expressing satisfaction:
+## Recover and Finish
 
-1. IDENTIFY: What command proves this claim?
-2. RUN: Execute the FULL command (fresh, complete)
-3. READ: Full output, check exit code, count failures
-4. VERIFY: Does output confirm the claim?
-   - If NO: State actual status with evidence
-   - If YES: State claim WITH evidence
-5. ONLY THEN: Make the claim
+Diagnose ordinary failures before asking the user to resolve them. Use a representative case to confirm a costly verification path works before expanding coverage. A tool error or inconclusive result is not a passing check and should guide the next useful diagnostic action.
 
-Skip any step = lying, not verifying
-```
+For delegated work, inspect the relevant changes and validation evidence. Repeat checks only when their conditions or coverage are insufficient, not solely because another agent ran them.
 
-## Common Failures
-
-| Claim | Requires | Not Sufficient |
-|-------|----------|----------------|
-| Tests pass | Test command output: 0 failures | Previous run, "should pass" |
-| Linter clean | Linter output: 0 errors | Partial check, extrapolation |
-| Build succeeds | Build command: exit 0 | Linter passing, logs look good |
-| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |
-| Regression test works | Red-green cycle verified | Test passes once |
-| Agent completed | VCS diff shows changes | Agent reports "success" |
-| Requirements met | Line-by-line checklist | Tests passing |
-
-## Red Flags - STOP
-
-- Using "should", "probably", "seems to"
-- Expressing satisfaction before verification ("Great!", "Perfect!", "Done!", etc.)
-- About to commit/push/PR without verification
-- Trusting agent success reports
-- Relying on partial verification
-- Thinking "just this once"
-- Tired and wanting work over
-- **ANY wording implying success without having run verification**
-
-## Rationalization Prevention
-
-| Excuse | Reality |
-|--------|---------|
-| "Should work now" | RUN the verification |
-| "I'm confident" | Confidence ≠ evidence |
-| "Just this once" | No exceptions |
-| "Linter passed" | Linter ≠ compiler |
-| "Agent said success" | Verify independently |
-| "I'm tired" | Exhaustion ≠ excuse |
-| "Partial check is enough" | Partial proves nothing |
-| "Different words so rule doesn't apply" | Spirit over letter |
-
-## Key Patterns
-
-**Tests:**
-```
-✅ [Run test command] [See: 34/34 pass] "All tests pass"
-❌ "Should pass now" / "Looks correct"
-```
-
-**Regression tests (TDD Red-Green):**
-```
-✅ Write → Run (pass) → Revert fix → Run (MUST FAIL) → Restore → Run (pass)
-❌ "I've written a regression test" (without red-green verification)
-```
-
-**Build:**
-```
-✅ [Run build] [See: exit 0] "Build passes"
-❌ "Linter passed" (linter doesn't check compilation)
-```
-
-**Requirements:**
-```
-✅ Re-read plan → Create checklist → Verify each → Report gaps or completion
-❌ "Tests pass, phase complete"
-```
-
-**Agent delegation:**
-```
-✅ Agent reports success → Check VCS diff → Verify changes → Report actual state
-❌ Trust agent report
-```
-
-## Why This Matters
-
-From 24 failure memories:
-- your human partner said "I don't believe you" - trust broken
-- Undefined functions shipped - would crash
-- Missing requirements shipped - incomplete features
-- Time wasted on false completion → redirect → rework
-- Violates: "Honesty is a core value. If you lie, you'll be replaced."
-
-## When To Apply
-
-**ALWAYS before:**
-- ANY variation of success/completion claims
-- ANY expression of satisfaction
-- ANY positive statement about work state
-- Committing, PR creation, task completion
-- Moving to next task
-- Delegating to agents
-
-**Rule applies to:**
-- Exact phrases
-- Paraphrases and synonyms
-- Implications of success
-- ANY communication suggesting completion/correctness
-
-## The Bottom Line
-
-**No shortcuts for verification.**
-
-Run the command. Read the output. THEN claim the result.
-
-This is non-negotiable.
+Once the requested acceptance criteria and required checks are supported, deliver the result. If necessary evidence cannot be obtained, report the exact completed scope, unresolved criterion, and blocker. Never invent a run, hide a failure, or present stale evidence as proof of the current state.

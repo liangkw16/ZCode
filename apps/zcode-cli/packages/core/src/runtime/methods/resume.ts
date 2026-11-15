@@ -41,7 +41,6 @@ import { refreshRestoredAnnouncements } from "./context-refresh.js";
 import { loadPromptSnapshot } from "../helpers/prompt-snapshot.js";
 import { stageSessionStartContext } from "./hooks.js";
 import { collectPreviousRuntimeAgentInterruptions } from "./background-notifications.js";
-import { createTotalTokensBudgetState } from "../helpers/total-tokens-budget.js";
 
 /**
  * fork 子会话在 fork 提示之后还没有输入时，SessionStart 用 fork，之后用 resume。
@@ -156,8 +155,6 @@ export async function resumeFromStore(
   // 修复原因：bootstrap 复用同一个 runtime 再次恢复时，原因还停在上一次 compaction；
   // 恢复后启动时重读的文件变化被写成"compaction 之后重读"。恢复等同新会话启动，回到 session_start。
   this.instructionRefreshReason = undefined;
-  // token 预算计数器只在内存：恢复等同新会话启动，从零开始，下一条真实用户消息重新起算。
-  this.totalTokensBudget = createTotalTokensBudgetState();
   // cold resume 的历史 hydration 会先清空 runtime-local read-state；必须在
   // Context 初始化前完成，确保随后单次加载的 MEMORY.md 状态与 provider 所见内容一致。
   const readFileStateHydration = await hydrateReadFileStateFromSession({

@@ -13,7 +13,7 @@ import {
 import { buildToolSearchAnnouncement } from "../../tool/search/exposure.js";
 import { collectRuntimeAgentListing } from "../helpers/agent-listing.js";
 import {
-  buildRuntimeModeReminderBody,
+  buildRuntimeModeReminderBodyForTask,
   buildRuntimeOutputStyleReminderBody,
 } from "../helpers/runtime-reminders.js";
 import { prepareRuntimeProviderRequest } from "../helpers/runtime-provider-request-messages.js";
@@ -123,11 +123,13 @@ function simulateRequestEntries(
   if (agentListing) entries.push(agentListing);
   const skillsListing = collectSkillsListing(runtime, entries, contextResult);
   if (skillsListing) entries.push(skillsListing);
-  const modeReminder = buildRuntimeModeReminderBody(
-    entries,
-    runtime.getMode(),
-    runtime.getPlanEnabled(),
-  );
+  // 预览与实际请求使用相同的会话类型和完整候选表；deferred 工具尚未曝光不代表不可用。
+  const modeReminder = buildRuntimeModeReminderBodyForTask(entries, {
+    mode: runtime.getMode(),
+    planEnabled: runtime.getPlanEnabled(),
+    taskType: runtime.config.taskType,
+    tools,
+  });
   if (modeReminder) entries.push(systemReminderAttachmentEntry("runtime_mode", modeReminder));
   const outputStyleReminder = buildRuntimeOutputStyleReminderBody(outputStyle);
   if (outputStyleReminder)

@@ -18,7 +18,7 @@
 
 import type { ContextSection, WorkflowActorContext } from "../types.js";
 import { estimateTokens } from "../utils.js";
-import { buildHarnessBlock, buildSecurityNotice } from "./identity.js";
+import { buildHarnessBlock } from "./identity.js";
 
 /** 工具面的自述：一句「有什么」+ 一句「没有什么」，让模型不去猜。 */
 const TOOL_SURFACE =
@@ -60,8 +60,6 @@ function buildWorkflowActorIdentityPrompt(
   const parts = [
     opening.join("\n"),
     ...(persona ? ["", persona] : []),
-    "",
-    buildSecurityNotice(),
     "",
     buildHarnessBlock(midConversationSystem),
     "",

@@ -1603,7 +1603,14 @@ describe("runtime context announcements", () => {
     expect(compacted.outcome).toBe("compacted");
     expect(bundles).toHaveLength(1);
     const bundleIds = bundles[0]!.messages.map((message) => message.info.id);
-    const committed = new Set(bundleIds);
+    const committed = new Set(
+      bundles[0]!.messages
+        .filter(
+          (message) =>
+            !message.parts.some((part) => (part as { type?: string }).type === "timeline"),
+        )
+        .map((message) => message.info.id),
+    );
     // 整组记录只经过事务入口，不再逐条写入。
     expect(
       saveMessage.mock.calls.slice(savedBefore).filter(([info]) => committed.has(info.id)),

@@ -12,13 +12,7 @@ import {
   estimateMessageTokens,
   shouldAutoCompact,
 } from "../deps.js";
-import type {
-  AutoCompactPolicyConfig,
-  AutoCompactTokenOverride,
-  SessionEvent,
-  TraceContext,
-  TurnId,
-} from "../deps.js";
+import type { AutoCompactTokenOverride, SessionEvent, TraceContext, TurnId } from "../deps.js";
 import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 import {
   throwIfTurnAborted,
@@ -30,7 +24,6 @@ import {
 } from "../helpers/index.js";
 import type { TurnResult, RunModelTextRequestOptions } from "../types.js";
 import type { Model } from "../deps.js";
-import type { ProviderContextUsageSnapshot } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { autoCompactDecisionLogContext } from "./compact-log-context.js";
 import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
@@ -82,6 +75,7 @@ export async function executeManualCompact(
     await this.appendEvent(turnStartedEvent, turnTraceContext);
     events.push(turnStartedEvent);
 
+    let compactCommitted = false;
     try {
       throwIfTurnAborted(abortSignal);
       const compactResult = await this.compactActiveConversation(
@@ -96,6 +90,8 @@ export async function executeManualCompact(
           ...(model ? { model } : {}),
         },
       );
+      compactCommitted = compactResult.outcome === "compacted";
+      if (compactResult.syncError) throw compactResult.syncError;
       throwIfTurnAborted(abortSignal);
 
       const turnUsage = createModelUsageSummaryFromEvents(events);
@@ -144,7 +140,11 @@ export async function executeManualCompact(
         projection,
       };
     } catch (error) {
-      const coreError = createTurnFailureError(error, abortSignal, "Compact failed");
+      const coreError = createTurnFailureError(
+        error,
+        abortSignal,
+        compactCommitted ? "Context compacted, but turn finalization failed" : "Compact failed",
+      );
       const preserveQueueAutoDrainOnCancel =
         coreError.type === CoreErrorType.TurnCancelled &&
         this.activeForegroundExecution?.preserveQueueAutoDrainOnCancel === true;
@@ -160,8 +160,10 @@ export async function executeManualCompact(
         turnPhase: "compact",
         inputId,
         traceContext: turnTraceContext,
-        fallbackMessage: "Compact failed",
-        logEvent: "compact.failed",
+        fallbackMessage: compactCommitted
+          ? "Context compacted, but turn finalization failed"
+          : "Compact failed",
+        logEvent: compactCommitted ? "compact.finalization.failed" : "compact.failed",
         logLabel: "Compact",
         preserveQueueAutoDrainOnCancel,
       });
@@ -193,18 +195,21 @@ export async function autoCompactIfNeeded(
 
   // 组装点按实际执行模型解析 modelOverrides（子代理用自己的身份走同一路径）；
   // 未设置字段剔除、结果剥离覆盖表，公式不变。
-  const { config, source: compactPolicySource, matched: compactModelOverrideMatched } =
-    applyCompactModelOverrides(
-      {
-        contextWindow: context.model.properties.contextWindow,
-        ...this.config.compact,
-        maxOutputTokens: resolveNormalRequestMaxOutputTokens({
-          modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
-        }),
-        modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
-      },
-      { providerId: context.model.providerId, modelId: context.model.modelId },
-    );
+  const {
+    config,
+    source: compactPolicySource,
+    matched: compactModelOverrideMatched,
+  } = applyCompactModelOverrides(
+    {
+      contextWindow: context.model.properties.contextWindow,
+      ...this.config.compact,
+      maxOutputTokens: resolveNormalRequestMaxOutputTokens({
+        modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
+      }),
+      modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
+    },
+    { providerId: context.model.providerId, modelId: context.model.modelId },
+  );
   const activeEntries = context.turnRequestState.entries;
   const activeProjection = buildRuntimeProviderRequestMessages(this, {
     entries: activeEntries,
@@ -273,6 +278,7 @@ export async function autoCompactIfNeeded(
     ...autoCompactDecisionLogContext(decision),
   });
 
+  let compactCommitted = false;
   try {
     const compactResult = await this.compactActiveConversation(
       undefined,
@@ -301,6 +307,9 @@ export async function autoCompactIfNeeded(
     }
     context.turnRequestState.entries = compactResult.entries;
     this.autoCompactConsecutiveFailures = 0;
+    compactCommitted = true;
+    if (compactResult.syncError) throw compactResult.syncError;
+    throwIfTurnAborted(abortSignal);
     this.logger?.info("Auto compact completed", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.auto.completed",
@@ -312,6 +321,8 @@ export async function autoCompactIfNeeded(
     });
     return "compacted";
   } catch (error) {
+    // 已提交的历史先交给当前请求，通知失败/用户取消不能再计为压缩失败或触发重压。
+    if (compactCommitted) throw error;
     if (isTurnCancellationError(error, abortSignal)) {
       throw error;
     }
@@ -431,6 +442,7 @@ export async function reactiveCompactAfterContextExceeded(
     tokenCount: estimateMessageTokens(activeMessages),
   });
 
+  let compactCommitted = false;
   try {
     const compactResult = await this.compactActiveConversation(
       undefined,
@@ -461,6 +473,9 @@ export async function reactiveCompactAfterContextExceeded(
     }
     context.turnRequestState.entries = compactResult.entries;
     this.autoCompactConsecutiveFailures = 0;
+    compactCommitted = true;
+    if (compactResult.syncError) throw compactResult.syncError;
+    throwIfTurnAborted(abortSignal);
     this.logger?.info("Reactive compact completed; retrying model request", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.reactive.completed",
@@ -470,6 +485,8 @@ export async function reactiveCompactAfterContextExceeded(
     });
     return "compacted";
   } catch (error) {
+    // 已提交的历史先交给当前请求，通知失败/用户取消不能再计为压缩失败或触发重压。
+    if (compactCommitted) throw error;
     if (isTurnCancellationError(error, abortSignal)) {
       throw error;
     }

@@ -41,7 +41,9 @@ function buildIdentityPrompt(
 
   const identityLines = ["", intro].join("\n");
 
-  return [identityLines, "", MAIN_PRESENTATION, "", buildHarnessBlock(midConversationSystem)].join("\n");
+  return [identityLines, "", MAIN_PRESENTATION, "", buildHarnessBlock(midConversationSystem)].join(
+    "\n",
+  );
 }
 
 export function buildIdentitySection(

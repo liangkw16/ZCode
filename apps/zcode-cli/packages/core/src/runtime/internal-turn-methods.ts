@@ -223,6 +223,7 @@ export interface AgentRuntimeTurnMethods {
     entries: readonly RuntimeMessageEntry[];
     outcome: Extract<CompactAttemptOutcome, "compacted" | "skipped">;
     tokenCount: number;
+    syncError?: Error;
   }>;
   scheduleTools(toolCalls: ToolCall[]): Promise<ToolSchedule>;
   executeTools(
@@ -365,10 +366,11 @@ export interface AgentRuntimeTurnMethods {
     options?: {
       model?: Model;
       operationId?: string;
+      completedTimeline?: CompactTimelinePayload;
       leadingReminderEntries?: readonly RuntimeMessageEntry[];
       postCompactReminderEntries?: readonly RuntimeMessageEntry[];
     },
-  ): Promise<void>;
+  ): Promise<Error | undefined>;
   persistUserPrompt(
     messageID: MessageId,
     input: string,

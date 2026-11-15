@@ -3184,94 +3184,109 @@ describe("AgentRuntime manual compact", () => {
 
   it.each([
     { finishReason: "length", text: "", providerMetadata: undefined },
-    { finishReason: "length", text: "<summary>unfinished constraints:", providerMetadata: undefined },
+    {
+      finishReason: "length",
+      text: "<summary>unfinished constraints:",
+      providerMetadata: undefined,
+    },
     { finishReason: "other", text: "partial", providerMetadata: { rawFinishReason: "max_tokens" } },
-    { finishReason: "other", text: "partial", providerMetadata: { rawFinishReason: "max_output_tokens" } },
-    { finishReason: "other", text: "partial", providerMetadata: { rawFinishReason: "model_context_window_exceeded" } },
-  ])("regenerates an output-limited compact summary without dropping history: $finishReason $text $providerMetadata", async ({ finishReason, text, providerMetadata }) => {
-    const sessionId = createSessionId("runtime-compact-empty-length-ptl-retry");
-    const eventStore = createTestSessionEventStore();
-    const requests: Array<{
-      kind: "compact" | "normal";
-      messages: Array<{ role: string; content: string }>;
-    }> = [];
-    let compactAttempts = 0;
-    let normalResponseCount = 0;
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { systemPrompt: "You are a compact empty length overflow test agent." },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory(
-          withStreamTextFromGenerateText({
-            async generateText(request) {
-              const lastContent = providerContentToText(request.messages.at(-1)?.content);
-              const isCompact = lastContent.includes("create a detailed summary");
-              requests.push({
-                kind: isCompact ? "compact" : "normal",
-                messages: request.messages.map((message) => ({
-                  role: message.role,
-                  content: providerContentToText(message.content),
-                })),
-              });
+    {
+      finishReason: "other",
+      text: "partial",
+      providerMetadata: { rawFinishReason: "max_output_tokens" },
+    },
+    {
+      finishReason: "other",
+      text: "partial",
+      providerMetadata: { rawFinishReason: "model_context_window_exceeded" },
+    },
+  ])(
+    "regenerates an output-limited compact summary without dropping history: $finishReason $text $providerMetadata",
+    async ({ finishReason, text, providerMetadata }) => {
+      const sessionId = createSessionId("runtime-compact-empty-length-ptl-retry");
+      const eventStore = createTestSessionEventStore();
+      const requests: Array<{
+        kind: "compact" | "normal";
+        messages: Array<{ role: string; content: string }>;
+      }> = [];
+      let compactAttempts = 0;
+      let normalResponseCount = 0;
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        { systemPrompt: "You are a compact empty length overflow test agent." },
+        {
+          eventStore,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                const isCompact = lastContent.includes("create a detailed summary");
+                requests.push({
+                  kind: isCompact ? "compact" : "normal",
+                  messages: request.messages.map((message) => ({
+                    role: message.role,
+                    content: providerContentToText(message.content),
+                  })),
+                });
 
-              if (isCompact) {
-                compactAttempts++;
-                if (compactAttempts === 1) {
+                if (isCompact) {
+                  compactAttempts++;
+                  if (compactAttempts === 1) {
+                    return {
+                      finishReason,
+                      text,
+                      providerMetadata,
+                      usage: { inputTokens: 120, outputTokens: 0, totalTokens: 120 },
+                    };
+                  }
                   return {
-                    finishReason,
-                    text,
-                    providerMetadata,
-                    usage: { inputTokens: 120, outputTokens: 0, totalTokens: 120 },
+                    finishReason: "stop",
+                    text: "<summary>Empty length retry summary keeps the newest setup.</summary>",
+                    usage: { inputTokens: 60, outputTokens: 10, totalTokens: 70 },
                   };
                 }
+
+                normalResponseCount++;
                 return {
                   finishReason: "stop",
-                  text: "<summary>Empty length retry summary keeps the newest setup.</summary>",
-                  usage: { inputTokens: 60, outputTokens: 10, totalTokens: 70 },
+                  text: `normal response ${normalResponseCount}`,
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
                 };
-              }
+              },
+            }) as never,
+          ),
+        },
+      );
 
-              normalResponseCount++;
-              return {
-                finishReason: "stop",
-                text: `normal response ${normalResponseCount}`,
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            },
-          }) as never,
-        ),
-      },
-    );
+      await runtime.executeTurn("first empty length compact setup");
+      await runtime.executeTurn("second empty length compact setup");
+      await runtime.executeTurn("/compact");
+      await runtime.executeTurn("continue after empty length compact retry");
 
-    await runtime.executeTurn("first empty length compact setup");
-    await runtime.executeTurn("second empty length compact setup");
-    await runtime.executeTurn("/compact");
-    await runtime.executeTurn("continue after empty length compact retry");
+      const compactRequests = requests.filter((request) => request.kind === "compact");
+      const events = await eventStore.getEvents(sessionId);
+      const compactModelRetries = events
+        .filter((event) => event.type === SessionEventType.ModelRequest)
+        .map((event) => event.payload as any)
+        .filter((payload) => payload.querySource === "compact")
+        .map((payload) => payload.compactPromptTooLongRetry);
+      const retryCompactContext = compactRequests[1]?.messages
+        .map((message) => message.content)
+        .join("\n");
+      const postCompactContext = requests
+        .at(-1)
+        ?.messages.map((message) => message.content)
+        .join("\n");
 
-    const compactRequests = requests.filter((request) => request.kind === "compact");
-    const events = await eventStore.getEvents(sessionId);
-    const compactModelRetries = events
-      .filter((event) => event.type === SessionEventType.ModelRequest)
-      .map((event) => event.payload as any)
-      .filter((payload) => payload.querySource === "compact")
-      .map((payload) => payload.compactPromptTooLongRetry);
-    const retryCompactContext = compactRequests[1]?.messages
-      .map((message) => message.content)
-      .join("\n");
-    const postCompactContext = requests
-      .at(-1)
-      ?.messages.map((message) => message.content)
-      .join("\n");
-
-    expect(compactRequests).toHaveLength(2);
-    expect(compactModelRetries).toEqual([0, 0]);
-    expect(retryCompactContext).toContain("first empty length compact setup");
-    expect(retryCompactContext).toContain("substantially more concisely");
-    expect(retryCompactContext).toContain("second empty length compact setup");
-    expect(postCompactContext).toContain("Empty length retry summary keeps the newest setup");
-    expect(postCompactContext).not.toContain("first empty length compact setup");
-  });
+      expect(compactRequests).toHaveLength(2);
+      expect(compactModelRetries).toEqual([0, 0]);
+      expect(retryCompactContext).toContain("first empty length compact setup");
+      expect(retryCompactContext).toContain("substantially more concisely");
+      expect(retryCompactContext).toContain("second empty length compact setup");
+      expect(postCompactContext).toContain("Empty length retry summary keeps the newest setup");
+      expect(postCompactContext).not.toContain("first empty length compact setup");
+    },
+  );
 
   it("stops compact prompt-too-long retries after three older-round truncations", async () => {
     const sessionId = createSessionId("runtime-compact-ptl-retry-limit");
@@ -6415,28 +6430,54 @@ describe("compact output recovery budget", () => {
       const sessionId = createSessionId(`output-limit-${trigger}`);
       const eventStore = createTestSessionEventStore();
       let attempts = 0;
-      const runtime = createTestAgentRuntime(sessionId, {}, {
-        eventStore,
-        modelFactory: createTestModelFactory(withStreamTextFromGenerateText({
-          async generateText(request) {
-            if (providerContentToText(request.messages.at(-1)?.content).includes("create a detailed summary")) {
-              attempts++;
-              return { finishReason: "length", text: "unfinished handoff", usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30 } };
-            }
-            return { finishReason: "stop", text: "setup", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } };
-          },
-        }) as never),
-      });
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {},
+        {
+          eventStore,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                if (
+                  providerContentToText(request.messages.at(-1)?.content).includes(
+                    "create a detailed summary",
+                  )
+                ) {
+                  attempts++;
+                  return {
+                    finishReason: "length",
+                    text: "unfinished handoff",
+                    usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30 },
+                  };
+                }
+                return {
+                  finishReason: "stop",
+                  text: "setup",
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                };
+              },
+            }) as never,
+          ),
+        },
+      );
       await runtime.executeTurn("oldest evidence");
       await runtime.executeTurn("latest correction");
       await runtime.executeTurn("current stage");
-      const internal = runtime as unknown as import("../src/runtime/internal.js").AgentRuntimeInternal;
+      const internal =
+        runtime as unknown as import("../src/runtime/internal.js").AgentRuntimeInternal;
       const before = structuredClone(internal.messageHistory.borrowReadOnlyRuntimeEntries());
-      await expect(internal.compactActiveConversation(undefined, createRootTraceContext({ sessionId }), [], { trigger }))
-        .rejects.toMatchObject({ retryable: false });
+      await expect(
+        internal.compactActiveConversation(undefined, createRootTraceContext({ sessionId }), [], {
+          trigger,
+        }),
+      ).rejects.toMatchObject({ retryable: false });
       expect(attempts).toBe(2);
       expect(internal.messageHistory.borrowReadOnlyRuntimeEntries()).toEqual(before);
-      expect((await eventStore.getEvents(sessionId)).some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+      expect(
+        (await eventStore.getEvents(sessionId)).some(
+          (event) => event.type === SessionEventType.CompactBoundary,
+        ),
+      ).toBe(false);
     },
   );
 });

@@ -147,6 +147,17 @@ export async function appendEvent(
   }
 }
 
+/** 只补完已编号事件的后半段，避免 append 的部分成功产生第二个 sequence。 */
+export async function resumeStoredSessionEventPublication(
+  runtime: AgentRuntimeInternal,
+  event: SessionEvent,
+  traceContext: TraceContext,
+): Promise<void> {
+  await persistDurableSessionEvent.call(runtime, event, traceContext);
+  await recordToolUsageFromEvent(runtime, event, traceContext);
+  await runtime.notifyEventSinks(event, traceContext);
+}
+
 function recordSessionEventAppendAggregate(
   this: AgentRuntimeInternal,
   event: SessionEvent,

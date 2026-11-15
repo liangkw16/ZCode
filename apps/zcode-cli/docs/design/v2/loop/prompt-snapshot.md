@@ -72,7 +72,7 @@ build result. A record captures the leading system messages of the request that 
 
 ## Compaction, fork, rewind
 
-- After a successful compaction (manual, auto or reactive) the snapshot is cleared: the runtime drops
+- After a successful compaction (manual, auto or reactive) the snapshot is invalidated in memory before post-commit I/O and its tombstone is then saved: the runtime drops
   its copy, writes the tombstone, and rebuilds the context prefix of the history and of the entries
   it returns from the current code. The next main-loop request records a new snapshot. A skipped
   compaction and microcompaction keep the snapshot.

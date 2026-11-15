@@ -31,6 +31,8 @@ import {
   resolvePersistedReminderModel,
 } from "./runtime-reminder-persistence.js";
 
+import { buildAssistantTimelineRecord } from "./timeline-persistence.js";
+
 export function buildCompactTimelinePayload(
   this: AgentRuntimeInternal,
   timeline: CompactTimelineContext,
@@ -87,9 +89,19 @@ export async function persistCompactTimeline(
 ): Promise<void> {
   if (!this.sessionStore) return;
 
+  const record = buildCompactTimelineRecord(this, payload, traceContext);
+  await this.persistMessage(record.info, traceContext);
+  for (const part of record.parts) await this.persistPart(part, traceContext);
+}
+
+function buildCompactTimelineRecord(
+  runtime: AgentRuntimeInternal,
+  payload: CompactTimelinePayload,
+  traceContext: TraceContext,
+): MessageWithParts {
   const created = payload.startedAt ?? Date.now();
-  await this.persistAssistantTimelinePartForSession({
-    sessionId: this.sessionId,
+  const record = buildAssistantTimelineRecord(runtime, {
+    sessionId: runtime.sessionId,
     messageID: payload.messageId,
     partID: compactTimelinePartId(payload),
     created,
@@ -119,36 +131,34 @@ export async function persistCompactTimeline(
     },
     traceContext,
   });
-  await this.persistPart(
-    {
-      id: payload.partId ?? createPartId(),
-      sessionID: this.sessionId,
-      messageID: payload.messageId,
-      type: "compaction",
-      auto: payload.trigger === CompactTrigger.Auto,
-      trigger: payload.trigger,
-      phase: payload.phase,
-      compactReason: payload.compactReason,
-      operationId: payload.operationId,
-      timelineStatus: payload.status,
-      timelineDisplay: payload.display,
-      replace: payload.replace,
-      reason: payload.reason,
-      attempt: payload.attempt,
-      maxAttempts: payload.maxAttempts,
-      boundaryId: payload.boundaryId,
-      summaryMessageId: payload.summaryMessageId,
-      tail_start_id: payload.tailStartMessageId,
-      preCompactTokenCount: payload.preCompactTokenCount,
-      postCompactTokenCount: payload.postCompactTokenCount,
-      truePostCompactTokenCount: payload.truePostCompactTokenCount,
-      time: {
-        start: payload.startedAt,
-        end: payload.endedAt,
-      },
+  record.parts.push({
+    id: payload.partId ?? createPartId(),
+    sessionID: runtime.sessionId,
+    messageID: payload.messageId,
+    type: "compaction",
+    auto: payload.trigger === CompactTrigger.Auto,
+    trigger: payload.trigger,
+    phase: payload.phase,
+    compactReason: payload.compactReason,
+    operationId: payload.operationId,
+    timelineStatus: payload.status,
+    timelineDisplay: payload.display,
+    replace: payload.replace,
+    reason: payload.reason,
+    attempt: payload.attempt,
+    maxAttempts: payload.maxAttempts,
+    boundaryId: payload.boundaryId,
+    summaryMessageId: payload.summaryMessageId,
+    tail_start_id: payload.tailStartMessageId,
+    preCompactTokenCount: payload.preCompactTokenCount,
+    postCompactTokenCount: payload.postCompactTokenCount,
+    truePostCompactTokenCount: payload.truePostCompactTokenCount,
+    time: {
+      start: payload.startedAt,
+      end: payload.endedAt,
     },
-    traceContext,
-  );
+  });
+  return record;
 }
 
 function compactTimelinePartId(payload: CompactTimelinePayload): PartId {
@@ -215,8 +225,13 @@ export async function recoverInterruptedCompactTimelines(
     for (const part of message.parts) {
       if (
         part.type !== "compaction" ||
-        !isRecoverableRunningCompactTimelineStatus(part.timelineStatus) ||
-        !part.operationId
+        !part.operationId ||
+        (!isRecoverableRunningCompactTimelineStatus(part.timelineStatus) &&
+          !(
+            boundaryByOperationId.has(part.operationId) &&
+            (part.timelineStatus === CompactTimelineStatus.Failed ||
+              part.timelineStatus === CompactTimelineStatus.Interrupted)
+          ))
       ) {
         continue;
       }
@@ -294,10 +309,11 @@ export async function persistCompactSummary(
   options?: {
     model?: Model;
     operationId?: string;
+    completedTimeline?: CompactTimelinePayload;
     leadingReminderEntries?: readonly RuntimeMessageEntry[];
     postCompactReminderEntries?: readonly RuntimeMessageEntry[];
   },
-): Promise<void> {
+): Promise<Error | undefined> {
   if (!this.sessionStore) return;
 
   const created = Date.now();
@@ -366,7 +382,14 @@ export async function persistCompactSummary(
   // 存储顺序与 live 一致：请求前公告 → summary → compaction 附件，只在 summary 产出后整组写入。
   const records = [...leading, summaryRecord, ...attachments];
   if (this.sessionStore.commitMessageBundle) {
-    await this.sessionStore.commitMessageBundle({ sessionID: this.sessionId, messages: records });
+    // 完成 timeline 是摘要提交的一部分；后续事件写失败不能把它重新变成 failed。
+    const completed = options?.completedTimeline
+      ? buildCompactTimelineRecord(this, options.completedTimeline, traceContext)
+      : undefined;
+    await this.sessionStore.commitMessageBundle({
+      sessionID: this.sessionId,
+      messages: completed ? [...records, completed] : records,
+    });
     this.logger?.debug("Compact bundle persisted", {
       ...traceContextToLogContext(traceContext),
       event: "session.compact_bundle.persisted",
@@ -387,6 +410,21 @@ export async function persistCompactSummary(
   } catch (error) {
     await removeRuntimePersistenceMessagesBestEffort.call(this, persistedMessageIds, traceContext);
     throw error;
+  }
+  // 兼容无 bundle 的 store：摘要已保存，完成状态失败不能触发删除旧 timeline 或重新摘要。
+  if (options?.completedTimeline) {
+    try {
+      await this.persistCompactTimeline(options.completedTimeline, traceContext);
+    } catch (error) {
+      this.logger?.warn("Committed compact timeline update failed", {
+        ...traceContextToLogContext(traceContext),
+        event: "compact.committed_timeline.failed",
+        operationId: options.operationId,
+        boundaryId: compactBoundary.boundaryId,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      return error instanceof Error ? error : new Error(String(error));
+    }
   }
 }
 

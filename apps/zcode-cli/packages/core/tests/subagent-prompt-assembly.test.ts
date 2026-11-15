@@ -134,7 +134,7 @@ function expectInjectedAgentsMd(request: any, childTask: string): void {
 
   const contextText = modelMessageContentToText(messages[contextIndex]?.content);
   expect(contextText).toContain("<system-reminder>");
-  expect(contextText).toContain("Codebase and user instructions are shown below.");
+  expect(contextText).toContain("Codebase and user instructions are shown below,");
   expect(contextText).toContain(USER_AGENTS_INSTRUCTION);
   expect(contextText).toContain(WORKSPACE_AGENTS_INSTRUCTION);
   expect(contextText.indexOf(USER_AGENTS_INSTRUCTION)).toBeLessThan(

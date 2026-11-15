@@ -265,7 +265,7 @@ compaction 结果的顺序（boundary → 请求前公告 → summary → 保留
 - runtime_mode 由 compaction 重述：计划模式下发一条完整的 plan 提醒。保留段在当前计划段（最近一次退出计划模式之后）已有完整提醒时不发：auto/reactive compaction 与输入附件收集在同一次循环中，保留段可能已带本次收集的完整提醒，再发一条会出现两条完整提醒，完整／简短周期也多算一次。保留段只有简短提醒时，完整说明已被摘要，照常发完整提醒。
 - environment 与 model 由 compaction 重述：保留段已有完整 environment 块时不重述 environment，否则用 compact 前历史中最近一次公告的快照发完整块；保留段已有 model 公告时不重述 model，否则重述 compact 前最近一次 model 公告。compact 前历史里没有对应公告时不重述，由下一次请求的输入附件收集追加（完整环境块、当前模型）。
 - output_style_instructions 在 model 之后重述：保留段已有该来源（包括重置）时不重述；否则重述 compact 前最近一次公告，最近一次是重置时不重述。它不受 environment/model 的 env_info 门控。
-- 持久化：请求前公告、summary、compaction 附件按上表顺序在同一事务中写入（`SessionStorePort.commitMessageBundle`），存储顺序与 live 一致；只有 summary 成功产出时才写入。store 未实现该方法时逐条写入，失败时尽力删除已写入的记录。
+- 持久化：请求前公告、summary、compaction 附件按上表顺序，与完成 timeline 的既有 message/parts 在同一事务中写入（`SessionStorePort.commitMessageBundle`），存储顺序与 live 一致；只有 summary 成功产出时才写入。store 未实现该方法时逐条写入，失败时尽力删除已写入的记录。
 - 声明：summary 的 compaction part（与 `compactBoundary.preservedSegment` 同一个 part）在 `metadata.compactLeadingMessageIds` 中记录请求前公告的消息 ID。只记录 summary 之前的公告；compaction 附件可能在下一次 compact 时与最后一组一起被保留，不得写入该列表。
 - 冷恢复：最后一个 boundary 声明的请求前公告放在 summary 之前。切片 `preservedSegment` 区间时，跳过所有 summary 声明的请求前公告：保留段可以落在上一次 compact 的保留段里，此时区间在存储顺序上跨过上一次的公告和 summary；这些公告在压缩后的第一组，总被下一次 compact 总结，不会出现在 live 保留段中。
 - fork：重映射 `compactLeadingMessageIds`；映射不到的 ID 丢弃，不阻断 fork（旧版本 fork 会原样复制该字段）。

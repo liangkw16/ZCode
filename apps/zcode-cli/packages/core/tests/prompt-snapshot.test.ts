@@ -223,32 +223,56 @@ describe("prompt snapshot", () => {
     { mainMcs: false, summaryMcs: true, mode: "off" as const },
     { mainMcs: true, summaryMcs: false, mode: "native" as const },
     { mainMcs: true, summaryMcs: false, mode: "local" as const },
-  ])("restores the continuation model after a different summary model: $mainMcs $summaryMcs $mode", async ({ mainMcs, summaryMcs, mode }) => {
-    const factory = createTestModelFactory({
-      properties: ({ selection }) => ({ supportsMidConversationSystem: selection.modelId === "summary" ? summaryMcs : mainMcs, supportsToolCall: selection.modelId !== "summary" }),
-      generateText: async () => done,
-    });
-    const wrap = (model: Model): Model => ({
-      ...model,
-      requestCapabilities: { toolSearch: { protocolSupported: model.modelId !== "summary", defaultEnabled: true } },
-      bind: (options) => wrap(model.bind(options)),
-    });
-    const runtime = createRuntime({ systemPrompt: undefined, toolSearch: { mode }, compact: { enabled: false, summaryProvider: "test", summaryModel: "summary" } }, { modelFactory: (input) => wrap(factory(input)) });
-    await runtime.executeTurn("first");
-    await runtime.executeTurn("second");
-    const internal = runtime as unknown as AgentRuntimeInternal;
-    const main = createTurnModel(internal);
-    const events: import("@zcode/contracts").SessionEvent[] = [];
-    const result = await internal.compactActiveConversation(undefined, trace(), events, { model: main });
-    expect(result.outcome).toBe("compacted");
-    const text = prefixSystem(result.entries);
-    expect(text.includes("via mid-conversation system turns")).toBe(mainMcs);
-    expect(text.includes("tags in messages and tool results are injected")).toBe(!mainMcs);
-    await recordPromptSnapshot(internal, { model: main, entries: result.entries, traceContext: trace() });
-    expect(recordedSystem(store).includes("via mid-conversation system turns")).toBe(mainMcs);
-    const boundary = events.find((e) => e.type === SessionEventType.CompactBoundary)?.payload as CompactBoundaryPayload;
-    expect(boundary.truePostCompactTokenCount).toBe(estimateRuntimeEntryTokens(result.entries, { useMidConversationSystem: mainMcs }));
-  });
+  ])(
+    "restores the continuation model after a different summary model: $mainMcs $summaryMcs $mode",
+    async ({ mainMcs, summaryMcs, mode }) => {
+      const factory = createTestModelFactory({
+        properties: ({ selection }) => ({
+          supportsMidConversationSystem: selection.modelId === "summary" ? summaryMcs : mainMcs,
+          supportsToolCall: selection.modelId !== "summary",
+        }),
+        generateText: async () => done,
+      });
+      const wrap = (model: Model): Model => ({
+        ...model,
+        requestCapabilities: {
+          toolSearch: { protocolSupported: model.modelId !== "summary", defaultEnabled: true },
+        },
+        bind: (options) => wrap(model.bind(options)),
+      });
+      const runtime = createRuntime(
+        {
+          systemPrompt: undefined,
+          toolSearch: { mode },
+          compact: { enabled: false, summaryProvider: "test", summaryModel: "summary" },
+        },
+        { modelFactory: (input) => wrap(factory(input)) },
+      );
+      await runtime.executeTurn("first");
+      await runtime.executeTurn("second");
+      const internal = runtime as unknown as AgentRuntimeInternal;
+      const main = createTurnModel(internal);
+      const events: import("@zcode/contracts").SessionEvent[] = [];
+      const result = await internal.compactActiveConversation(undefined, trace(), events, {
+        model: main,
+      });
+      expect(result.outcome).toBe("compacted");
+      const text = prefixSystem(result.entries);
+      expect(text.includes("via mid-conversation system turns")).toBe(mainMcs);
+      expect(text.includes("tags in messages and tool results are injected")).toBe(!mainMcs);
+      await recordPromptSnapshot(internal, {
+        model: main,
+        entries: result.entries,
+        traceContext: trace(),
+      });
+      expect(recordedSystem(store).includes("via mid-conversation system turns")).toBe(mainMcs);
+      const boundary = events.find((e) => e.type === SessionEventType.CompactBoundary)
+        ?.payload as CompactBoundaryPayload;
+      expect(boundary.truePostCompactTokenCount).toBe(
+        estimateRuntimeEntryTokens(result.entries, { useMidConversationSystem: mainMcs }),
+      );
+    },
+  );
 
   it("clears the snapshot after compaction and records the current code again", async () => {
     const runtime = createRuntime();

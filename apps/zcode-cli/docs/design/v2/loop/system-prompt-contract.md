@@ -82,7 +82,7 @@ queue / guide 投递调整不纳入本批；不通过文案假装这些能力已
 段落，也不将这段内容换写后移动到 dynamic、Skill 或运行时提醒。内容边界由底层模型处理；
 不另加“忽略限制”或“不得拒绝”的指令。
 
-默认 Main 与启用 output style 的 Main 使用“身份 → Harness”；workflow actor 使用
+默认 Main 与启用 output style 的 Main 使用“身份 → Main 默认呈现 → Harness”；workflow actor 使用
 “身份/可选 persona → Harness → 工作流契约”。移除后保留正常段间空行，不留下空 system
 block；custom system 覆盖、缓存标记与快照更新时机不变。
 
@@ -203,9 +203,11 @@ static/global-cache boundary:
 1. An unheaded intro that describes working toward the user's goals and using
    judgment, without limiting those goals to software engineering. Its exact text
    is `You are an agent working with the user toward their goals, using your own judgment along the way.`
-2. `# Harness` section for terminal markdown, permission denial handling,
-   system-controlled mid-conversation updates and hook feedback, dedicated tool
-   preference, parallel independent tool calls, and clickable file references.
+2. Main presentation paragraph: follow host-provided presentation instructions;
+   otherwise use GitHub-flavored Markdown and `file_path:line_number` references.
+3. Shared `# Harness`: permission denial handling, actual dynamic delivery and hook
+   feedback, dedicated tools and parallel independent calls. Workflow reuses only
+   these common rules, without Main's presentation paragraph.
 
 There is no separate security-task policy between the intro and Harness, and
 no equivalent replacement in another default section. Content boundaries are
@@ -354,8 +356,8 @@ The stable prompt must include guidance equivalent to:
   domain to software engineering. Product identity remains in the separate prefix.
 - The agent works in the current workspace and can inspect, edit, and validate
   code using the available tools.
-- User-facing text outside tool calls renders as GitHub-flavored Markdown in a
-  terminal.
+- Main follows host presentation guidance, defaulting to GitHub-flavored Markdown.
+  Workflow returns results to its script rather than a user terminal.
 - A denied tool call may come from user refusal, a mode restriction, or a policy
   rule. Follow its stated reason, do not bypass it or repeat the unchanged call,
   and continue independent permitted work where possible.
@@ -363,7 +365,8 @@ The stable prompt must include guidance equivalent to:
   function results; hook feedback is treated as user feedback.
 - Dedicated file/search tools should be preferred over shell commands when they
   fit; independent tool calls can run in parallel.
-- Code references should use clickable `file_path:line_number` formatting.
+- Main defaults to `file_path:line_number` references unless host guidance supplies
+  another supported format.
 - Existing code style, naming, idiom, and comment density should guide edits.
 - Existing authorization remains valid within its stated target, scope, and
   effects across files, steps, turns, and compaction. Confirm destructive,

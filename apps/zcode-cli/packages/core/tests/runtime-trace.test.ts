@@ -1263,7 +1263,7 @@ describe("AgentRuntime trace propagation", () => {
       /^\n\nWrite code that reads like the surrounding code/,
     );
     expect(requests[0]?.[2]?.content).toContain(
-      "Before deleting or overwriting, inspect the target. Report outcomes faithfully:",
+      "Before deleting or overwriting, inspect the target.",
     );
     expect(
       requests[0]?.[2]?.content.indexOf("Write code that reads like the surrounding code"),
@@ -1390,7 +1390,7 @@ describe("AgentRuntime trace propagation", () => {
         role: "user",
         cacheControl: undefined,
         content: expect.stringMatching(
-          /^<system-reminder>\nCodebase and user instructions are shown below\.[\s\S]*Contents of \/workspace\/AGENTS\.md \(project instructions, checked into the codebase\):\n\nproject instructions\n<\/system-reminder>$/,
+          /^<system-reminder>\nCodebase and user instructions are shown below,[\s\S]*Contents of \/workspace\/AGENTS\.md \(project instructions, checked into the codebase\):\n\nproject instructions\n<\/system-reminder>$/,
         ),
       },
       {

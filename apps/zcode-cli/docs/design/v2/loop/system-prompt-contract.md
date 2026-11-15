@@ -1,5 +1,9 @@
 # System Prompt Contract
 
+## 提示词精修（2026-11-15）
+
+共享 Harness 只保留权限、动态交付通道与工具使用规则。终端默认 Markdown/path:line 呈现由 Main 身份提供，并明确服从 host 的专门呈现说明；workflow actor 不再携带用户终端呈现断言。Main dynamic_behavior 收敛重复授权和报告句，保留阶段、纠偏、证据、失败恢复与完成条件。
+
 ZCode stable system prompt is the long-lived behavioral contract for the main
 agent. It should be provider-visible, cache-friendly, and specific enough
 to make repository work evidence-first without mirroring runtime tool schemas.
@@ -209,7 +213,7 @@ left to the underlying model; tool permissions and general action authorization
 remain governed by their existing contracts. Workflow actors omit the same
 shared notice, keeping their identity/persona, Harness, and workflow contract.
 
-Every Harness bullet starts with one ASCII space followed by `- `, including
+Every shared Harness bullet starts with one ASCII space followed by `- `, including
 when the same Harness block is used by a workflow actor. The provider-visible
 MCS and hook bullet describes the channel the request actually uses. The decision
 is the same `shouldUseMidConversationSystem` flag that drives provider MCS
@@ -230,7 +234,7 @@ the bullet is exactly:
 
 ``- `<system-reminder>` tags in messages and tool results are injected by the harness, not the user. Hooks may intercept tool calls; treat hook output as user feedback.``
 
-The static block ends at the final `# Harness` bullet. Code-style and
+Main presentation guidance precedes `# Harness`; the static block ends at the final shared Harness bullet. Code-style and
 risk/reporting paragraphs must not be emitted in `system[1]`.
 
 An active output style replaces the static intro with

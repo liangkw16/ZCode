@@ -1,5 +1,9 @@
 # Tool Change Chain Spec
 
+## 提示词与压缩修复链（2026-11-15）
+
+本批实现合同见 docs/superpowers/specs/2026-11-15-kcode-prompt-refinement-design.md（仓库根相对路径）。链路为来源化公告 → Main/Workflow 提示词 → 摘要输出完整性检查 → 接续模型上下文 → summary/boundary/完成 timeline 原子提交 → live 安装 → 编号事件有界补投 → Desktop continuous 与手机 replayable 恢复。工具 schema 与权限执行不变，压缩提交后不能重新生成摘要或反写失败。
+
 ## 主动执行提示词对齐（2026-11-15，已实现）
 
 目标合同见 [System Prompt Contract](../loop/system-prompt-contract.md#主动执行与任务完成修订2026-11-15已实现)。

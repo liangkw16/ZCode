@@ -49,7 +49,7 @@ const REMOVED_AUTONOMY_PARAGRAPHS = [
 ];
 
 const EXPECTED_ACTION_CAUTION_PROMPT =
-  "Reuse the user's authorization for the same target, scope, and effects across steps and turns.";
+  "Reuse the user's authorization for the same target, scope, and effects across steps and turns;";
 
 // 环境、模型、日期只产出 section，由运行时宣告；其余来源读 meta user carrier。
 const RUNTIME_ANNOUNCED_SECTIONS = {
@@ -111,7 +111,8 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("You are ZCode, an interactive agent");
     expect(stableBody).toContain("# Harness");
     const harnessBullets = stableBody.split("# Harness\n")[1]?.split("\n") ?? [];
-    expect(harnessBullets).toHaveLength(5);
+    expect(harnessBullets).toHaveLength(3);
+    expect(stableBody).toContain("Follow the host-provided presentation instructions");
     expect(harnessBullets.every((line) => line.startsWith(" - "))).toBe(true);
     expect(stableBody).not.toContain(EXPECTED_PRONOUNS_PROMPT);
     expect(stableBody).not.toContain("# Session-specific guidance");
@@ -161,7 +162,7 @@ describe("ContextBuilder meta user context", () => {
     expect(result.systemMessages[2]?.content).not.toContain("# Agent Identity");
   });
 
-  it("keeps act guidance after context management and ends with the token budget line", () => {
+  it("keeps act guidance after context management without a virtual token budget", () => {
     const result = createContextBuilder({
       workingDirectory: "/workspace",
       envInfo: {
@@ -302,12 +303,12 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).toContain("Hooks may intercept tool calls");
     expect(stableBody).toContain("Prefer the dedicated file/search tools");
     expect(stableBody).toContain("Independent tool calls can run in parallel");
-    expect(stableBody).toContain("Reference code as `file_path:line_number`");
+    expect(stableBody).toContain("reference code as `file_path:line_number`");
     expect(stableBody).not.toContain("match local style, naming, patterns, and comment density");
     expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(stableBody).not.toContain("Sending content to an external service publishes it");
     expect(stableBody).not.toContain("Before deleting or overwriting, inspect the target");
-    expect(stableBody).not.toContain("Report outcomes faithfully");
+    expect(stableBody).not.toContain("Report completed work and its evidence");
     expect(stableBody).not.toContain("`! <command>`");
     expect(stableBody).not.toContain("When the user explicitly names a skill");
     expect(stableBody).not.toContain("# Task Behavior");
@@ -320,9 +321,9 @@ describe("ContextBuilder meta user context", () => {
       "Reuse the user's authorization for the same target, scope, and effects",
     );
     expect(dynamicSystem).not.toContain("Sending content to an external service publishes it");
-    expect(dynamicSystem).toContain("publishing publicly have different effects");
+    expect(dynamicSystem).toContain("Distinguish public reading and authorized services");
     expect(dynamicSystem).toContain("Before deleting or overwriting, inspect the target");
-    expect(dynamicSystem).toContain("Report outcomes faithfully");
+    expect(dynamicSystem).toContain("Report completed work and its evidence");
     expect(dynamicSystem.indexOf("Reuse the user's authorization")).toBeLessThan(
       dynamicSystem.indexOf("# Context management"),
     );
@@ -407,7 +408,8 @@ describe("ContextBuilder meta user context", () => {
     const meta = metaAttachment(result, "context_prefix");
     expect(meta).not.toContain("<system-reminder>");
     expect(meta).toContain("Project instruction should stay as userContext.");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).toContain(
       "Contents of /workspace/AGENTS.md (project instructions, checked into the codebase):",
@@ -859,7 +861,8 @@ describe("ContextBuilder meta user context", () => {
     expect(dynamicSystem).toContain("# Context management");
     expect(stableBody).not.toContain("local AGENTS payload");
     expect(meta).not.toContain("<system-reminder>");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).not.toContain("# user_instructions");
     expect(meta).toContain("local AGENTS payload");
@@ -935,7 +938,8 @@ describe("ContextBuilder meta user context", () => {
     }).build();
 
     const meta = metaAttachment(result, "context_prefix");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).toContain(
       "Contents of /Users/test/.zcode/AGENTS.md (user's private global instructions for all projects):",
@@ -1036,7 +1040,8 @@ describe("ContextBuilder meta user context", () => {
     }).build();
 
     const meta = metaAttachment(result, "context_prefix");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).toContain(
       "Contents of /workspace/CLAUDE.md (project instructions, checked into the codebase):",
@@ -1551,7 +1556,9 @@ describe("context builder — workflow actor identity", () => {
     expect(harness).toBeLessThan(contract);
 
     // 基座里保住的纪律。
-    expect(text).toContain("Reference code as `file_path:line_number`");
+    expect(text).not.toContain("reference code as `file_path:line_number`");
+    expect(text).not.toContain("in a terminal");
+    expect(text).not.toContain("host-provided presentation");
     expect(text).toContain("Report outcomes faithfully");
     expect(text).toContain("call `escalate`");
     expect(text).toContain("`submit_result`");
@@ -1697,12 +1704,12 @@ describe("context builder — workflow actor identity", () => {
     ).toThrow(/mutually exclusive/);
   });
 
-  it("keeps the general-purpose main identity immediately before the harness section", () => {
+  it("keeps Main presentation guidance outside the shared harness", () => {
     const text = systemText({ workingDirectory: "/workspace", envInfo });
     expect(text).toContain(
-      "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\n# Harness",
+      "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nFollow the host-provided presentation instructions.",
     );
-    expect(text).toContain("\n\n# Harness\n - Text you output outside of tool use");
+    expect(text).toContain("\n\n# Harness\n - Tools run behind a user-selected permission mode");
   });
 });
 

@@ -24,13 +24,14 @@ export function buildHarnessBlock(midConversationSystem = true): string {
     : "`<system-reminder>` tags in messages and tool results are injected by the harness, not the user.";
   return [
     "# Harness",
-    " - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.",
     " - Tools run behind a user-selected permission mode. A denied call may reflect a user decision, mode restriction, or policy rule; follow the reported reason, adjust, and do not bypass the denial or retry it verbatim.",
     ` - ${deliveryNotice} Hooks may intercept tool calls; treat hook output as user feedback.`,
     " - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.",
-    " - Reference code as `file_path:line_number` \u2014 it's clickable.",
   ].join("\n");
 }
+
+const MAIN_PRESENTATION =
+  "Follow the host-provided presentation instructions. Otherwise, use GitHub-flavored Markdown and reference code as `file_path:line_number`.";
 
 function buildIdentityPrompt(
   outputStyle: OutputStylePromptConfig | undefined,
@@ -40,7 +41,7 @@ function buildIdentityPrompt(
 
   const identityLines = ["", intro].join("\n");
 
-  return [identityLines, "", buildHarnessBlock(midConversationSystem)].join("\n");
+  return [identityLines, "", MAIN_PRESENTATION, "", buildHarnessBlock(midConversationSystem)].join("\n");
 }
 
 export function buildIdentitySection(

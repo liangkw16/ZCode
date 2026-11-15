@@ -84,4 +84,11 @@
 
 ## Execution record
 
-Native implementation completed on the existing kcode branch. Tasks 2 and 3 share the compact pipeline and were committed together. The final independent review found two P2 issues; both received RED→GREEN runtime regressions and a single fix pass. Package-manager checks used the pinned pnpm 10.33.2 JavaScript entry where the standalone binary could not serve as npm_execpath. Current validation limits are recorded in the spec and final delivery, including two extra scripted cases and interrupted full cold-resume execution.
+Native implementation completed on the existing kcode branch. Tasks 2 and 3 share the compact pipeline and were committed together. The final independent review found two P2 issues; both received RED→GREEN runtime regressions and a single fix pass. Package-manager checks used the pinned pnpm 10.33.2 JavaScript entry where the standalone binary could not serve as npm_execpath. The follow-up below closes the two scripted failures and completes the full cold-resume run; remaining validation limits are recorded in the spec.
+
+### Follow-up: complete scripted E2E and cold resume
+
+- [x] 两个 scripted case 原样复现失败；检查所有 `createApp` 调用与通知投影合同。
+- [x] 单独完整运行 `v4-cold-resume.test.ts --maxWorkers=1 --reporter=verbose`：124/124 通过；此前 SIGTERM 原因未复现，不据此修改 runtime。
+- [x] 修复 usage-anchor 三处漏等异步 App 创建，补全 background-bash 的完整 provenance 文本断言。
+- [x] 全部 7 个 scripted case 通过；App helper 4/4 通过；根与 CLI typecheck/lint 通过（告警与前批一致），格式与架构检查通过。完成验证记录并提交。

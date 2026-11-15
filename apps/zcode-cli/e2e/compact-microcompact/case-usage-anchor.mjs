@@ -123,7 +123,8 @@ async function runScenario(input) {
       providerName: "Usage Anchor E2E Provider",
       storageDir: paths.storageDir,
     });
-    app = createApp({
+    // 创建已包含异步配置读取；漏等会把 Promise 当成 App，也无法正确清理会话。
+    app = await createApp({
       configPath: paths.configPath,
       modules: input.modules,
       runtimeConfig: buildRuntimeConfig({
@@ -153,7 +154,7 @@ async function runScenario(input) {
     if (RESTART_AFTER_SCENARIOS.has(input.scenario) && input.scenario !== "rewind") {
       const sessionId = app.sessionId;
       await app.close?.();
-      app = createApp({
+      app = await createApp({
         configPath: paths.configPath,
         modules: input.modules,
         resume: true,
@@ -200,7 +201,7 @@ async function runScenario(input) {
 
       const sessionId = app.sessionId;
       await app.close?.();
-      app = createApp({
+      app = await createApp({
         configPath: paths.configPath,
         modules: input.modules,
         resume: true,

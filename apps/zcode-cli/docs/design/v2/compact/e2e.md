@@ -10,6 +10,14 @@ Compact 需要一组可手动运行、可定时调度的 E2E，用来验证它�
 
 ## Case Matrix
 
+### background-bash
+
+scripted provider 执行后台 Bash，再用前台 Bash 等待完成。验收前台输出与后台落盘输出的 stdout/stderr 顺序、单一输出路径，以及 provider 收到的完整完成通知。通知必须包含 `loop/turn-steering.md` 定义的“系统通知，非用户输入”前言和原有 `<task-notification>` XML；使用完整文本相等断言，不通过剥离前言放宽检查。
+
+### usage-anchor
+
+scripted provider 分别覆盖 full、reactive、input-only、hydration 和 rewind 场景，校验压缩与后续请求的 usage anchor、live history 和持久 assistant history。App 的创建与重建统一等待异步 `createApp()` 完成，再调用公开的 `submitPrompt`、`resume` 和 `close`；重启仍使用原 session ID，不另建会话。
+
 ### microcompact
 
 Fixture 构造一个临时 workspace，包含 Node emitter script。runner 使用 `deepseek/deepseek-v4-flash`，提示模型必须调用两次 `Bash`：

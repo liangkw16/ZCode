@@ -198,6 +198,6 @@ flowchart LR
 - 独立 codex-review 使用 gpt-6-astra / xhigh 审查实现提交：发现输出重生成的 usage ID/轮次汇总遗漏，以及 auto 失败后 reactive 重压两项 P2；均已用完整 runtime 回归证明失败后修复。usage 以真实请求编号，并为截断结果补计量事件；输出恢复耗尽直接结束当前 turn。
 - 最终 Core 全量 321 文件：5,076 通过、21 跳过；SQLite bundle 8 通过；Bootstrap/V4 相关 98 通过及压缩冷恢复定向 2 通过。最终 scripted 压缩/接续 4 项通过。
 - 根与 CLI typecheck 均通过（CLI 34/34 tasks）；根 lint 0 错误/537 告警，CLI lint 0 错误/88 告警、4 项上游行数存量接纳；架构检查 0 新问题，修改文件格式与 git diff --check 通过。
-- 本地 scripted provider 整套 7 项中 5 项通过：background-bash 的旧全文断言不接受现有 provenance 前言，usage-anchor 调用当前不可用的 app.submitPrompt，两项失败保持原状并记录。压缩 PTL/reactive/OpenAI Responses/输出接续链已有通过证据；本批不据此声称整个套件通过。
-- V4 冷恢复全文件运行受到 SIGTERM 中断；压缩相关定向用例通过。未执行真实模型 A/B 或 Desktop/手机人工操作验收。
+- 后续闭合两个 E2E 失败：background-bash 的完整文本预期补入现有 provenance 前言，继续严格比较单路径通知；usage-anchor 三处异步 `createApp()` 补上 `await`，避免把 Promise 当作 App。先确认两项失败，再运行 scripted provider 整套 7/7 通过，涵盖 usage-anchor 全部五个场景；App helper 回归 4/4 通过。
+- V4 冷恢复全文件独立执行 `--maxWorkers=1 --reporter=verbose`：124/124 通过（10.61 秒）。此前 SIGTERM 本次未复现，原因仍未确认，未据此修改 runtime。未执行真实模型 A/B 或 Desktop/手机人工操作验收。
 - 快照 tombstone 跨记录崩溃窗口、技能正文重载与 Read freshness 等既定限制保持上述说明，不宣称已消除。

@@ -229,6 +229,7 @@ describe("post-compact file restore", () => {
       [capped, true],
       [truncated, true],
     ]);
+    expect(restore.entries.every((item) => !("readFileState" in item))).toBe(true);
   });
 
   it("drops files that exceed the total token budget without a note or a record", async () => {

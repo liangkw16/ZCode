@@ -18,6 +18,7 @@ import {
   type RuntimeMessageMetadata,
 } from "../../agent/message-history.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import { createReadFileStateMetadataFromEntry } from "../../tool/read-file-state-metadata.js";
 
 /** 普通收集和 compact 共用隐藏提醒落盘，正文与 runtime metadata 写入同一 text part。 */
 export async function persistRuntimeReminderMessage(
@@ -60,6 +61,21 @@ export function buildRuntimeReminderMessage(
       : undefined;
   if (content === undefined) return;
 
+  const readState =
+    isRuntimeAttachmentEntry(entry) &&
+    entry.metadata.source === "resume_referenced_session_context" &&
+    entry.readFileState &&
+    !entry.readFileState.isPartialView
+      ? entry.readFileState
+      : undefined;
+  const snapshot = readState
+    ? createReadFileStateMetadataFromEntry({
+        completedAt: readState.readAt,
+        entry: readState,
+        toolName: "Read",
+      })
+    : undefined;
+
   const created = options.created ?? Date.now();
   const messageID = createMessageId();
   return {
@@ -93,7 +109,14 @@ export function buildRuntimeReminderMessage(
         text: content,
         synthetic: true,
         time: { start: created, end: created },
-        metadata: reminderPartMetadata(entry.metadata),
+        metadata: {
+          ...reminderPartMetadata(entry.metadata),
+          // 只在正文所属 part 保存一份，避免 info metadata 再复制完整文件。
+          ...(snapshot ? { readFileState: snapshot } : {}),
+          ...(snapshot && readState?.requestedPath
+            ? { readFileStateRequestedPath: readState.requestedPath }
+            : {}),
+        },
       },
     ],
   };

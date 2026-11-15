@@ -86,16 +86,21 @@ export async function buildPostCompactFileRestore(input: {
     // 总量超限的文件丢掉，不放提示，也不写记录；后面更小的文件仍可放入。
     if (totalTokens + tokens > maxTotalTokens) return;
     totalTokens += tokens;
-    restore.entries.push(
-      systemReminderAttachmentEntry("resume_referenced_session_context", restored.content),
-    );
     // 写回的记录保留原始写法，下一次 compaction 仍按它判定 deny。
-    if (restored.readFileStateEntry) {
-      restore.readFileStateEntries.push({
-        ...restored.readFileStateEntry,
-        ...requestedPathField(candidate.requestedPath, restored.readFileStateEntry.path),
-      });
-    }
+    const readFileStateEntry = restored.readFileStateEntry
+      ? {
+          ...restored.readFileStateEntry,
+          ...requestedPathField(candidate.requestedPath, restored.readFileStateEntry.path),
+        }
+      : undefined;
+    restore.entries.push({
+      ...systemReminderAttachmentEntry("resume_referenced_session_context", restored.content),
+      // 冷恢复不能只恢复正文却丢掉已读证据；引用提示不代表模型看过完整文件。
+      ...(readFileStateEntry && !readFileStateEntry.isPartialView
+        ? { readFileState: readFileStateEntry }
+        : {}),
+    });
+    if (readFileStateEntry) restore.readFileStateEntries.push(readFileStateEntry);
   });
   return restore;
 }

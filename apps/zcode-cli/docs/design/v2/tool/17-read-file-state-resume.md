@@ -19,14 +19,14 @@ session 里模型多次 `Read limit` 后继续 `Write` 仍失败，直到完整 
 Read 去重与写前检查结果相同；Bash 回填和 Recall 注入的记录不落盘，resume 后没有。例外：
 
 - 完整视图恢复时不保留 `offset`（`0` 和 `1` 都记为未指定），所以显式 `offset: 0` 的完整 Read 在重启后不命中去重。
-- compaction 补回文件时写入的记录只在 live 表里，不落盘；重启或 rewind 之后没有（见下文“Compaction 之后”）。
+- compaction 补回的完整文件正文与结构化读取快照一起落盘；旧版无快照附件仍要求重新 Read（见下文“Compaction 之后”）。
 
 ## Resume 契约
 
 普通 `resume` 不新增独立持久化表，也不把 read-state 写入 provider-visible history。
 它从当前 active transcript 重建 runtime-local `readFileState`。Read state 至少包含
 模型看到的 `content`、`offset`、`limit`、`isPartialView` 和用于 stale guard 的时间戳；
-恢复来源只允许使用 completed tool part metadata 里持久化的结构化 read-state，其中时间戳
+恢复来源只允许使用 completed tool part metadata 与下述可信 compact 文件附件里持久化的结构化 read-state，其中时间戳
 使用 `mtimeMs`，并同时保留文件系统 adapter 暴露的 `revisionId`：
 
 - 只扫描 compact / rewind 后仍 active 的 message。
@@ -75,8 +75,9 @@ compaction 补回文件（`rewind-compact.md` 的“文件恢复”）重读磁�
   Edit / Write 要求先完整读取。
 - 超过 Read 的文件大小上限、只放引用提示的文件：没读到内容，不写记录。
 - 因总量上限被丢掉、读取失败或被跳过的文件：不写记录。
-- 这些记录不落盘：补回附件没有快照，hydrator 只扫描工具结果。重启或 rewind 之后没有这些记录，Read
-  返回正文，Edit / Write 要求先读。
+- 补回的完整正文对应一份既有 versioned `readFileState` 快照，保存在同一隐藏附件的 text part metadata；原始路径写法单独保存为 `readFileStateRequestedPath`。只保存实际完整补回的内容，引用提示、部分视图、失败与丢弃的文件不保存快照。快照随摘要和附件进入现有 compact bundle，不新增表、配置或协议。
+- 冷恢复与 rewind 按 active transcript 顺序恢复这类快照，再由后续成功工具的快照覆盖。只接受 agent_runtime 生成、source 为 `resume_referenced_session_context` 的 synthetic hidden reminder text part，且 snapshot 为完整 Read、版本及 freshness 字段完整；普通用户正文、其他提醒、ignored part、旧版无快照附件不赋予已读状态。
+- 恢复只使用当时已经交付给模型的内容及其 revision / mtime / size，不读取当前磁盘认证新内容；Edit / Write 原有 stale、partial、匹配与写入 revision 校验保持不变。文件未变时可直接编辑，原有 stale 规则检测到外部修改后仍拒绝；旧版附件继续要求先 Read。回退掉的附件不恢复其状态。现有整数毫秒 mtime / 大小优先及完整内容相同的容差不扩大或收紧；同 mtime、同大小变化的既有容差不在本批调整。
 - `MEMORY.md`：compaction 收尾时重读索引，live 表装好补回记录之后，再写入一条按重读内容生成的
   `seededFromContext` 记录（规则与会话开始时相同）。索引不存在或不可读时不写。
 
@@ -92,7 +93,7 @@ compaction 补回文件（`rewind-compact.md` 的“文件恢复”）重读磁�
 `MEMORY.md`，这条记录已被覆盖成工具记录，随回退一起清掉。
 
 read-state hydrator 必须独立于 UI、desktop service 和远控 replayable stream。它只读取
-`SessionStorePort.messages()` 返回的 tool parts 和当前 `FileSystemPort`，不新增
+`SessionStorePort.messages()` 返回的 completed tool parts 与上述可信 compact 文件附件，不在恢复时读取磁盘，不新增
 `@zcode/protocol` 字段，不改变 desktop continuous 或 web remote replayable 的消息流。
 
 成功 full `Read` 的 completed tool part metadata 需要额外保存一个 versioned
@@ -141,8 +142,7 @@ resume 恢复优先级：
 - compact / rewind 后，只有 active message 里的 tool 结果会恢复 read-state。
 - 返回 `file_unchanged` 的 Read 不记录快照；旧数据里这类 Read 的快照在冷恢复时被跳过，恢复出之前那次
   读取的视图和时间。
-- compact 后，补回成功的文件在 live 表里：Read 返回 `file_unchanged`，Edit 不报未读；超过单文件上限的
-  文件为部分视图；被丢掉或读取失败的文件没有记录。重启或 rewind 后这些记录都没有。
+- compact 后，完整补回文件的快照在 live、冷恢复与 rewind 中一致：未变化的文件 Read 返回 `file_unchanged`，首次 Edit / Write 成功；外部修改保持 stale 拒绝且不覆盖外部内容。部分引用、丢弃、读取失败、旧版无快照不获得完整已读状态。覆盖快照字段缺失、非可信提醒及回退掉的附件；后续工具快照覆盖旧附件。
 - rewind 后 `MEMORY.md` 的 context 记录仍在，`Write` `MEMORY.md` 不报未读；resume 后由
   context 初始化重新写入。
 - 同一文件多次读取只留一条记录，查找不遍历整张表。

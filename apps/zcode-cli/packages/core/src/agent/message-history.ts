@@ -30,6 +30,7 @@ import {
 import { parseInstructionAnnouncement } from "../context/sections/instruction-files.js";
 import type { InstructionAnnouncement } from "../context/types.js";
 import { SYSTEM_REMINDER_SOURCES, type SystemReminderSource } from "../system-reminder/source.js";
+import type { ReadFileStateEntry } from "../tool/types.js";
 
 // Tool call from model (simple type, no brand)
 export interface ToolCallInput {
@@ -126,6 +127,8 @@ export interface RuntimeAttachmentEntry {
   content: string;
   cacheControl?: ModelCacheControl;
   metadata: RuntimeMessageMetadata;
+  /** compact 完整文件正文对应的读取证据；仅随 text part 落盘，不投影给 provider。 */
+  readFileState?: ReadFileStateEntry;
 }
 
 export type RuntimeMessageEntry = RuntimeMessageMessageEntry | RuntimeAttachmentEntry;
@@ -642,6 +645,11 @@ export function cloneRuntimeMessageEntry(entry: RuntimeMessageEntry): RuntimeMes
       content: entry.content,
       cacheControl: entry.cacheControl ? { ...entry.cacheControl } : undefined,
       metadata: cloneRuntimeMessageMetadata(entry.metadata)!,
+      ...(entry.readFileState
+        ? {
+            readFileState: { ...entry.readFileState, readAt: new Date(entry.readFileState.readAt) },
+          }
+        : {}),
     };
   }
   return {

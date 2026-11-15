@@ -315,7 +315,7 @@ Read 返回 `file_unchanged` 时不再记录读取状态快照；hydrator 跳过
 Edit 的记录，不走工具调用流程（无 hook、无工具事件、不弹窗），只跳过读权限 deny 规则：执行器新增
 `areReadsDeniedWithoutPrompt`，与工具调用共用同一个模式与规则判定（`checkStaticToolPermission`），一批文件只加载
 一次规则。规则按原始字符串匹配，所以读取状态另记工具输入的原始写法（`requestedPath`，Read / Write /
-Edit 写读取状态时记下；冷恢复取自 tool part 的输入，不写进快照），补回时它和规范化路径各判定一次，任一命中 deny 就跳过。补回结果写入 live 读取状态表，不落盘。Read 的 schema、权限声明、模型可见结果文本和 UI/V4 投影不变；compaction 后补回附件
+Edit 写读取状态时记下；冷恢复取自 tool part 的输入，不写进快照），补回时它和规范化路径各判定一次，任一命中 deny 就跳过。补回结果写入 live 读取状态表；完整正文对应的读取快照随同一附件 text part 持久化，冷恢复 / rewind 从 active 的可信附件恢复，部分引用和旧数据无快照仍要求先读。原始写法在附件 metadata 单独保存；不读取当前磁盘补认证。Read 的 schema、权限声明、模型可见结果文本和 UI/V4 投影不变；compaction 后补回附件
 的内容变为文件当前内容，只影响新产生的 compaction，已持久化的不改写。规则见
 [rewind-compact.md](../rewind-compact.md) 与 [17-read-file-state-resume.md](17-read-file-state-resume.md)。
 

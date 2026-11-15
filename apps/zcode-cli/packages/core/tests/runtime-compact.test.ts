@@ -2199,106 +2199,142 @@ describe("AgentRuntime manual compact", () => {
     );
   });
 
-  it("persists post-compact read reminders across resume without restoring their read state", async () => {
-    const sessionId = createSessionId("runtime-compact-read-state-reminder-resume");
-    const store = createRecordingSessionStore();
-    const requests: Array<Array<{ role: string; content: string }>> = [];
-    let normalResponseCount = 0;
-    const modelImplementation = {
-      async generateText(request) {
-        requests.push(
-          request.messages.map((message) => ({
-            role: message.role,
-            content: providerContentToText(message.content),
-          })),
-        );
-        const lastContent = providerContentToText(request.messages.at(-1)?.content);
-        if (lastContent.includes("create a detailed summary")) {
+  it.each([false, true])(
+    "restores compact file freshness across resume (external change: %s)",
+    async (changed) => {
+      const sessionId = createSessionId("runtime-compact-read-state-reminder-resume");
+      const store = createRecordingSessionStore();
+      const requests: Array<Array<{ role: string; content: string }>> = [];
+      let normalResponseCount = 0;
+      const modelImplementation = {
+        async generateText(request) {
+          requests.push(
+            request.messages.map((message) => ({
+              role: message.role,
+              content: providerContentToText(message.content),
+            })),
+          );
+          const lastContent = providerContentToText(request.messages.at(-1)?.content);
+          if (lastContent.includes("create a detailed summary")) {
+            return {
+              finishReason: "stop",
+              text: "<summary>Persisted read reminder summary.</summary>",
+              usage: { inputTokens: 40, outputTokens: 20, totalTokens: 60 },
+            };
+          }
+
+          normalResponseCount++;
           return {
             finishReason: "stop",
-            text: "<summary>Persisted read reminder summary.</summary>",
-            usage: { inputTokens: 40, outputTokens: 20, totalTokens: 60 },
+            text: `normal response ${normalResponseCount}`,
+            usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
           };
-        }
+        },
+      };
 
-        normalResponseCount++;
-        return {
-          finishReason: "stop",
-          text: `normal response ${normalResponseCount}`,
-          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
-        };
-      },
-    };
+      const filePath = "/tmp/zcode-runtime-compact-read-state-resume/src/current.ts";
+      const fileSystemPort = new MemoryFileSystem({ [filePath]: "export const persisted = 42;\n" });
+      const revision = () => ({
+        id: `revision:${fileSystemPort.files[filePath]}`,
+        mtimeMs: fileSystemPort.files[filePath].includes("42") ? 1 : 2,
+      });
+      const stat = fileSystemPort.stat.bind(fileSystemPort);
+      vi.spyOn(fileSystemPort, "stat").mockImplementation(async (request) => ({
+        ...(await stat(request)),
+        mtimeMs: revision().mtimeMs,
+        revision: revision(),
+      }));
+      const read = fileSystemPort.readTextFile.bind(fileSystemPort);
+      vi.spyOn(fileSystemPort, "readTextFile").mockImplementation(async (request) => ({
+        ...(await read(request)),
+        revision: revision(),
+      }));
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          systemPrompt: "You are a compact persisted read-state reminder test agent.",
+          workingDirectory: "/tmp/zcode-runtime-compact-read-state-resume",
+          mode: "yolo",
+        },
+        {
+          eventStore: createTestSessionEventStore(),
+          fileSystemPort,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText(modelImplementation) as never,
+          ),
+          sessionStore: store,
+        },
+      );
 
-    const filePath = "/tmp/zcode-runtime-compact-read-state-resume/src/current.ts";
-    const fileSystemPort = new MemoryFileSystem({ [filePath]: "export const persisted = 42;\n" });
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      {
-        systemPrompt: "You are a compact persisted read-state reminder test agent.",
-        workingDirectory: "/tmp/zcode-runtime-compact-read-state-resume",
-      },
-      {
-        eventStore: createTestSessionEventStore(),
-        fileSystemPort,
-        modelFactory: createTestModelFactory(
-          withStreamTextFromGenerateText(modelImplementation) as never,
-        ),
-        sessionStore: store,
-      },
-    );
+      const readFileState = (runtime as unknown as { readFileState: Map<string, unknown> })
+        .readFileState;
+      readFileState.set(createReadFileStatePathKey(filePath), {
+        content: "export const persisted = 42;\n",
+        isPartialView: false,
+        path: filePath,
+        readAt: new Date(4_000),
+        sourceTool: "Read",
+      });
 
-    const readFileState = (runtime as unknown as { readFileState: Map<string, unknown> })
-      .readFileState;
-    readFileState.set(createReadFileStatePathKey(filePath), {
-      content: "export const persisted = 42;\n",
-      isPartialView: false,
-      path: filePath,
-      readAt: new Date(4_000),
-      sourceTool: "Read",
-    });
+      await runtime.executeTurn("first persisted read-state compact setup");
+      await runtime.executeTurn("second persisted read-state compact setup");
+      await runtime.executeTurn("/compact");
+      expect(readFileState.size).toBe(1);
 
-    await runtime.executeTurn("first persisted read-state compact setup");
-    await runtime.executeTurn("second persisted read-state compact setup");
-    await runtime.executeTurn("/compact");
-    expect(readFileState.size).toBe(1);
+      if (changed) fileSystemPort.files[filePath] = "export const persisted = 99;\n";
 
-    const resumedRuntime = createTestAgentRuntime(
-      sessionId,
-      {
-        systemPrompt: "You are a compact persisted read-state reminder test agent.",
-        workingDirectory: "/tmp/unused-before-resume",
-      },
-      {
-        eventStore: createTestSessionEventStore(),
-        fileSystemPort,
-        modelFactory: createTestModelFactory(
-          withStreamTextFromGenerateText(modelImplementation) as never,
-        ),
-        sessionStore: store,
-      },
-    );
+      const resumedRuntime = createTestAgentRuntime(
+        sessionId,
+        {
+          systemPrompt: "You are a compact persisted read-state reminder test agent.",
+          workingDirectory: "/tmp/unused-before-resume",
+          mode: "yolo",
+        },
+        {
+          eventStore: createTestSessionEventStore(),
+          fileSystemPort,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText(modelImplementation) as never,
+          ),
+          sessionStore: store,
+        },
+      );
 
-    await resumedRuntime.resumeFromStore();
-    const resumedReadFileState = (
-      resumedRuntime as unknown as { readFileState: Map<string, unknown> }
-    ).readFileState;
-    // 补回记录只在 live 表里；冷恢复只扫描工具结果，补回附件没有快照。
-    expect(resumedReadFileState.size).toBe(0);
-    await resumedRuntime.executeTurn("continue after resumed read-state compact");
+      await resumedRuntime.resumeFromStore();
+      const resumedReadFileState = (
+        resumedRuntime as unknown as { readFileState: Map<string, unknown> }
+      ).readFileState;
+      // 补回正文仍在上下文中，读取快照必须同行恢复；外部修改不能被重新认证为已读。
+      expect(resumedReadFileState.size).toBe(1);
+      expect(resumedReadFileState.get(createReadFileStatePathKey(filePath))).toMatchObject({
+        content: "export const persisted = 42;\n",
+        revisionId: "revision:export const persisted = 42;\n",
+      });
+      const edit = await resumedRuntime.getToolExecutor().execute({
+        id: createToolCallId("first-edit-after-compact-resume"),
+        name: "Edit",
+        input: { file_path: filePath, old_string: changed ? "99" : "42", new_string: "43" },
+      });
+      expect(edit.success).toBe(!changed);
+      if (changed) expect(edit.error?.message).toContain("File has been modified since read");
+      expect(fileSystemPort.files[filePath]).toBe(
+        `export const persisted = ${changed ? 99 : 43};\n`,
+      );
+      await resumedRuntime.executeTurn("continue after resumed read-state compact");
 
-    const postResumeContext = requests
-      .at(-1)
-      ?.map((message) => message.content)
-      .join("\n");
+      const postResumeContext = requests
+        .at(-1)
+        ?.map((message) => message.content)
+        .join("\n");
 
-    expect(postResumeContext).toContain(
-      `Called the Read tool with the following input: {"file_path":"${filePath}"}`,
-    );
-    expect(postResumeContext).toContain("1\texport const persisted = 42;");
-    expect(postResumeContext).not.toContain("Recent file read before compact");
-    expect(postResumeContext).toContain("continue after resumed read-state compact");
-  });
+      expect(postResumeContext).toContain(
+        `Called the Read tool with the following input: {"file_path":"${filePath}"}`,
+      );
+      expect(postResumeContext).toContain("1\texport const persisted = 42;");
+      expect(postResumeContext).not.toContain("Recent file read before compact");
+      expect(postResumeContext).toContain("continue after resumed read-state compact");
+    },
+  );
 
   it("persists approved plan file reference after compact so resume keeps the full plan", async () => {
     const sessionId = createSessionId("runtime-compact-plan-file-reference");

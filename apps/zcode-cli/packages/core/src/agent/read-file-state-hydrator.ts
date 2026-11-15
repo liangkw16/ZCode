@@ -1,9 +1,4 @@
-import type {
-  MessageId,
-  MessagePart,
-  MessageWithParts,
-  ToolPart,
-} from "@zcode/contracts";
+import type { MessageId, MessagePart, MessageWithParts, ToolPart } from "@zcode/contracts";
 import {
   parseReadFileStateMetadata,
   type PersistedReadFileStateMetadata,
@@ -66,6 +61,18 @@ export async function hydrateReadFileStateFromSession(input: {
   };
 
   for (const message of activeMessages) {
+    if (message.info.role === "user") {
+      for (const part of dedupeParts(message.parts)) {
+        const snapshot = compactFileSnapshot(message, part);
+        if (
+          snapshot &&
+          restoreSnapshot(input.readFileState, snapshot, input.markRestoredFromSession)
+        ) {
+          result.restoredCount++;
+        }
+      }
+      continue;
+    }
     if (message.info.role !== "assistant") continue;
 
     for (const snapshot of inSnapshotOrder(dedupeParts(message.parts))) {
@@ -76,6 +83,33 @@ export async function hydrateReadFileStateFromSession(input: {
   }
 
   return result;
+}
+
+/** 正文与读取证据同一事务提交；只恢复可信完整附件，不把恢复时的磁盘内容当成模型已读。 */
+function compactFileSnapshot(
+  message: MessageWithParts,
+  part: MessagePart,
+): RestorableSnapshot | undefined {
+  if (
+    message.info.role !== "user" ||
+    !message.info.synthetic ||
+    message.info.semantics?.origin !== "agent_runtime" ||
+    message.info.semantics.kind !== "system_reminder" ||
+    message.info.semantics.source !== "resume_referenced_session_context" ||
+    message.info.semantics.providerVisibility !== "visible" ||
+    message.info.semantics.uiVisibility !== "hidden" ||
+    part.type !== "text" ||
+    !part.synthetic ||
+    part.ignored ||
+    !part.text.trim() ||
+    part.metadata?.source !== "resume_referenced_session_context"
+  )
+    return undefined;
+  const snapshot = parseReadFileStateMetadata(part.metadata);
+  if (snapshot?.tool !== "Read" || snapshot.isPartialView || !isHistoricalFullReadWindow(snapshot))
+    return undefined;
+  const requestedPath = part.metadata.readFileStateRequestedPath;
+  return { snapshot, ...(typeof requestedPath === "string" ? { requestedPath } : {}) };
 }
 
 // range Read 与 same-runtime 一样恢复：按 live 的更新顺序覆盖，每个文件留最近一次视图。

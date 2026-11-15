@@ -250,6 +250,24 @@ compaction 结果的顺序（boundary → 请求前公告 → summary → 保留
   - 内容：`Called the Read tool with the following input: {"file_path":…}`，换行后是 `Result of calling the Read tool:` 和 Read 工具结果原文。估算超过 5k token，或超过 Read 的文件大小上限时，只放引用提示（"Note: … was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it."）。按顺序累加，总量超过 50k token 的文件丢掉，不放提示（单文件不超过 5k、最多 5 个文件时实际不会触发）。
   - 读取状态：compact 后的 live 表只含补回的文件，记录规则与重启后的行为见 [Read File State Resume](tool/17-read-file-state-resume.md) 的“Compaction 之后”。
   - 补回内容随 compaction 附件一起持久化，冷恢复读到相同字节，不再重读磁盘；已有的 compaction 不改写。
+  - 完整补回正文的 Read 快照随同一附件 text part metadata 进入事务，保留当时的 content / revision / mtime / size 与原始路径写法；冷恢复和 rewind 只从 active 的可信附件恢复。部分引用、无完整 freshness 字段及旧版附件不授予已读状态；编辑仍验证当前文件是否变化。
+
+  ```mermaid
+  sequenceDiagram
+    participant C as Runtime compact
+    participant F as FileSystemPort
+    participant S as SessionStore
+    participant R as Resumed Runtime
+    C->>F: 既有权限边界内重读候选文件
+    F-->>C: 正文与同次读取的 revision / mtime / size
+    C->>S: 同一 bundle 保存摘要、附件正文、读取快照
+    S-->>C: 提交成功
+    C->>C: 安装共享 readFileState
+    R->>S: 读取 active transcript
+    S-->>R: 可信附件及其历史读取快照
+    R->>R: 重建唯一 readFileState（不读当前磁盘）
+    R->>F: Edit / Write 原有 freshness 与写入校验
+  ```
 
 - 输入附件在 compaction 之前运行，属于保留段或被摘要；同一请求在 compaction 之后不再收集输入附件，只运行按历史去重的请求前公告。保留段为空（manual compact）时，请求前公告由下一次请求追加在末尾。
 - 虚拟 token 余额：新生成的 system、摘要和附件不再创建或重述该余额，也不维护

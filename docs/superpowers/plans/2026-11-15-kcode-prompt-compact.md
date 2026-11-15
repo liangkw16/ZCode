@@ -98,3 +98,10 @@ Native implementation completed on the existing kcode branch. Tasks 2 and 3 shar
 - [x] 固定三场景、每场景两对的协议；独立编译 A=`0549bd90` 与 B=`8586658a` 的 Core，使用同一真实模型与受控配置执行全部 12 次任务。
 - [x] 两组均为任务 6/6、断言 54/54、主动验证 6/6；B 的总耗时与逻辑输入略增，未确认整体效率收益。四次冷恢复均观察到首次 Edit 被拒后的定向重读。
 - [x] 保存原始轨迹、外部验收和重算指标；完成[真实模型 A/B 报告](../specs/2026-11-15-kcode-real-model-ab.md)，同步既有验证记录。
+
+### Follow-up: compact file freshness after cold resume
+
+- [x] 先更新 CLI spec 并复现冷恢复丢失读取状态；在完整正文所属 text part 保存既有结构化快照，从 active 的可信附件恢复，保留原有 Read/Edit/Write guard。
+- [x] 修复提交 `3624b0e5`；Core 5,088 通过、21 跳过，完整冷恢复 124/124，scripted E2E 7/7，根与 CLI 门禁通过。
+- [x] 新一轮同模型、同任务 12 次真实运行全部通过；冷恢复首次 Edit 由 0/2 成功到 2/2，接续请求合计 12→8、显式 Read 4→0。详见[专项报告](../specs/2026-11-15-kcode-cold-edit-ab.md)。
+- [x] 从原始 JSON + SSE 补齐摘要 usage，并逐样本核对 runtime；同步修正上一轮报告的 token 数值，保留所有原始样本。

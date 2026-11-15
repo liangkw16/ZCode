@@ -3175,14 +3175,20 @@ describe("AgentRuntime manual compact", () => {
       .join("\n");
 
     expect(compactRequests).toHaveLength(2);
-    expect(compactModelRetries).toEqual([0, 1]);
-    expect(retryCompactContext).not.toContain("first finish reason compact setup");
+    expect(compactModelRetries).toEqual([0, 0]);
+    expect(retryCompactContext).toContain("first finish reason compact setup");
     expect(retryCompactContext).toContain("second finish reason compact setup");
     expect(postCompactContext).toContain("Finish reason retry summary keeps the newest setup");
     expect(postCompactContext).not.toContain("first finish reason compact setup");
   });
 
-  it("retries compact summaries when length finish returns no text", async () => {
+  it.each([
+    { finishReason: "length", text: "", providerMetadata: undefined },
+    { finishReason: "length", text: "<summary>unfinished constraints:", providerMetadata: undefined },
+    { finishReason: "other", text: "partial", providerMetadata: { rawFinishReason: "max_tokens" } },
+    { finishReason: "other", text: "partial", providerMetadata: { rawFinishReason: "max_output_tokens" } },
+    { finishReason: "other", text: "partial", providerMetadata: { rawFinishReason: "model_context_window_exceeded" } },
+  ])("regenerates an output-limited compact summary without dropping history: $finishReason $text $providerMetadata", async ({ finishReason, text, providerMetadata }) => {
     const sessionId = createSessionId("runtime-compact-empty-length-ptl-retry");
     const eventStore = createTestSessionEventStore();
     const requests: Array<{
@@ -3213,9 +3219,9 @@ describe("AgentRuntime manual compact", () => {
                 compactAttempts++;
                 if (compactAttempts === 1) {
                   return {
-                    finishReason: "length",
-                    text: "",
-                    toolCalls: [{ id: "ignored-compact-tool", name: "Read", input: {} }],
+                    finishReason,
+                    text,
+                    providerMetadata,
                     usage: { inputTokens: 120, outputTokens: 0, totalTokens: 120 },
                   };
                 }
@@ -3259,8 +3265,9 @@ describe("AgentRuntime manual compact", () => {
       .join("\n");
 
     expect(compactRequests).toHaveLength(2);
-    expect(compactModelRetries).toEqual([0, 1]);
-    expect(retryCompactContext).not.toContain("first empty length compact setup");
+    expect(compactModelRetries).toEqual([0, 0]);
+    expect(retryCompactContext).toContain("first empty length compact setup");
+    expect(retryCompactContext).toContain("substantially more concisely");
     expect(retryCompactContext).toContain("second empty length compact setup");
     expect(postCompactContext).toContain("Empty length retry summary keeps the newest setup");
     expect(postCompactContext).not.toContain("first empty length compact setup");
@@ -4142,7 +4149,7 @@ describe("AgentRuntime manual compact", () => {
     });
   });
 
-  it("treats auto compact empty length finishes as prompt-too-long retries", async () => {
+  it("regenerates auto compact empty length summaries without truncating history", async () => {
     const sessionId = createSessionId("runtime-auto-compact-empty-length-ptl-retry");
     const eventStore = createTestSessionEventStore();
     const requests: Array<{
@@ -4233,7 +4240,7 @@ describe("AgentRuntime manual compact", () => {
 
     expect(result.response).toBe("normal response 4");
     expect(compactRequests).toHaveLength(2);
-    expect(compactModelRetries).toEqual([0, 1]);
+    expect(compactModelRetries).toEqual([0, 0]);
     expect(timelinePayloads).toEqual([
       expect.objectContaining({
         attempt: 1,
@@ -4250,10 +4257,10 @@ describe("AgentRuntime manual compact", () => {
     ]);
     expect(retryCompactContext).toContain("oldest auto empty length setup");
     expect(retryCompactContext).toContain("middle auto empty length setup");
-    expect(retryCompactContext).not.toContain("latest auto empty length setup");
+    expect(retryCompactContext).toContain("latest auto empty length setup");
     expect(postCompactContext).toContain("Auto empty length retry summary covers earlier setup");
     expect(postCompactContext).not.toContain("middle auto empty length setup");
-    expect(postCompactContext).toContain("latest auto empty length setup");
+    expect(postCompactContext).not.toContain("latest auto empty length setup");
     expect(postCompactContext).toContain("pending request after auto empty length retry");
   });
 
@@ -5518,7 +5525,7 @@ describe("AgentRuntime manual compact", () => {
       "compact",
       "normal",
     ]);
-    expect(compactModelRetries).toEqual([0, 1]);
+    expect(compactModelRetries).toEqual([0, 0]);
     expect(retriedMainContext).toContain("Reactive empty length retry summary");
     expect(retriedMainContext).toContain("reactive empty length overflow");
     expect(boundary).toMatchObject({
@@ -6399,6 +6406,39 @@ describe("AgentRuntime manual compact", () => {
     ]);
     expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
   });
+});
+
+describe("compact output recovery budget", () => {
+  it.each([CompactTrigger.Manual, CompactTrigger.Auto, CompactTrigger.Reactive])(
+    "preserves history after two truncated summaries for %s",
+    async (trigger) => {
+      const sessionId = createSessionId(`output-limit-${trigger}`);
+      const eventStore = createTestSessionEventStore();
+      let attempts = 0;
+      const runtime = createTestAgentRuntime(sessionId, {}, {
+        eventStore,
+        modelFactory: createTestModelFactory(withStreamTextFromGenerateText({
+          async generateText(request) {
+            if (providerContentToText(request.messages.at(-1)?.content).includes("create a detailed summary")) {
+              attempts++;
+              return { finishReason: "length", text: "unfinished handoff", usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30 } };
+            }
+            return { finishReason: "stop", text: "setup", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } };
+          },
+        }) as never),
+      });
+      await runtime.executeTurn("oldest evidence");
+      await runtime.executeTurn("latest correction");
+      await runtime.executeTurn("current stage");
+      const internal = runtime as unknown as import("../src/runtime/internal.js").AgentRuntimeInternal;
+      const before = structuredClone(internal.messageHistory.borrowReadOnlyRuntimeEntries());
+      await expect(internal.compactActiveConversation(undefined, createRootTraceContext({ sessionId }), [], { trigger }))
+        .rejects.toMatchObject({ retryable: false });
+      expect(attempts).toBe(2);
+      expect(internal.messageHistory.borrowReadOnlyRuntimeEntries()).toEqual(before);
+      expect((await eventStore.getEvents(sessionId)).some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
+    },
+  );
 });
 
 function countOccurrences(text: string, needle: string): number {

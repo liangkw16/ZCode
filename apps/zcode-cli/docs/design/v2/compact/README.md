@@ -1,5 +1,9 @@
 # ZCode CLI Compact 设计 v2
 
+## 本批修复合同（2026-11-15）
+
+执行合并设计中的摘要/接续模型分离、完成 timeline 同事务提交和提交后事件补投规则。idleThresholdMinutes 保留小数分钟精度与 elapsed > threshold 边界；默认关闭和其他整数旋钮不变。输出截断只允许一次短摘要重生成，不能作为 prompt-too-long 删除旧输入。
+
 ## 文档定位
 
 本文记录 ZCode v2 compact 的候选设计。当前文档属于 `L1 Candidate Contract`：它明确 compact 的领域边界、状态变化、对外契约和风险，但不固定最终 TypeScript 接口、数据库表结构或事件字段全集。

@@ -15,6 +15,7 @@ import {
   MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   SessionEventType,
   createChildTraceContext,
+  countContextPrefixMessages,
   isCoreError,
   createMessageId,
   createPartId,
@@ -50,6 +51,7 @@ import {
   projectMessagesForModelMediaPolicy,
   logCompactMediaRetryProjection,
   readApprovedPlanFileReferenceEntry,
+  readRawFinishReason,
   replaceReadFileStateAfterCompact,
   restorePostCompactFiles,
   buildRuntimeModeReminderBodyForTask,
@@ -75,6 +77,8 @@ import {
 import { selectPersistedCompactTail } from "../helpers/compact-preservation.js";
 import {
   buildCompactSummaryRequestMessages,
+  COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT,
+  createCompactSummaryOutputLimitError,
   coerceToolSearchModeForModel,
   createCompactContextExceededFinishError,
   createCompactPromptTooLongError,
@@ -90,6 +94,7 @@ import { createRuntimeModel } from "./runtime-model.js";
 import { supersedeContextComposition } from "../context-composition/state.js";
 import {
   filterOutputTokenContinuationEntries,
+  isOutputTokenLimitFinishReason,
   preserveCanonicalContextPrefix,
 } from "./turn-output-token-continuation.js";
 import {
@@ -97,6 +102,7 @@ import {
   buildRereadInstructionContext,
   rereadInstructionSources,
 } from "./context.js";
+import { buildContextHistoryEntries } from "./context-history-entries.js";
 import { setReadFileStateEntry } from "../../tool/read-file-state.js";
 import { clearPromptSnapshot } from "../helpers/prompt-snapshot.js";
 import { discardPendingSessionStartContext, runCompactSessionStartHooks } from "./hooks.js";
@@ -209,13 +215,12 @@ async function compactActiveConversationImpl(
   // 独立摘要模型（compact.summaryProvider/summaryModel）是显式用户配置，
   // 优先级高于 auto/reactive 链路为复用而传入的 options.model。
   const summaryModelSelection = resolveCompactSummaryModelSelection(this.config.compact);
-  const compactModel =
-    summaryModelSelection !== undefined
-      ? createRuntimeModel(this, { selection: summaryModelSelection })
-      : (options.model ??
-        createRuntimeModel(this, {
-          selection: this.getSessionModelSelection(),
-        }));
+  // 摘要模型不拥有接续环境；必须保留主循环传入的 execution/fallback/off-peak 绑定。
+  const continuationModel = options.model ?? createRuntimeModel(this, { selection: this.getSessionModelSelection() });
+  const compactModel = summaryModelSelection !== undefined
+    ? createRuntimeModel(this, { selection: summaryModelSelection })
+    : continuationModel;
+  const continuationUseMidConversationSystem = shouldUseMidConversationSystem(this.config, continuationModel);
   if (summaryModelSelection !== undefined) {
     this.logger?.info("Compact summary model override active", {
       event: "compact.summary_model_override",
@@ -237,7 +242,7 @@ async function compactActiveConversationImpl(
     initialPromptTooLongCause: options.initialPromptTooLongCause,
     preserveRecent: resolveCompactRecentPreservationPolicy(this.config.compact),
     trigger,
-    useMidConversationSystem,
+    useMidConversationSystem: continuationUseMidConversationSystem,
   });
   let currentSelection = initialSelection;
   let preservedEntries = currentSelection.preservedEntries;
@@ -245,10 +250,11 @@ async function compactActiveConversationImpl(
   let entriesForSummary = initialEntriesForSummary;
   let entriesToSummarize = getRuntimeEntriesToSummarize(entriesForSummary);
   const preCompactTokenCount = estimateRuntimeEntryTokens(activeEntries, {
-    useMidConversationSystem,
+    useMidConversationSystem: continuationUseMidConversationSystem,
   });
   const maxAttempts = trigger === CompactTrigger.Auto ? AUTO_COMPACT_MAX_ATTEMPTS : 1;
   let attempt = 1;
+  let outputRecoveryUsed = false;
   const compactTimeline: CompactTimelineContext = {
     operationId: `cmp_${crypto.randomUUID()}`,
     messageId: createMessageId(),
@@ -300,7 +306,7 @@ async function compactActiveConversationImpl(
   // 与主循环同一份工具目录（含本轮禁用规则），由同一个请求准备入口投影。
   // 修复原因：摘要请求另选工具（只带 ToolSearch 相关工具，或超过 100 个时发空列表）时，
   // tools 段与主循环不同，整个摘要请求不命中主循环的前缀缓存。
-  const compactCandidates = options.getContinuationTools?.() ?? this.getTools(compactModel);
+  const compactCandidates = options.getContinuationTools?.() ?? this.getTools(continuationModel);
   // kcode 本地语义（10-30 合并取上游工具目录时声明被误删，tsc 增量缓存漏检）：
   // 摘要请求可能路由到独立摘要模型（跨 provider），会话级 toolSearch 是主模型的能力
   // 契约，必须按摘要模型能力降级后再交给请求准备入口投影。
@@ -319,7 +325,8 @@ async function compactActiveConversationImpl(
           querySource: "compact",
         },
       });
-      const compactPrompt = buildCompactPrompt(customInstructions);
+      let compactPrompt = buildCompactPrompt(customInstructions) +
+        (outputRecoveryUsed ? `\n\n${COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT}` : "");
       let result: RuntimeModelTextResult;
       let compactPromptTooLongAttempts = 0;
       let stripMediaForSummary = false;
@@ -533,6 +540,16 @@ async function compactActiveConversationImpl(
           toolCallCount: this.extractToolCallsFromResult(result).length,
           traceContext: modelTraceContext,
         });
+        if (this.extractToolCallsFromResult(result).length > 0) {
+          formatCompactSummaryOrThrow(this, result);
+        }
+        // 输出截断不是输入超窗，不能靠丢旧轮次让半截摘要变成成功；恢复预算属于整次 operation。
+        if (isOutputTokenLimitFinishReason(result.finishReason, readRawFinishReason(result.providerMetadata))) {
+          if (outputRecoveryUsed) throw createCompactSummaryOutputLimitError(result);
+          outputRecoveryUsed = true;
+          compactPrompt = `${buildCompactPrompt(customInstructions)}\n\n${COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT}`;
+          continue;
+        }
         const contextError = createCompactContextExceededFinishError(result);
         if (contextError) {
           // compact summary 也可能以 finishReason 返回超窗而不是 throw；
@@ -574,7 +591,7 @@ async function compactActiveConversationImpl(
       throwIfTurnAborted(options.abortSignal);
       // 重读的指令内容只用于 summary 之前的完整公告；compact 落库后才交给 runtime。
       const rereadInstructionContext = instructionReread
-        ? buildRereadInstructionContext(this, instructionReread, compactModel)
+        ? buildRereadInstructionContext(this, instructionReread, continuationModel)
         : undefined;
       const preCompactDiscoveredTools = collectDiscoveredTools(activeEntries);
       const discovery = compactDiscoveryMetadata({
@@ -584,9 +601,9 @@ async function compactActiveConversationImpl(
       // 新检查点尚未提交；公告使用同一候选分类，避免把即将提升的工具重新公告为待加载。
       const toolAnnouncement = buildToolSearchAnnouncement(
         {
-          model: compactModel,
+          model: continuationModel,
           mode: this.config.toolSearch?.mode,
-          tools: options.getContinuationTools?.() ?? this.getTools(compactModel),
+          tools: options.getContinuationTools?.() ?? this.getTools(continuationModel),
           registry,
           entries: preservedEntries,
         },
@@ -595,7 +612,7 @@ async function compactActiveConversationImpl(
       const agentListingEntry = collectRuntimeAgentListing(
         this,
         preservedEntries,
-        options.agentListingTools ?? this.getTools(options.model ?? compactModel),
+        options.agentListingTools ?? this.getTools(continuationModel),
       );
       const skillsListingEntry = collectSkillsListing(this, preservedEntries);
       // 保留段非空时，请求前公告放在 summary 之前（去掉保留段已有的来源），Git 按当前目录重读；
@@ -633,7 +650,7 @@ async function compactActiveConversationImpl(
         preservedEntries,
         turnTraceContext,
         options.abortSignal,
-        compactModel,
+        continuationModel,
       );
       // hook runner 把取消当作单个 hook 失败，不会抛错；hook 返回后要再检查一次取消，
       // 否则 hook 运行期间点停止，compaction 仍会提交。
@@ -688,13 +705,23 @@ async function compactActiveConversationImpl(
         message: { role: "user" as const, content: summaryMessageContent },
         metadata: { ...legacySyntheticRuntimeMetadata(), compactBoundary: discovery },
       };
-      const postCompactEntries = buildPostCompactRuntimeEntries(activeEntries, summaryEntry, {
+      const compactedEntries = buildPostCompactRuntimeEntries(activeEntries, summaryEntry, {
         leadingReminderEntries,
         postCompactReminderEntries,
         preservedEntries,
       });
+      // 先构建局部新前缀，提交前不能让计数或重读指令改变 live 历史。
+      const continuationContext = rereadInstructionContext ?? this.createContextBuilderFromSnapshot(
+        this.contextSourceSnapshot ?? this.createConfigOnlyContextSnapshot(this.workingDirectory),
+        this.memoryRoot,
+        { model: continuationModel, memoryIndexContent: this.memoryIndexContent, persistEnvInfo: false },
+      ).build();
+      const postCompactEntries = [
+        ...buildContextHistoryEntries(continuationContext),
+        ...compactedEntries.slice(countContextPrefixMessages(compactedEntries)),
+      ];
       const truePostCompactTokenCount = estimateRuntimeEntryTokens(postCompactEntries, {
-        useMidConversationSystem,
+        useMidConversationSystem: continuationUseMidConversationSystem,
       });
       const providerPostCompactTokenCount = getUsageTotalTokens(result.usage);
       const compactBoundary = buildManualCompactBoundary({
@@ -779,7 +806,7 @@ async function compactActiveConversationImpl(
       );
       replaceReadFileStateAfterCompact(this.readFileState, fileRestore.readFileStateEntries);
       if (instructionReread) {
-        applyRereadInstructionSources(this, instructionReread, compactModel);
+        applyRereadInstructionSources(this, instructionReread, continuationModel);
         // MEMORY.md 的读取状态与 runtime 持有的索引一致；必须在上面的整表替换之后写入。
         if (instructionReread.memoryIndex) {
           setReadFileStateEntry(
@@ -793,7 +820,7 @@ async function compactActiveConversationImpl(
       // 本轮请求的前缀，下一次主循环请求重新记录。不重建时旧 system 会被当成新快照记下来。
       const entries = (await clearPromptSnapshot(this, turnTraceContext))
         ? rebuildContextPrefix(this, {
-            model: compactModel,
+            model: continuationModel,
             turnRequestEntries: postCompactEntries,
           })
         : postCompactEntries;

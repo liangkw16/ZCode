@@ -22,6 +22,17 @@ import type { RuntimeModelTextResult, RunModelTextRequestOptions } from "../type
 import type { AgentRuntimeInternal } from "../internal.js";
 import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 
+export const COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT =
+  "The previous summary exceeded the output limit. Rewrite the complete handoff substantially more concisely. Preserve the current goal, constraints, evidence gaps, and next action; omit repeated history and long excerpts.";
+
+export function createCompactSummaryOutputLimitError(result: RuntimeModelTextResult): Error {
+  return createCoreError(CoreErrorType.ModelError, "Compact summary exceeded the output limit; the original history was preserved.", {
+    context: { reason: "compact_summary_output_limit", finishReason: result.finishReason, rawFinishReason: readRawFinishReason(result.providerMetadata) },
+    recoverable: true,
+    retryable: false,
+  });
+}
+
 export const COMPACT_TOOL_USE_DENIAL_MESSAGE = "Tool use is not allowed during compaction";
 export const COMPACT_TOOL_USE_DENIAL_REASON =
   "compaction agent should only produce text summary";
@@ -70,10 +81,7 @@ export function createCompactContextExceededFinishError(
   result: RuntimeModelTextResult,
 ): Error | undefined {
   const rawFinishReason = readRawFinishReason(result.providerMetadata);
-  if (
-    !isContextExceededFinishReason(result.finishReason, rawFinishReason) &&
-    !isCompactEmptyLengthFinish(result)
-  ) {
+  if (!isContextExceededFinishReason(result.finishReason, rawFinishReason)) {
     return undefined;
   }
 
@@ -81,12 +89,6 @@ export function createCompactContextExceededFinishError(
     finishReason: result.finishReason,
     rawFinishReason,
   });
-}
-
-function isCompactEmptyLengthFinish(result: RuntimeModelTextResult): boolean {
-  // GLM/Z.AI compact 可能以 length + 空文本完成，真实含义是没有可保存的 summary；
-  // 仅在 compact 路径把它归类为超窗压力，复用已有 prompt-too-long 降输入重试。
-  return result.finishReason.trim().toLowerCase() === "length" && result.text.trim().length === 0;
 }
 
 export async function persistCompactTimelineEvent(

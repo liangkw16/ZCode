@@ -1,5 +1,9 @@
 # Prompt Snapshot
 
+## Continuation model after compact (2026-11-15)
+
+A summary model only owns the summary request. New system blocks, tool/mode announcements and the next eligible prompt snapshot use the actual continuation Model (including execution/fallback/off-peak bindings). Build the candidate prefix without changing live history before commit; install and estimate the same prefix after commit. A temporary execution model does not become the session snapshot owner.
+
 Status: current behavior. Scope: main sessions (`querySourceForTask(taskType) === "main_turn"`) with a
 session store. Subagents and workflow actors do not use a snapshot.
 

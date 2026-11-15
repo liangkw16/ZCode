@@ -180,8 +180,11 @@ function resolveMicrocompactTrigger(input: {
   nowMs?: number;
   thresholdTokens?: number;
 }): MicrocompactTrigger | undefined {
-  const idleThresholdMinutes =
-    positiveInt(input.config.idleThresholdMinutes) ?? DEFAULT_MICROCOMPACT_IDLE_THRESHOLD_MINUTES;
+  const configuredIdle = input.config.idleThresholdMinutes;
+  // 配置允许小数分钟，整数化会把 0.5 分钟变成零并立即清理历史。
+  const idleThresholdMinutes = configuredIdle !== undefined && Number.isFinite(configuredIdle) && configuredIdle >= 0
+    ? configuredIdle
+    : DEFAULT_MICROCOMPACT_IDLE_THRESHOLD_MINUTES;
   if (
     input.lastAssistantCompletedAtMs !== undefined &&
     Number.isFinite(input.lastAssistantCompletedAtMs)

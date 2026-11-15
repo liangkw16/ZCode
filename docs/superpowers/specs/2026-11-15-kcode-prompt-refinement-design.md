@@ -199,5 +199,5 @@ flowchart LR
 - 最终 Core 全量 321 文件：5,076 通过、21 跳过；SQLite bundle 8 通过；Bootstrap/V4 相关 98 通过及压缩冷恢复定向 2 通过。最终 scripted 压缩/接续 4 项通过。
 - 根与 CLI typecheck 均通过（CLI 34/34 tasks）；根 lint 0 错误/537 告警，CLI lint 0 错误/88 告警、4 项上游行数存量接纳；架构检查 0 新问题，修改文件格式与 git diff --check 通过。
 - 后续闭合两个 E2E 失败：background-bash 的完整文本预期补入现有 provenance 前言，继续严格比较单路径通知；usage-anchor 三处异步 `createApp()` 补上 `await`，避免把 Promise 当作 App。先确认两项失败，再运行 scripted provider 整套 7/7 通过，涵盖 usage-anchor 全部五个场景；App helper 回归 4/4 通过。
-- V4 冷恢复全文件独立执行 `--maxWorkers=1 --reporter=verbose`：124/124 通过（10.61 秒）。此前 SIGTERM 本次未复现，原因仍未确认，未据此修改 runtime。未执行真实模型 A/B 或 Desktop/手机人工操作验收。
+- V4 冷恢复全文件独立执行 `--maxWorkers=1 --reporter=verbose`：124/124 通过（10.61 秒）。此前 SIGTERM 本次未复现，原因仍未确认，未据此修改 runtime。后续真实模型 A/B 已完成，见[独立对照报告](2026-11-15-kcode-real-model-ab.md)；Desktop/手机人工操作验收仍未执行。
 - 快照 tombstone 跨记录崩溃窗口、技能正文重载与 Read freshness 等既定限制保持上述说明，不宣称已消除。

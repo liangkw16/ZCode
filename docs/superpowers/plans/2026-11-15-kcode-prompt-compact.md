@@ -92,3 +92,9 @@ Native implementation completed on the existing kcode branch. Tasks 2 and 3 shar
 - [x] 单独完整运行 `v4-cold-resume.test.ts --maxWorkers=1 --reporter=verbose`：124/124 通过；此前 SIGTERM 原因未复现，不据此修改 runtime。
 - [x] 修复 usage-anchor 三处漏等异步 App 创建，补全 background-bash 的完整 provenance 文本断言。
 - [x] 全部 7 个 scripted case 通过；App helper 4/4 通过；根与 CLI typecheck/lint 通过（告警与前批一致），格式与架构检查通过。完成验证记录并提交。
+
+### Follow-up: real-model A/B
+
+- [x] 固定三场景、每场景两对的协议；独立编译 A=`0549bd90` 与 B=`8586658a` 的 Core，使用同一真实模型与受控配置执行全部 12 次任务。
+- [x] 两组均为任务 6/6、断言 54/54、主动验证 6/6；B 的总耗时与逻辑输入略增，未确认整体效率收益。四次冷恢复均观察到首次 Edit 被拒后的定向重读。
+- [x] 保存原始轨迹、外部验收和重算指标；完成[真实模型 A/B 报告](../specs/2026-11-15-kcode-real-model-ab.md)，同步既有验证记录。

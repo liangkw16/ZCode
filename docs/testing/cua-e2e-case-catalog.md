@@ -237,3 +237,10 @@ without an `available: true` field. Queries must not request screenshot probes, 
 results must never claim a grant. The local import additionally requires signed Helper verification,
 an authenticated standalone `broker_info` probe (including socket-close and timeout cases), a live
 permission query and a reversible native operation after installing the rebuilt app.
+
+CU-58 live macOS follow-up: after a manual grant, restart only the Helper and verify the UI
+converges. Exercise the real signed standalone Helper: authenticated health, both granted statuses,
+a decoded non-uniform foreign-window screenshot, and an AX tree with a screenshot. Presentation
+authority must accept a signed KCode Host whose responsible/parent passes the exact Main requirement,
+and reject the same Host identity under another signed parent. Retired or invented element tokens
+must still fail before input dispatch. Native action and post-install evidence remain required.

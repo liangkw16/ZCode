@@ -47,6 +47,8 @@ JavaScript 运行时和官方 Developer ID 签名的 Helper。用户明确授权
 - 所有消费方解析同一个导入 producer，桌面打包从同一来源附带经过验证的 Helper（本机身份适配见下）；原源码占位包与
   通用开源构建行为保持不变。导入失败直接停止构建，不生成部分可用的 Release。
 - Helper 继续拥有权限真值，服务只查询与映射；Renderer 共用现有权限 store，不新增权限缓存。
+- 打包 Main 的权限引导与 Host 必须使用相同的 production 运行环境、编译期产品 variant 和随包 Helper；
+  不继承 shell 的开发安装 variant。KCode 不得再指向 `computer-use/dev` 或 `0.0.0` 安装计划。
 - standalone 状态探测复用 producer 的认证健康检查（`authenticate` → `broker_info`），
   单次探测限时 300ms。不得发送协议未定义的 `ping`，socket 关闭或无响应必须结束探测。
 - 正常权限结果包含 `accessibility` / `screenRecording`，不要求 `available: true`；
@@ -88,7 +90,10 @@ REA 从官方 Helper 的 Node SEA 容器提取到完整 CJS 入口（源 SHA-256
 拒绝错误 identifier 和外部 Node。基于此，本机 KCode 导入产物使用独立身份，不占用官方 ZCode 权限主体：
 
 - launcher 固定 `dev.zcode.app.kcode` 与本机证书指纹；peer 固定同一证书，并保留 audit token、
-  同 UID、responsible/parent 进程验证；展示控制只接受 KCode 身份。
+  同 UID、responsible/parent 进程验证；展示控制只接受 KCode 身份。设置页启动的 standalone Helper
+  没有 `launcherPid` 时，已通过上述校验的 `dev.zcode.app.kcode.helper` Host 还必须由原生签名
+  校验确认其 responsible/parent 是精确 KCode 主进程身份，才可取得 presentation 权限；
+  不能仅把所有同证书子进程加入展示白名单。
 - 本机 producer 必须识别桌面已配置的 `kcode` 安装变体，安装到 `computer-use/kcode`；
   Host、Agent 与 Helper 共用独立 `kcode-cua-<uid>` socket 命名空间，避免正式版与 KCode
   互相探测或复用不匹配的 Helper。显式 socket 参数和非法变体拒绝规则继续生效。
@@ -103,3 +108,27 @@ REA 从官方 Helper 的 Node SEA 容器提取到完整 CJS 入口（源 SHA-256
 
 权限按钮的异步回调绑定当前 permission service 与 workspace context；服务或工作区变化后不得继续
 使用旧闭包查询或触发授权。插件总开关回调只依赖其实际读取的插件上下文，避免无关重建。
+
+### 2026-11-16 本机授权后的运行时复验
+
+系统设置勾选权限后，旧 Helper 仍报告 screen recording denied，新启动进程报告 granted；
+重启 Helper 后设置页收敛为两项已授权，无需重启 KCode 或回收 Agent。Helper 空闲五分钟后的
+`idle_timeout_reached` 是正常退出，不据此判定应用无响应。
+
+另外发现 standalone Helper 的展示鉴权缺口：Host 的签名 identifier 为
+`dev.zcode.app.kcode.helper`，旧适配只认主进程且没有 launcher lineage，导致
+`presentation authority requires a verified ZCode host peer`。本机身份适配应恢复上述精确父进程证明；
+不改 producer 通用签名、权限、元素 token 和 freshness 规则。验收须覆盖正确 Host 父进程通过、
+同证书但非 KCode 父进程拒绝、外部 Node 拒绝，以及真实截图、AX 读取与可恢复的原生操作。
+
+```mermaid
+sequenceDiagram
+    participant M as KCode Main（精确签名身份）
+    participant H as window-scoped Host（KCode helper 签名）
+    participant C as standalone CUA Helper（权限所有者）
+    M->>H: 启动 Host
+    H->>C: authenticate(role=presentation)
+    C->>C: 校验 audit token、UID、双方证书
+    C->>C: 原生验证 Host responsible/parent 的精确 Main 身份
+    C-->>H: 允许展示角色；其他身份 fail-closed
+```

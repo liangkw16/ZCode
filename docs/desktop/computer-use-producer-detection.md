@@ -35,3 +35,71 @@ Sharp 的暂存与校验仍以“producer 是否声明 Sharp 依赖”为准（`
 2. 占位包：`pnpm dev:desktop` 的准备脚本可加载，开发态插件运行时暂存返回空，Windows 不准备 Helper，
    打包不附带也不校验 Helper。
 3. 单测：`packages/desktop/test/placeholderProducerDetection.test.ts` 覆盖真实、占位、未安装三种情况与暂存跳过。
+
+## 本机 KCode 恢复（2026-11-16）
+
+本机两个源码 checkout 都只有占位 producer；`/Applications/ZCode.app` 3.18.2 提供同版本真实
+JavaScript 运行时和官方 Developer ID 签名的 Helper。用户明确授权恢复时，可从该本地产物
+提取 CUA 公共接口及其依赖闭包，作为本机 producer 输入；不得替换 Agent/Core、复制用户数据、
+引入官方应用启动副作用或取消签名、socket peer、token、freshness 等校验。
+
+- 本地导入产物记录来源版本、构建提交与 SHA-256，隔离保存在 gitignored 目录；不开源或提交私有产物。
+- 所有消费方解析同一个导入 producer，桌面打包从同一来源附带经过验证的 Helper（本机身份适配见下）；原源码占位包与
+  通用开源构建行为保持不变。导入失败直接停止构建，不生成部分可用的 Release。
+- Helper 继续拥有权限真值，服务只查询与映射；Renderer 共用现有权限 store，不新增权限缓存。
+- standalone 状态探测复用 producer 的认证健康检查（`authenticate` → `broker_info`），
+  单次探测限时 300ms。不得发送协议未定义的 `ping`，socket 关闭或无响应必须结束探测。
+- 正常权限结果包含 `accessibility` / `screenRecording`，不要求 `available: true`；
+  显式 `available: false` 才是不可用分支，空对象不能当作权限真值。
+- 首次权限查询只显示“正在检查权限”，不能在未收到 granted 前声称“已授权”。收到不可用结果后
+  明确显示不可用和可重试入口，不能继续展示普通授权状态；查询异常用尽既有重试后也应结束等待。
+- 不因修复展示而自动截图、修改系统 TCC 数据或绕过授权。功能探针仍需要显式用户操作。
+
+```mermaid
+sequenceDiagram
+    participant B as 本机导入/构建
+    participant H as 签名 Helper（权限所有者）
+    participant S as Host 权限服务
+    participant P as Renderer 共享权限 store
+    participant U as 设置页/输入框入口
+    B->>B: 校验同版运行时与 Helper，记录来源后打包
+    U->>P: 挂载/焦点/显式刷新
+    P->>S: 合并查询（保留已有 workspace identity）
+    S->>H: 校验并按既有链路启动，查询权限
+    H-->>S: granted / denied / stale / unknown 或不可用
+    S-->>P: 单次查询结果
+    P-->>U: 检查中 → 真实权限状态或不可用（重试有界）
+```
+
+验收：导入模块无 Host/MCP 自动启动副作用；真实 broker 查询可用；未授权不误报 granted；
+异常和不可用查询可结束等待并重试；macOS 本机设置页展示与 Helper 返回一致；完成一次可恢复的
+真实电脑操作及观察；打包/安装后从新 KCode 进程复验。保留开源占位 producer 的工程回归测试。
+
+本机恢复证据：官方包 3.18.2 / `2681f4af` 的 CUA 0.6.5 可提取为独立运行时，原 Helper
+完整签名校验通过。首次启动因 KCode 不具备官方 Apple Team 身份而被 launcher 校验拒绝。
+REA 随后提取到 Helper 完整入口，使下述独立证书适配成为可行方案；不使用 unsigned-launcher /
+any-peer 开关绕过校验。
+
+### 本机证书身份恢复约束
+
+REA 从官方 Helper 的 Node SEA 容器提取到完整 CJS 入口（源 SHA-256
+`b04ffba2a8d783a00404ea0ee92ea3d8471c58d529acf46ea4d83e393296718d`），无需修改原生 addon。
+本机原生 `verifyProcessCodeSignature` 实测可以严格验证 MyDesk 固定证书与 bundle identifier，
+拒绝错误 identifier 和外部 Node。基于此，本机 KCode 导入产物使用独立身份，不占用官方 ZCode 权限主体：
+
+- launcher 固定 `dev.zcode.app.kcode` 与本机证书指纹；peer 固定同一证书，并保留 audit token、
+  同 UID、responsible/parent 进程验证；展示控制只接受 KCode 身份。
+- 本机 producer 必须识别桌面已配置的 `kcode` 安装变体，安装到 `computer-use/kcode`；
+  Host、Agent 与 Helper 共用独立 `kcode-cua-<uid>` socket 命名空间，避免正式版与 KCode
+  互相探测或复用不匹配的 Helper。显式 socket 参数和非法变体拒绝规则继续生效。
+- Helper 固定独立 bundle identifier `dev.zcode.cua-helper.kcode`，与 launcher 使用同一证书；
+  installer 验证完整签名、精确证书和 identifier、版本、build、架构。签名不匹配仍立即拒绝。
+- 本机自签安装不声明 Apple notarization；精确证书验证取代官方 Apple Team/Gatekeeper 分发身份验证，
+  不使用 unsigned launcher、any peer 或环境变量扩展信任集合。
+- 修改仅发生于 gitignored 本机导入产物，原始官方应用与签名产物只读保留；记录导入、适配、签名后哈希。
+  node_modules 中所有 CUA 消费链接统一指向同一导入包，不引入第二条权限服务。
+- 必须验证外部进程/错误身份被拒、KCode 冷启动权限查询成功、真实可恢复操作和 freshness 校验仍生效，
+  以及签名和资源在安装后仍完整。若任一验证失败，不报告电脑控制修复完成。
+
+权限按钮的异步回调绑定当前 permission service 与 workspace context；服务或工作区变化后不得继续
+使用旧闭包查询或触发授权。插件总开关回调只依赖其实际读取的插件上下文，避免无关重建。

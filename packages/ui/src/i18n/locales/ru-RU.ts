@@ -8567,6 +8567,9 @@ const ruRU: Record<string, string> = {
   "cuaPermission.status.missing": "Отсутствует",
   "cuaPermission.status.unknown": "Неизвестно",
   "cuaPermission.status.stale": "Требуется проверка разрешения",
+  "cuaPermission.status.checking": "Проверка разрешений",
+  "cuaPermission.status.unavailable": "Не удалось проверить разрешения управления компьютером",
+  "cuaPermission.status.retry": "Проверить снова",
   "cuaPermission.status.verifying": "Выдано, проверка",
   "cuaPermission.probeVerifyingHint":
     "Системное разрешение есть. Проверяем реальное управление и захват экрана.",

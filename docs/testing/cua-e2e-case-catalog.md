@@ -227,3 +227,13 @@ lanes remain mandatory and must not be inferred from the macOS pass.
 
 - darwin on-machine MC-1/2/3: pending manual run (dev:desktop checklist in delivery notes)
 - MC-4..7/9: pending Windows real-machine
+
+## 2026-11-16 KCode local runtime recovery
+
+CU-58 (pending): `settings/computer-use/manual-review/pending/computer-use-permission-status.test.ts`.
+Use an isolated E2E home and the real settings UI; replace only the permission service response to
+cover unavailable, RPC rejection after bounded retries, explicit retry and a normal granted result
+without an `available: true` field. Queries must not request screenshot probes, and unresolved
+results must never claim a grant. The local import additionally requires signed Helper verification,
+an authenticated standalone `broker_info` probe (including socket-close and timeout cases), a live
+permission query and a reversible native operation after installing the rebuilt app.

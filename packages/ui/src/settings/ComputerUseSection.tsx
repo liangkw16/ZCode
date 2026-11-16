@@ -97,7 +97,10 @@ export function ComputerUseSection({
   const path = supportsLocalMacWorkspace ? (localWorkspacePath ?? workspacePath) : null;
   // 展示只跟 settled：fresh 每次查询开始都会落回 false，跟着它渲染会让授权按钮的文案
   // 在「验证中…」与终态之间切换、宽度随之跳变。
-  const { status, settled, refresh } = useCuaPermissionStatus(path ?? null, workspaceIdentity);
+  const { status, fresh, settled, refresh } = useCuaPermissionStatus(
+    path ?? null,
+    workspaceIdentity,
+  );
   const availableStatus = status && isCuaPermissionStatusAvailable(status) ? status : null;
 
   // macOS 版本门槛：低版本系统上 Helper 被 LaunchServices -10825 拒启，表象是授权反复无响应。
@@ -220,7 +223,7 @@ export function ComputerUseSection({
       targetWorkspaceIdentity = workspaceIdentity,
       restartOptions?: CuaPermissionRestartOptions,
     ): Promise<boolean> => {
-      if (!targetPath || !services || !cuaPermissionService) return Promise.resolve(false);
+      if (!targetPath || !cuaPermissionService) return Promise.resolve(false);
       if (restartPromiseRef.current) return restartPromiseRef.current;
       const targetContextKey = [targetPath, targetWorkspaceIdentity?.trim() ?? ""].join("\u0000");
       if (helperContextKeyRef.current === targetContextKey) {
@@ -284,7 +287,7 @@ export function ComputerUseSection({
       restartPromiseRef.current = operation;
       return operation;
     },
-    [path, workspaceIdentity, services, refresh, intl],
+    [path, workspaceIdentity, cuaPermissionService, refresh, intl],
   );
 
   const applyPendingGrant = useCallback(
@@ -355,7 +358,6 @@ export function ComputerUseSection({
       }
     },
     [
-      path,
       pluginManagementService,
       pluginToggleContextKey,
       refresh,
@@ -509,7 +511,16 @@ export function ComputerUseSection({
         }
       }
     },
-    [platform, path, services, workspaceIdentity, intl, applyPendingGrant, refresh],
+    [
+      platform,
+      path,
+      cuaPermissionService,
+      helperContextKey,
+      workspaceIdentity,
+      intl,
+      applyPendingGrant,
+      refresh,
+    ],
   );
 
   const onManualRestart = useCallback((): void => {
@@ -537,7 +548,7 @@ export function ComputerUseSection({
         <ExternalLink className="size-4" aria-hidden="true" />
         <span className="hidden sm:inline">
           {intl.formatMessage({
-            id: settled ? labelId : "cuaPermission.status.verifying",
+            id: settled ? labelId : "cuaPermission.status.checking",
           })}
         </span>
       </Button>
@@ -767,7 +778,24 @@ export function ComputerUseSection({
             </div>
           ) : null}
           {/* macOS 权限引导只保留在 Settings 内，CUA 操作与工具审批流不再自动弹权限 modal。 */}
-          {!macOsBelowCuaFloor ? (
+          {!macOsBelowCuaFloor && status && !availableStatus ? (
+            <SettingsGroupCard>
+              <SettingsRow
+                label={intl.formatMessage({ id: "cuaPermission.status.unavailable" })}
+                description={intl.formatMessage({ id: "cuaPermission.modal.unavailable" })}
+                control={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!fresh || !path}
+                    onClick={() => refresh()}
+                  >
+                    {intl.formatMessage({ id: "cuaPermission.status.retry" })}
+                  </Button>
+                }
+              />
+            </SettingsGroupCard>
+          ) : !macOsBelowCuaFloor ? (
             <SettingsGroupCard>
               <SettingsRow
                 controlLayout="wide"

@@ -1932,36 +1932,10 @@ export function createLocalServices(options: {
     const socketPath =
       process.platform === "win32" ? getStableCuaPipeName() : resolveBrokerSocketPath();
     try {
-      const { createConnection } = await import("node:net");
-      return await new Promise<string | null>((resolve) => {
-        const socket = createConnection(socketPath);
-        const finish = (value: string | null): void => {
-          socket.destroy();
-          resolve(value);
-        };
-        const timer = setTimeout(() => finish(null), 300);
-        socket.on("connect", () => {
-          clearTimeout(timer);
-          socket.write(`{"id":0,"method":"ping","params":{}}\n`);
-          let buffer = "";
-          socket.on("data", (chunk: Buffer) => {
-            buffer += chunk.toString("utf8");
-            if (buffer.includes("\n")) {
-              try {
-                const nl = buffer.indexOf("\n");
-                const reply = JSON.parse(buffer.slice(0, nl)) as { ok?: boolean };
-                finish(reply.ok === true ? socketPath : null);
-              } catch {
-                finish(null);
-              }
-            }
-          });
-        });
-        socket.on("error", () => {
-          clearTimeout(timer);
-          finish(null);
-        });
-      });
+      // 真实 Helper 只接受认证后的 broker_info；旧裸 ping 不在协议中，且关闭连接会让探测悬挂。
+      const { probeHelperHealth } = await import("@zcode/zcode-cua/broker/helperHealth");
+      await probeHelperHealth(socketPath, { timeoutMs: 300, perTryTimeoutMs: 300 });
+      return socketPath;
     } catch {
       return null;
     }

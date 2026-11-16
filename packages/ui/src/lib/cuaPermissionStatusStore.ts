@@ -179,7 +179,10 @@ function isFunctionallyReady(result: CuaPermissionStatusResult | null): boolean 
 }
 
 /** 应用 sticky 探针，返回真正对外发布的结果。 */
-function withStickyProbes(slot: Slot, result: CuaPermissionStatusResult): CuaPermissionStatusResult {
+function withStickyProbes(
+  slot: Slot,
+  result: CuaPermissionStatusResult,
+): CuaPermissionStatusResult {
   if (!("accessibility" in result)) {
     slot.stickyReady = null;
     return result;
@@ -294,16 +297,7 @@ export function fetchCuaPermissionStatus(params: FetchCuaPermissionStatusParams)
         fetchCuaPermissionStatus({ service, workspacePath, workspaceIdentity });
         return;
       }
-      // 查询失败 / Helper 尚未 running 都是环境瞬态，不是授权终态。还有重试额度时保留上一状态
-      // （fresh=false 表示未确认），让退避重试去收敛。
-      //
-      // 额度用尽后两个分支的归宿不同，这里如实说明：
-      // - 结果是 unavailable（Helper 确实起不来）→ 落到下方如实发布，UI 显示错误态；
-      // - 查询 reject（RPC 通道故障）→ 落到 `if (!completed)`，只保留 lastKnown + fresh=false，
-      //   **不产生错误终态**。冷启动且无缓存时入口会停在 starting、设置页停在「验证中」，
-      //   直到下一次真实事件（focus / 重新挂载 / 显式 refresh）重新采样。这是刻意的：通道故障
-      //   说明「我们不知道权限状态」，而不是「权限有问题」，把它渲染成红色错误会误导用户去
-      //   重新授权。代价是这种故障下没有可见的错误提示，仅在 RPC 持续失败时出现。
+      // RPC 失败并不表示未授权；先保留旧结果重试，耗尽后发布“无法查询”，避免冷启动永远验证中。
       const transient = !completed || !isCuaPermissionStatusAvailable(completed);
       if (transient && scheduleTransientRetry(slot, params)) {
         publish(slot, {
@@ -314,11 +308,12 @@ export function fetchCuaPermissionStatus(params: FetchCuaPermissionStatusParams)
         return;
       }
       if (!completed) {
-        // reject 且重试额度已用尽：保留 lastKnown + fresh=false，等下一次真实事件（见上）。
+        slot.retryAttempt = 0;
+        slot.stickyReady = null;
         publish(slot, {
-          status: slot.snapshot.status,
-          fresh: false,
-          settled: slot.snapshot.settled,
+          status: { available: false, reason: "Computer Use permission status query failed." },
+          fresh: true,
+          settled: true,
         });
         return;
       }

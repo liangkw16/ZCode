@@ -8411,6 +8411,9 @@ const koKR: Record<string, string> = {
   "cuaPermission.status.missing": "없음",
   "cuaPermission.status.unknown": "알 수 없음",
   "cuaPermission.status.stale": "권한 확인 필요",
+  "cuaPermission.status.checking": "권한 확인 중",
+  "cuaPermission.status.unavailable": "컴퓨터 제어 권한을 확인할 수 없습니다",
+  "cuaPermission.status.retry": "다시 확인",
   "cuaPermission.status.verifying": "허용됨, 확인 중",
   "cuaPermission.probeVerifyingHint":
     "시스템 권한이 있습니다. 실제 제어 및 화면 캡처를 확인하는 중입니다.",

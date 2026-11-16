@@ -246,3 +246,12 @@ a decoded non-uniform foreign-window screenshot, and an AX tree with a screensho
 authority must accept a signed KCode Host whose responsible/parent passes the exact Main requirement,
 and reject the same Host identity under another signed parent. Retired or invented element tokens
 must still fail before input dispatch. Native action and post-install evidence remain required.
+
+### CU-59：macOS Helper 原生启动就绪
+
+- 从未运行状态由设置页启动 Helper，及直接打开已安装 Helper，检查 macOS 启动完成状态。
+- 加载 addon 后、原生初始化前的隔离探针必须能复现未就绪；已有 `ghostInit` / `ghostHide`
+  初始化后必须完成启动，覆盖层保持隐藏，不以外部 ready signal 或延长超时替代。
+- 保留旧 build ID 的已安装 Helper；生产模式安装器须识别 payload 新 build ID 并自动替换，严格签名校验继续通过。
+- 再次打开不出现“不响应”；真实模型通过 UI 完成专用 TextEdit 文档修改与保存。
+- 权限主体、严格 peer 签名/父进程校验、控制权租约与空闲自退规则保持有效。

@@ -140,3 +140,36 @@ sequenceDiagram
 seed 锁自动更新用户缓存；详见 CLI plugin-compat 的 build identity 合同与 CU-58。
 恢复的 ESM 产物重新 bundle 时也须通过 import/MCP smoke，避免 createRequire 导入名
 与宿主 banner 冲突。验收不手动清除旧缓存；运行时需观察、修改、保存专用 TextEdit 文档。
+
+### macOS Helper 启动就绪
+
+Helper 的 broker 可连接与 macOS 应用启动完成是两个不同条件。签名 Helper 负责在启动时调用
+原生模块已有的 AppKit 初始化，再保持覆盖层隐藏；完成初始化后才对外报告 broker ready。
+不能等待首次控制权申请、PiP 或鼠标动作才初始化，也不能通过延长 `open` 超时或外部
+`lsappinfo signal` 伪造就绪。权限查询仍由原 Helper 返回，不改变 TCC 主体、peer 校验和控制权租约。
+
+本机证据：同一签名 Node SEA 探针在只加载 addon 后为 `!cgsConnection !signalled`，
+调用已有 `ghostInit()` / `ghostHide()` 后两标记均消失。REA 原生反汇编确认
+`GhostInit → EnsureGhostInit → NSApplication.finishLaunching`；其 AppKit pump 复用 libuv。
+此证据确认启动初始化遗漏，Finder 的重复打开和真实模型操作仍须分别验收。
+
+本地恢复包每次改变 Helper payload 时，必须从 payload 摘要生成新的 build ID，
+同步写入 Helper Info.plist、Host 与模型侧安装器，并传给 node-repl bundle 的构建身份。
+保留已安装旧 Helper 验收自动升级；不得靠手动覆盖用户安装目录来证明升级成功。
+
+```mermaid
+sequenceDiagram
+    participant L as LaunchServices
+    participant H as Helper 主线程
+    participant N as 已有原生 addon
+    participant C as Host / 模型客户端
+    L->>H: 启动签名 Helper
+    H->>N: ghostInit / ghostHide（保持隐藏）
+    N-->>L: AppKit finishLaunching
+    H->>H: 建立并认证 broker
+    H-->>C: ready / 真实权限状态
+    C->>H: 控制请求（保留身份与租约校验）
+```
+
+验收：设置页先启动和独立打开均能结束 macOS 启动阶段；重复打开不出现“不响应”；
+真实模型可观察、编辑并保存专用验收文档，空闲自退及下一次按需启动继续有效。

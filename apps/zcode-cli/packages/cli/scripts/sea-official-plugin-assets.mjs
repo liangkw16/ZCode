@@ -64,7 +64,7 @@ export const officialSeaPlugins = [
     requiresRuntime: true,
     requiredRuntimePaths: ["dist/mcp/server.js"],
     rootPath: join("packages", "node-repl-host"),
-    version: "0.7.0",
+    version: "0.7.1",
   },
   {
     marketplace: "zcode-plugins-official",

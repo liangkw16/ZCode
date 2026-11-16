@@ -173,3 +173,31 @@ sequenceDiagram
 
 验收：设置页先启动和独立打开均能结束 macOS 启动阶段；重复打开不出现“不响应”；
 真实模型可观察、编辑并保存专用验收文档，空闲自退及下一次按需启动继续有效。
+
+
+### 已安装截图依赖闭环（2026-11-16）
+
+原生 Helper 已返回截图且屏幕录制权限为 granted 时，模型宿主仍可能因缓存缺少 Sharp 而在
+图片探测阶段丢弃 image block。权限查询成功或 AX 文字可读均不能替代真实图片验收。
+`node-repl-host` 的 filesystem seed 必须携带桌面构建已暂存的最小 `node_modules` 闭包，
+包括 Sharp JS、对应平台的 addon 与 libvips；不从工作区或其他插件缓存借用依赖。
+本次宿主补丁版本为 0.7.1，通过既有版本目录和 seed 锁更新已安装的 0.7.0 缓存。
+占位 CUA 构建未暂存 Sharp 时仍保持原有行为，不强制增加截图依赖。
+
+```mermaid
+sequenceDiagram
+    participant B as Desktop 构建
+    participant S as bootstrap seed（缓存唯一写入者）
+    participant H as node-repl-host 缓存进程
+    participant C as CUA Helper
+    B->>B: 暂存平台 Sharp 闭包
+    S->>B: 读取宿主版本和运行时资产
+    S->>S: seed 锁内原子生成 0.7.1 缓存
+    H->>H: 从自身缓存解析 Sharp
+    H->>C: 已鉴权的 app 截图请求
+    C-->>H: 截图字节
+    H-->>H: 解码并投影 image block
+```
+
+验收：保留旧缓存，用真实配置冷启动；从新缓存解析 Sharp 并解码合成 PNG，通过真实模型
+取得专用 TextEdit 窗口的 image block。不得手工补用户缓存或使用文件内容代替截图。

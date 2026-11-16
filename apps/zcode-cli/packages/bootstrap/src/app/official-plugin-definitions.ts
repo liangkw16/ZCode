@@ -183,13 +183,15 @@ export const OFFICIAL_PLUGIN_DEFINITIONS: readonly OfficialPluginDefinition[] = 
     buildIdentityPath: NODE_REPL_HOST_BUILD_IDENTITY_PATH,
     name: OFFICIAL_NODE_REPL_HOST_PLUGIN_NAME,
     requiredSeedPaths: OFFICIAL_NODE_REPL_HOST_REQUIRED_SEED_PATHS,
+    // 截图解码在共享宿主内执行；漏播桌面已暂存的 Sharp 闭包会使真实图片被当成无截图丢弃。
+    runtimeTopLevelPaths: ["node_modules"],
     rootCandidates: [
       "packages/node-repl-host",
       "../node-repl-host",
       "../../node-repl-host",
       "../../../node-repl-host",
     ],
-    version: "0.7.0",
+    version: "0.7.1",
   },
   {
     listing: {

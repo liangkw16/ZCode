@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
@@ -419,6 +420,43 @@ describe("bundled official plugin cache resilience", () => {
       "original source",
     );
     expect(JSON.parse(await readFile(markerPath, "utf8")).hash).toBe("legacy-content-hash");
+  });
+
+  it("upgrades the node host cache with its staged Sharp runtime closure", async () => {
+    const storageRoot = await createStorageRoot(cleanups);
+    const definition = OFFICIAL_PLUGIN_DEFINITIONS.find((item) => item.name === "node-repl-host")!;
+    const entrypointRoot = join(storageRoot, "versioned-source");
+    const root = join(entrypointRoot, "packages", "node-repl-host");
+    const payloads = {
+      ".zcode-plugin/plugin.json": JSON.stringify({
+        name: definition.name,
+        version: definition.version,
+      }),
+      "dist/mcp/server.js": "// bundled host",
+      "node_modules/sharp/package.json": '{"name":"sharp","main":"lib/index.js"}',
+      "node_modules/sharp/lib/index.js": 'module.exports = { versions: { vips: "fixture" } };',
+      "node_modules/@img/sharp-darwin-arm64/lib/sharp.node": "native addon fixture",
+      "node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips.dylib": "libvips fixture",
+    };
+    for (const [path, text] of Object.entries(payloads)) {
+      const target = join(root, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, text);
+    }
+    const oldRoot = join(storageRoot, OFFICIAL_CACHE_ROOT, definition.name, "0.7.0");
+    await mkdir(oldRoot, { recursive: true });
+    await writeFile(join(oldRoot, "old-cache"), "preserved");
+    process.argv[1] = join(entrypointRoot, "zcode.cjs");
+
+    await resolveOfficialPluginRoots({ storageRoot });
+
+    const targetRoot = join(storageRoot, OFFICIAL_CACHE_ROOT, definition.name, definition.version);
+    const sharp = createRequire(join(targetRoot, ".zcode-plugin", "plugin.json"))("sharp");
+    expect(sharp.versions.vips).toBe("fixture");
+    expect(definition.version).not.toBe("0.7.0");
+    for (const [path, text] of Object.entries(payloads))
+      expect(await readFile(join(targetRoot, path), "utf8")).toBe(text);
+    expect(await readFile(join(oldRoot, "old-cache"), "utf8")).toBe("preserved");
   });
 
   it("reseeds the same filesystem version when its declared build identity changes", async () => {

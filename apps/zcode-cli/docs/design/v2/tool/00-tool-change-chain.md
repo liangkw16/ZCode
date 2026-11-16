@@ -1,5 +1,12 @@
 # Tool Change Chain Spec
 
+## 已安装 CUA 截图依赖（2026-11-16）
+
+Desktop 暂存 Sharp → node-repl-host filesystem seed 携带 `node_modules` → 冷启动从
+0.7.0 自动升级到 0.7.1 → 缓存内原生图片解码 → 通用 image block。只复用既有资产白名单、
+版本目录与 seed 锁，不改权限、工具 schema、控制权或 frame freshness。回归覆盖缓存内
+Sharp 模块及平台二进制，真实模型须取得专用 TextEdit 窗口截图。
+
 ## 已安装 CUA 工具缓存更新（2026-11-16）
 
 `node-repl-host` 构建 → server bundle SHA-256 + Helper build id → 既有 build identity

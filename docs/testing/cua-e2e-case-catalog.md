@@ -255,3 +255,11 @@ must still fail before input dispatch. Native action and post-install evidence r
 - 保留旧 build ID 的已安装 Helper；生产模式安装器须识别 payload 新 build ID 并自动替换，严格签名校验继续通过。
 - 再次打开不出现“不响应”；真实模型通过 UI 完成专用 TextEdit 文档修改与保存。
 - 权限主体、严格 peer 签名/父进程校验、控制权租约与空闲自退规则保持有效。
+
+
+### CU-60：已安装模型截图依赖
+
+- 保留旧版 node-repl-host 0.7.0 缓存，真实用户配置冷启动后自动生成 0.7.1 完整缓存。
+- CLI 回归验证宿主携带已暂存的 Sharp JS、平台 addon 和 libvips，不依赖其他插件目录。
+- 新缓存能解码合成 PNG，真实模型通过电脑工具取得专用 TextEdit 窗口的 image block。
+- 文字读取、编辑保存、权限和 Helper 正常启动继续有效；不以 AX 文字替代图片通过。

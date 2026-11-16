@@ -107,22 +107,29 @@ export function toAiSdkMessages(
             { context: { role: message.role } },
           );
         }
+        // AX 截断可能留下半个 emoji；只修复请求文本副本，让旧历史重发也能通过 UTF-8 编码。
+        const content =
+          typeof message.content === "string"
+            ? message.content.toWellFormed()
+            : message.content.map((block) =>
+                block.type === "text" ? { ...block, text: block.text.toWellFormed() } : block,
+              );
         const toolName = projectToolNameForProvider(message.toolName, options);
         // 含 video 的 tool result 在所有 provider kind 上都强制 textify + 后置投影：
         // AI SDK tool result part 无 video 变体，anthropic 内嵌路径同样会丢失视频内容。
         const messageTextifyToolResult =
-          textifyStructuredToolResults || toolResultHasVideoMedia(message.content);
+          textifyStructuredToolResults || toolResultHasVideoMedia(content);
 
         // 通用 fail-closed：帧引用结果在媒体不可投递时整体错误化（约束：
         // 引用文本不得与"媒体不可用"占位符同现，否则 actionable frame_id 会诱导
         // 模型对未见过画面的坐标产生动作）。
-        const frameReferenceFailure = undeliverableFrameReferenceText(message.content, options);
+        const frameReferenceFailure = undeliverableFrameReferenceText(content, options);
 
         const toolMediaParts =
           frameReferenceFailure === undefined &&
           messageTextifyToolResult &&
           message.isError !== true
-            ? toToolResultMediaUserParts(message.content, {
+            ? toToolResultMediaUserParts(content, {
                 ...options,
                 toolName,
               })
@@ -140,7 +147,7 @@ export function toAiSdkMessages(
               output: frameReferenceFailure
                 ? { type: "error-text", value: frameReferenceFailure }
                 : toAiSdkToolResultOutput(
-                    message.content,
+                    content,
                     options,
                     message.isError === true,
                     messageTextifyToolResult,

@@ -433,6 +433,23 @@ trace span 和结构化日志，不进入 provider-visible HTTP header。上述�
 - pending/running tool call 在恢复请求时补成 interrupted result。
 - providerOptions 只允许来自配置白名单或调用方显式 role policy。
 
+工具结果的字符串及 `text` block 在请求投影入口统一调用 `String.prototype.toWellFormed()`，将未配对的 UTF-16 surrogate 替换为 U+FFFD，完整 emoji 和其他合法字符原样保留。外部 AX 结果可能在截断处留下半个 emoji；JSON 转义并不能保证 provider 解码后的文本可编码为 UTF-8。该规则覆盖成功、失败、结构化结果及所有 provider，也覆盖中断后从旧历史重发的请求。投影必须发生在媒体拆分之前，保持帧引用和截图配对规则。
+
+CLI/runtime 继续拥有 canonical history；adapter 只生成本次请求的文本副本，不回写历史，不修改 reasoning 签名、工具参数、媒体字节或权限状态。流式和非流式请求复用同一转换入口。
+
+```mermaid
+sequenceDiagram
+    participant R as CLI/runtime（历史所有者）
+    participant A as Model Transform
+    participant P as Provider
+    R->>A: 历史工具结果（含可能残缺的 surrogate）
+    A->>A: 修复文本副本，再投影媒体
+    A->>P: 合法 Unicode 请求
+    Note over R: canonical history 保持不变，重试复用相同规则
+```
+
+验收：含孤立高/低 surrogate、合法 emoji 的字符串及结构化工具结果均可投影；成功与失败结果保留原有语义；真实 Anthropic 请求中解码后的工具文本可编码为 UTF-8。同一份旧历史连续重发仍成功，原历史不变；现有媒体配对、缓存和 reasoning 回放回归继续通过。
+
 后续 provider quirks 可以继续加在这里，但不能散落到 agent loop。
 
 ---

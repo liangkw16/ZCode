@@ -263,3 +263,11 @@ must still fail before input dispatch. Native action and post-install evidence r
 - CLI 回归验证宿主携带已暂存的 Sharp JS、平台 addon 和 libvips，不依赖其他插件目录。
 - 新缓存能解码合成 PNG，真实模型通过电脑工具取得专用 TextEdit 窗口的 image block。
 - 文字读取、编辑保存、权限和 Helper 正常启动继续有效；不以 AX 文字替代图片通过。
+
+
+### CU-61：中断后含残缺 Unicode 的工具历史恢复
+
+- 构造 AX 工具结果包含被截断的半个 emoji；模型适配层回归覆盖字符串、结构化文本、失败结果和各 provider 投影。
+- 同一份旧历史连续重发时，provider 收到的解码后文本无孤立 surrogate；合法 emoji、历史原文、媒体配对和错误语义保持有效。
+- 已安装版本中，保留发生 UTF-8 编码 500 的原会话，发送仅查询窗口与截图的后续请求，验证无需删除历史即可完成。
+- 在专用验收会话发起真实模型电脑操作，主动中断，再次发送只读电脑操作；须重新取得真实窗口 AX 与 image block，并检查无该编码 500 或 Helper“不响应”。

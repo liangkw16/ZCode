@@ -1,5 +1,13 @@
 # Tool Change Chain Spec
 
+## 已安装 CUA 工具缓存更新（2026-11-16）
+
+`node-repl-host` 构建 → server bundle SHA-256 + Helper build id → 既有 build identity
+→ bootstrap seed 锁内比较/替换 → 用户缓存 MCP server → CUA runtime → 真实 Helper。
+版本号与 Helper build id 相同但 runtime 改变时必须重建缓存；不能只验证安装包中的真实实现。
+工具 schema、权限、模型提示词、freshness 和协议投递语义保持原合同。回归覆盖产物摘要与
+同版本缓存替换，安装验收用真实用户配置冷启动后执行专用 TextEdit 文档的观察、修改、保存。
+
 ## 提示词与压缩修复链（2026-11-15）
 
 本批实现合同见 docs/superpowers/specs/2026-11-15-kcode-prompt-refinement-design.md（仓库根相对路径）。链路为来源化公告 → Main/Workflow 提示词 → 摘要输出完整性检查 → 接续模型上下文 → summary/boundary/完成 timeline 原子提交 → live 安装 → 编号事件有界补投 → Desktop continuous 与手机 replayable 恢复。工具 schema 与权限执行不变，压缩提交后不能重新生成摘要或反写失败。

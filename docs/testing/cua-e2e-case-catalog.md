@@ -87,6 +87,8 @@ model-visible raster -> integer x/y only
 | CU-56 |  P0 | Agent spawn credentials are process-stable pure data (MC-1/3/4/8): darwin stable socket + per-spawn authority; win32 stable pipe + ZCODE_CUA_WIN_HELPER_RECIPE; no Helper IO, no health verdict, no marker, no acquire; authorization-flow managed host does not feed spawn credentials | agentProxyEnv lazy-spawn source contract + stableCuaTransport pipe contracts | consumer integration + live-macos (win32 pending real-machine) |
 | CU-57 |  P1 | win32 settings getStatus truth chain (MC-9): probe stable pipe -> host fork -> permission_status truth; launch failure degrades to idle:true copy | stableCuaTransport pipe contracts; full chain owned by the live lane | live-windows (pending real-machine) |
 
+| CU-58 | P0 | Same plugin version and Helper build id with changed node-repl runtime invalidates the seeded cache; installed real-profile cold start executes actual model CUA observation, edit and save | node-repl bundle digest smoke + bootstrap same-build-id reseed + dedicated TextEdit model task | CLI regression + live-macos |
+
 ## Deterministic application launch model lane
 
 CU-47 is split into independent setup/action/oracle cases so a broad native-app

@@ -456,6 +456,16 @@ describe("bundled official plugin cache resilience", () => {
         '{"cuaHelperBuildId":"pipeline-2"}\n',
       );
 
+      // Helper build id 没变而 CUA runtime 已变化，空 build id 也不能复用占位缓存。
+      for (const runtimeSha256 of ["placeholder-runtime", "real-runtime"]) {
+        const identity = `${JSON.stringify({ cuaHelperBuildId: "", runtimeSha256 })}\n`;
+        await writeFile(identityPath, identity);
+        await writeFile(fixture.payload, runtimeSha256);
+        await resolveOfficialPluginRoots({ storageRoot });
+        expect(await cachedPayload()).toBe(runtimeSha256);
+        expect(JSON.parse(await readFile(markerPath, "utf8")).buildIdentity).toBe(identity);
+      }
+
       // 旧客户端写入的 marker 没有构建身份，同样视为过期。
       const marker = JSON.parse(await readFile(markerPath, "utf8"));
       delete marker.buildIdentity;

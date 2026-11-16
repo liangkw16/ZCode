@@ -132,3 +132,11 @@ sequenceDiagram
     C->>C: 原生验证 Host responsible/parent 的精确 Main 身份
     C-->>H: 允许展示角色；其他身份 fail-closed
 ```
+
+### 2026-11-16 已安装模型链路复验
+
+设置页和原生探针通过不能代替模型链路验收：真实配置冷启动曾复用同版本的 node-repl
+占位缓存，实际模型调用仍报不可用。node-repl 构建身份必须包含完成产物的摘要，按既有
+seed 锁自动更新用户缓存；详见 CLI plugin-compat 的 build identity 合同与 CU-58。
+恢复的 ESM 产物重新 bundle 时也须通过 import/MCP smoke，避免 createRequire 导入名
+与宿主 banner 冲突。验收不手动清除旧缓存；运行时需观察、修改、保存专用 TextEdit 文档。

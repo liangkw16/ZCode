@@ -316,11 +316,33 @@ for copying. Validate the staged manifest and required paths before publication.
 A definition may declare `buildIdentityPath` when its build output embeds a
 per-build value that does not change the plugin version. node-repl-host uses
 `dist/build-identity.json`, written by its build script, because
-`dist/mcp/server.js` embeds the CUA Helper build id. Source preparation reads
-only that small file and stores its contents in the marker as `buildIdentity`.
+`dist/mcp/server.js` embeds the CUA Helper build id. The identity contains both
+`cuaHelperBuildId` (which may be empty in local builds) and `runtimeSha256`, the
+SHA-256 of the completed server bundle. Changing the runtime, including replacing
+a placeholder CUA producer with the real producer, must invalidate the cache even
+when the plugin version and Helper build id stay unchanged. Identical bundle bytes
+must produce identical identity bytes. Source preparation reads only that small
+file and stores its contents in the marker as `buildIdentity`.
 A different value, or a legacy marker without the field, rebuilds the cache like
 a version change. A missing source file compares as no identity and does not
 block seeding.
+
+The build script owns identity generation; the existing bootstrap seed lock owns
+cache replacement. No runtime hashing, second cache, or manual cache deletion is
+required. Regression evidence covers the generated bundle digest, unchanged
+identity reuse, and same-version/same-Helper-id runtime changes.
+
+```mermaid
+sequenceDiagram
+    participant B as node-repl-host build
+    participant S as bootstrap seed owner
+    participant C as official plugin cache
+    B->>B: Bundle server, hash completed bytes, write identity
+    S->>C: Read seed marker under existing seed lock
+    S->>S: Compare version, required entries and build identity
+    S->>C: Replace outdated runtime via existing staged publication
+    C-->>S: Execute MCP server from current cache
+```
 
 SEA releases embed the same files as SEA assets and extract them to the same
 official cache path on first startup or when the embedded plugin hash changes.

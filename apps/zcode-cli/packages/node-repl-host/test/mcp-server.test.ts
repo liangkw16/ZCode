@@ -713,6 +713,85 @@ describe("node_repl MCP server", () => {
     }
   });
 
+  it.each(["timeout", "cancel"])("drains CUA input after %s before admitting the next cell in the same session", async (mode) => {
+    let releaseInput!: () => void;
+    let started!: () => void;
+    const inputStarted = new Promise<void>((resolve) => { started = resolve; });
+    const inputFinished = new Promise<void>((resolve) => { releaseInput = resolve; });
+    const cleanupStarted = Promise.withResolvers<void>();
+    const allowCleanup = Promise.withResolvers<void>();
+    let cleanupCalls = 0;
+    let activeInput = false;
+    let nextCellEntered = false;
+    const executeJs = createInProcessNodeReplExecutor();
+    const useRuntime = createNodeReplMcpRuntime({
+      executeJs: async (input) => {
+        if (input.code.includes("get_app_state")) nextCellEntered = true;
+        return executeJs(input);
+      },
+      cuaRuntime: {
+        execute: async ({ toolName, signal }) => {
+          if (toolName === "key") {
+            signal?.addEventListener("abort", () => {
+              cleanupStarted.resolve();
+              void allowCleanup.promise.then(releaseInput);
+            }, { once: true });
+            activeInput = true;
+            started();
+            // 已发送的原生动作收到取消后仍需异步收尾，不能把 AbortSignal 当成完成。
+            await inputFinished;
+            activeInput = false;
+          }
+          if (activeInput) throw new Error("input_busy");
+          return { content: [{ type: "text", text: "observed" }] };
+        },
+        closeSession: async () => { cleanupCalls += 1; },
+        dispose: async () => undefined,
+      },
+    });
+    const useClient = new Client({ name: "cua-cancel-reconnect", version: "0.1.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await useRuntime.server.connect(serverTransport);
+    await useClient.connect(clientTransport);
+    const meta = { "com.zcode/request-context": {
+      ...requestMeta("cua-cancel-session")["com.zcode/request-context"],
+      workspace_path: "/workspace",
+    } };
+    const controller = new AbortController();
+    const call = (toolName: string, timeout = 5_000, signal?: AbortSignal) => useClient.callTool({
+      name: "js",
+      arguments: {
+        code: `await globalThis[Symbol.for("zcode.node-repl.computer-use-bridge")].call("${toolName}", {});`,
+        timeout_ms: timeout,
+      },
+      _meta: meta,
+    }, { signal });
+    try {
+      const cancelled = call("key", mode === "timeout" ? 200 : 5_000, controller.signal)
+        .catch((error: unknown) => error);
+      await inputStarted;
+      if (mode === "cancel") controller.abort();
+      await cleanupStarted.promise;
+      expect(activeInput).toBe(true);
+      const reconnecting = call("get_app_state");
+      void reconnecting.catch(() => undefined);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(nextCellEntered).toBe(false);
+      allowCleanup.resolve();
+      await cancelled;
+      const reconnected = await reconnecting;
+      expect(cleanupCalls).toBe(0);
+      expect(activeInput).toBe(false);
+      expect(reconnected.isError).not.toBe(true);
+      expect(cleanupCalls).toBe(0);
+    } finally {
+      allowCleanup.resolve();
+      releaseInput();
+      await useClient.close();
+      useRuntime.dispose();
+    }
+  });
+
   it("marks runtime calls that reach the real brokers, end to end, and nothing else", async () => {
     // 真实 MCP server + 两个 broker：浏览器上游拒绝命令、CUA runtime 抛错，cell 也都接住了错误；
     // 口径是真实尝试，两个 key 照样写出（session-features-header.md「BUA/CUA 标签的补充规则」）。

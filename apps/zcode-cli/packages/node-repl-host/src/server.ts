@@ -36,7 +36,7 @@ import {
   type ActiveCuaNodeReplCall,
   type NodeReplCuaBrokerConnection,
 } from "./cua-bridge.js";
-import { createNodeReplCuaBroker, type NodeReplCuaBroker } from "./cua-broker.js";
+import { createNodeReplCuaBroker } from "./cua-broker.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
 import {
   isDirectMcpEntrypoint,
@@ -288,6 +288,7 @@ export function createNodeReplMcpRuntime(
           return result;
         } finally {
           call.close();
+          await cuaBroker?.finishCall(call.token);
           activeCalls.delete(callController);
         }
       });

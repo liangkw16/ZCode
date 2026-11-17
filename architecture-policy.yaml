@@ -1880,6 +1880,16 @@ modules:
       adapters: .
     owner: agent
 
+  - id: kcode-cua
+    roots: [packages/zcode-cua/src, packages/zcode-cua/native, packages/zcode-cua/scripts, packages/zcode-cua/test]
+    managed: true
+    requires: []
+    publicEntrypoints:
+      - packages/zcode-cua/src/contract.ts
+      - packages/zcode-cua/src/index.ts
+    layers: {contract: contract, domain: domain, app: app, adapters: .}
+    owner: runtime
+
 global:
   # 临时时间戳（2026-09-10）：unmanaged-new-file 只约束此日期之后首次入库的文件。
   # 基于领先 staging 很多的分支开工时，merge-base 之前的"新增"文件不应被追溯。
@@ -2344,11 +2354,7 @@ exceptions:
       - apps/zcode-cli/packages/node-repl-host/src/no-progress-guard.ts
       - apps/zcode-cli/packages/node-repl-host/src/tool-contract.ts
     reason: Admitted upstream node_repl host gains a self-contained no-progress hint file and a serverInfo version bump; adopting the whole node-repl-host package needs a separate module boundary refactor.
-  - id: zcode-cua-unmanaged-new-files
-    rule: unmanaged-new-file
-    paths:
-      - packages/zcode-cua/src/**
-    reason: The whole zcode-cua producer package (broker, native adapters, tools) entered the repo after the gate timestamp as pre-existing code moved from a separate repository; adopting its internal layers needs a dedicated CONTRACT pass (it has known internal cycles by design), not a mechanical split in this branch.
+
   - id: ui-more-locales-new-files
     rule: unmanaged-new-file
     paths:

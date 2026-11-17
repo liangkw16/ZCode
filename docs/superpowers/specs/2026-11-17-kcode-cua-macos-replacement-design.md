@@ -1,6 +1,6 @@
 # KCode CUA：macOS 源码实现与 M2 验收设计
 
-日期：2026-11-17。状态：路线 A 已由用户选择；本文已完成独立 builder check，待用户批准，尚未进入实现。
+日期：2026-11-17。状态：用户已批准路线 A，并要求结合 AutoGLM、UI-TARS、Codex 调研直接实施；进入源码实现与 M2 验收，验收完成前不标记可交付。
 
 ## 1. 目的与完成标准
 
@@ -66,7 +66,20 @@ SSH alias `m2` 可连接；Apple M2 Pro / arm64，macOS 27.2.1，有 console use
 4. macOS 产品地板统一为 **13.0**，与当前主应用一致；同步 Helper plist、OS gate、文档及打包检查。截图在 macOS 13 使用 ScreenCaptureKit 的 stream 路径；较新 API 只在 availability 检查后使用，不能把 macOS 14 才有的路径当作唯一实现。
 5. 支持 arm64 和 x64 的编译入口；本轮强制的硬件运行验收为 M2 arm64。x64 编译通过不能表述为 Intel 真机通过。
 
-采用独立 Cocoa Helper 是本设计的实施选择，尚待随本文批准。它改变包内部实现，不改变模型或 UI 访问入口。
+采用独立 Cocoa Helper 是已批准的实施选择。它改变包内部实现，不改变模型或 UI 访问入口。
+
+### 4.4 三轮调研落实为实现约束
+
+依据 [AutoGLM / UI-TARS 源码调研](../../cua/research/2026-11-17-autoglm-ui-tars-source-review.md) 与 [Codex 调研](../../cua/research/2026-11-17-codex-computer-use-implementation-review.md)，补充以下规则。私有 Codex/ZCode 的 JS 与二进制仅用于理解契约，不作为构建输入或复制来源。
+
+- AutoGLM 的设备分层与 UI-TARS 的观察反馈用于组织 backend；不引入第二个模型执行循环。复用当前 KCode Host、SDK 和 call ledger。模型异常、解析失败、能力未实现均返回明确错误，不能以 finish/空结果伪造成功。
+- UI-TARS 的执行重试会在已派发后重复动作，因此所有 mutation 禁止自动重放。连接恢复只服务未来请求；已断开的动作必须返回 receipt，重新观察后由调用者决定下一步。
+- 借鉴 Codex 的独立原生服务、严格版本握手及受信任 Host 路由。Helper lifecycle 只保留一个启动 Promise；失败清除 Promise，身份正确的存活 Helper 直接复用，不能因 UI invalidation 或单次请求取消重复拉起。
+- 在 native 执行动作前重新验证 AX 元素、PID 启动身份和窗口归属；可重新定位唯一匹配，出现歧义或目标变化则拒绝。不能只在提示词中要求模型检查。
+- MCP 取消消息写出不代表 native 清理结束；以独立控制通道返回的 cleanup-complete 为 fence。Host deadline、断线、worker 退出都必须走同一清理路径。
+- 区分 OS 权限事实、桌面锁定状态、功能探针和连接就绪。后台读取不触发截图和授权弹窗，fresh preflight 失败返回 unknown；UI 不得用旧 ready 覆盖新事实。
+- 保持源码构建闭包。清单记录源码摘要、工具链、架构与签名主体；不依赖恢复目录、私有 npm 包、原安装应用。公开调研中的模拟验证不能计入 M2 的真实模型验收。
+- Codex 可选 Locked use 依赖授权插件和受控解锁，超出本次范围。本实现锁屏拒绝新输入、保留会话；人工解锁后验证与重新观察，不安装授权插件或自动解锁。
 
 ### 4.2 调用链
 
@@ -127,7 +140,7 @@ controller lease 保留现有私有 runtime 目录解析和 `controller-lease.js
 
 ### 6.2 Native transport
 
-保留 Unix socket JSONL 和现有 public 调用适配入口。新 Host/Helper 使用 **IPC version 4**，不假装与恢复版 version 3 内部线协议兼容；错配明确 `version_mismatch`，不自动回落旧 binary。43 个 legacy 方法见附录 A，其调用语义继续由 TypeScript public facade 兼容。
+保留 Unix socket JSONL 和现有 public 调用适配入口。用户补充要求协议 follow zcode-cua，以便 KCode 直接适配。保留现有 **IPC version 3**：Unix socket NDJSON，每连接先 `authenticate` 再请求；`{id, method, params}`、`{id, ok, result|error}`、错误 details、`ping` 的 `serverApiVersion` 均兼容。`broker_info.api_version = ZCodeComputerUseIPC-1` 表示已有 framing 合同，不能与 serverApiVersion 混淆。43 个 legacy 方法见附录 A。取消 fence、generation 等通过认证协商的可选 `kcode` 扩展传递；已有客户端可调用旧方法，启用新恢复保证的 runtime 必须确认扩展。比服务端新的 clientApiVersion 返回 `version_mismatch`，绝不自动回落旧 binary。
 
 握手报告 protocol version、构建标识、helper generation、PID/启动身份、bundle/signing identity、capabilities。受信任 Host 在握手后取得仅存在 Host 的会话 capability；SDK/Worker 不得取得 broker 地址、token 或 native access。控制面增加 typed `operation_cancel`、`operation_status`、`session_release`，只对已认证 Host 开放，不增加模型工具。
 
@@ -334,7 +347,7 @@ M09 记录真实模型/服务端版本、任务成功率、端到端耗时、模
 
 ## 附录 A：当前 43 个 legacy Broker 方法
 
-本表取自本次 REA 固定摘要对象的 `BROKER_METHODS`，并与当前 consumer 引用核对；v4 的内部控制扩展不伪装成 legacy surface。不能根据旧设计文档补回已退役探针。
+本表取自本次 REA 固定摘要对象的 `BROKER_METHODS`，并与当前 consumer 引用核对；兼容协商的内部控制扩展不伪装成 legacy surface。不能根据旧设计文档补回已退役探针。
 
 | 类别            | 方法                                                                                                                                                                                                                                                                                                     |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

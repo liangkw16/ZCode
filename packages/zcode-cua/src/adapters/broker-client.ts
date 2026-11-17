@@ -1,7 +1,7 @@
 import { createConnection } from "node:net";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
-import { IPC_VERSION, MAX_MESSAGE_BYTES } from "../contract/manifest.js";
+import { IPC_VERSION, MAX_MESSAGE_BYTES, CONTROL_METHODS } from "../contract/manifest.js";
 import type { BrokerPort } from "../contract.js";
 
 export class NativeBrokerError extends Error {
@@ -209,8 +209,14 @@ export function createBrokerClient(options: {
   async function call<T>(
     method: string,
     params: Record<string, unknown> = {},
-    callOptions: { signal?: AbortSignal; session?: string; epoch?: number } = {},
+    callOptions: {
+      signal?: AbortSignal;
+      session?: string;
+      epoch?: number;
+      timeoutMs?: number;
+    } = {},
   ): Promise<T> {
+    const control = (CONTROL_METHODS as readonly string[]).includes(method);
     if (closed) throw new NativeBrokerError("broker_unavailable", "CUA client is closed");
     if (callOptions.signal?.aborted)
       throw new NativeBrokerError("cancelled", "CUA request cancelled before dispatch", {
@@ -221,7 +227,7 @@ export function createBrokerClient(options: {
       if (processEnded(frozenSessions.get(callOptions.session))) {
         frozenSessions.delete(callOptions.session);
         requireObservation.add(callOptions.session);
-      } else if (!OBSERVATIONS.has(method))
+      } else if (!OBSERVATIONS.has(method) && !control)
         throw new NativeBrokerError(
           "broker_unavailable",
           "Native cleanup could not be confirmed; mutation is frozen",
@@ -231,7 +237,8 @@ export function createBrokerClient(options: {
     if (
       callOptions.session &&
       requireObservation.has(callOptions.session) &&
-      !OBSERVATIONS.has(method)
+      !OBSERVATIONS.has(method) &&
+      !control
     )
       throw new NativeBrokerError(
         "stale_state",
@@ -323,7 +330,7 @@ export function createBrokerClient(options: {
     local.signal.addEventListener("abort", cancel);
     try {
       const result = await exchange<T>(options.socketPath, method, params, {
-        timeoutMs: options.timeoutMs ?? 12000,
+        timeoutMs: callOptions.timeoutMs ?? options.timeoutMs ?? 12000,
         afterDrain: drained.signal,
         session: callOptions.session,
         role: options.role,
@@ -333,7 +340,7 @@ export function createBrokerClient(options: {
           if (changed) sessionEpochs.clear();
           generation = nextGeneration;
           helperPid = auth.kcode?.pid;
-          if (changed && !OBSERVATIONS.has(method))
+          if (changed && !OBSERVATIONS.has(method) && !control)
             throw new NativeBrokerError(
               "stale_state",
               "Native Helper generation changed; observe before input",
@@ -346,7 +353,7 @@ export function createBrokerClient(options: {
               sessionEpochs.set(callOptions.session, Math.max(known ?? 0, floor));
               if (known !== undefined && floor > known) {
                 requireObservation.add(callOptions.session);
-                if (!OBSERVATIONS.has(method))
+                if (!OBSERVATIONS.has(method) && !control)
                   throw new NativeBrokerError(
                     "stale_state",
                     "Desktop availability or cancellation epoch changed; observe again",
@@ -389,6 +396,7 @@ export function createBrokerClient(options: {
       return result;
     } catch (error) {
       if (
+        !control &&
         sent &&
         operation &&
         (local.signal.aborted ||
@@ -428,7 +436,30 @@ export function createBrokerClient(options: {
       params?: Record<string, unknown>,
       callOptions?: { signal?: AbortSignal; session?: string; epoch?: number },
     ) {
-      const promise = call<T>(method, params, callOptions);
+      const promise = (async () => {
+        if (method !== "session_release") return call<T>(method, params, callOptions);
+        const deadline = Date.now() + 8000;
+        for (;;) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0)
+            throw new NativeBrokerError(
+              "cleanup_incomplete",
+              "Session release did not drain native work",
+            );
+          const result = await call<{ cleanup_complete?: boolean; epoch?: number }>(
+            method,
+            params,
+            {
+              ...callOptions,
+              timeoutMs: Math.min(3500, remaining),
+            },
+          );
+          if (callOptions?.session && typeof result.epoch === "number")
+            sessionEpochs.set(callOptions.session, result.epoch);
+          if (result.cleanup_complete === true) return result as T;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      })();
       active.add(promise);
       void promise.finally(() => active.delete(promise)).catch(() => {});
       return promise;

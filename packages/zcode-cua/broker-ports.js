@@ -9,6 +9,6 @@ export function isCuaPermissionStatusAvailable(result) {
   );
 }
 
-export function shouldRunCuaScreenCaptureProbe(_state, _options) {
-  return false;
+export function shouldRunCuaScreenCaptureProbe(state, options) {
+  return state === "granted" && options?.probeScreenCapture === true;
 }

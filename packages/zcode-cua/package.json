@@ -62,7 +62,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.build.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1"
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@noble/hashes": "1.8.0"
   },
   "zcodeCuaProducer": {
     "kind": "source",

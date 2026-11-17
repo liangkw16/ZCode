@@ -88,6 +88,13 @@ const ERROR_CODE_BY_BROKER = Object.freeze({
   version_mismatch: "VERSION_MISMATCH",
   stale_socket: "HELPER_UNAVAILABLE",
   timeout: "TIMEOUT",
+  // 新原生 owner 的拒绝包含恢复语义；误归 INTERNAL 会让 SDK 建议盲重试旧索引或锁屏输入。
+  stale_state: "STALE_STATE",
+  desktop_locked: "DESKTOP_LOCKED",
+  desktop_unavailable: "HELPER_UNAVAILABLE",
+  stopped: "CONTROL_STOPPED",
+  cancelled: "CANCELLED",
+  cleanup_incomplete: "CLEANUP_INCOMPLETE",
   unimplemented: "ACTION_UNAVAILABLE",
   method_not_found: "INTERNAL",
   internal: "INTERNAL",
@@ -108,6 +115,9 @@ const NEVER_RETRY_CODES = new Set([
   "ACTION_UNAVAILABLE",
   "NOT_SETTABLE",
   "NOT_SELECTABLE",
+  "DESKTOP_LOCKED",
+  "CANCELLED",
+  "CLEANUP_INCOMPLETE",
 ]);
 
 class ComputerUseError extends Error {
@@ -286,18 +296,13 @@ function assertOk(methodName, result) {
   const actionSent = receipt.action_sent === true;
   if (!isError && dispatch !== "possibly_sent") return receipt;
   const brokerCode = brokerErrorCodeOf(result);
-  const code = isError
-    ? (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL")
-    : "TIMEOUT";
-  throw new ComputerUseError(
-    messageOf(result, `${methodName} failed`),
-    {
-      code,
-      actionSent: actionSent || dispatch === "possibly_sent",
-      dispatchStatus: dispatch,
-      details: { method: methodName, ...(brokerCode ? { brokerCode } : {}) },
-    },
-  );
+  const code = isError ? (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL") : "TIMEOUT";
+  throw new ComputerUseError(messageOf(result, `${methodName} failed`), {
+    code,
+    actionSent: actionSent || dispatch === "possibly_sent",
+    dispatchStatus: dispatch,
+    details: { method: methodName, ...(brokerCode ? { brokerCode } : {}) },
+  });
 }
 
 // ─────────────────────────────────────────────────────────── 目标绑定
@@ -412,14 +417,19 @@ function alternateAppRef(target, windowId) {
  */
 function isAppNotFound(result) {
   if (!result?.isError) return false;
-  return textBlocks(result).some((text) =>
-    /target app is not running/u.test(text),
-  );
+  return textBlocks(result).some((text) => /target app is not running/u.test(text));
 }
 
 const DIRECTIONS = new Set(["up", "down", "left", "right", "u", "d", "l", "r"]);
 const LONG_DIRECTION = { u: "up", d: "down", l: "left", r: "right" };
-const MOUSE_BUTTONS = { left: "left", right: "right", middle: "middle", l: "left", r: "right", m: "middle" };
+const MOUSE_BUTTONS = {
+  left: "left",
+  right: "right",
+  middle: "middle",
+  l: "left",
+  r: "right",
+  m: "middle",
+};
 
 // ─────────────────────────────────────────────────────────── 展示
 
@@ -441,9 +451,7 @@ function emitText(globals, text, options) {
 
 function isFrameAuthorityText(value) {
   const parsed = parseJsonRecord(value);
-  return Boolean(
-    parsed && Object.keys(parsed).length === 1 && Object.hasOwn(parsed, "image_ref"),
-  );
+  return Boolean(parsed && Object.keys(parsed).length === 1 && Object.hasOwn(parsed, "image_ref"));
 }
 
 /**
@@ -454,7 +462,8 @@ function projectToHost(globals, result) {
   const sink = globals.nodeRepl?.emitStructuredResult;
   if (typeof sink !== "function" || !result || !Array.isArray(result.content)) return;
   const media = result.content.filter(
-    (block) => block?.type === "image" || (block?.type === "text" && isFrameAuthorityText(block.text)),
+    (block) =>
+      block?.type === "image" || (block?.type === "text" && isFrameAuthorityText(block.text)),
   );
   if (media.length > 0) {
     // 带图的观察必须**保留**自己的 structuredContent（投影后）。
@@ -526,7 +535,15 @@ function appStateOf(methodName, result) {
   for (const text of textBlocks(result)) {
     const parsed = parseJsonRecord(text);
     if (!parsed) continue;
-    for (const key of ["state_id", "app", "window", "elements", "text", "snapshot_mode", "base_state_id"]) {
+    for (const key of [
+      "state_id",
+      "app",
+      "window",
+      "elements",
+      "text",
+      "snapshot_mode",
+      "base_state_id",
+    ]) {
       if (merged[key] === undefined && parsed[key] !== undefined) merged[key] = parsed[key];
     }
   }
@@ -763,9 +780,10 @@ function createTarget(ctx, binding) {
         );
       }
       // macOS 未实现 element_scroll；直接走已有窗口事件，保留 Helper 的身份/freshness/输入锁校验。
-      const strategy = ctx.platform === "darwin" && (!options?.strategy || options.strategy === "auto")
-        ? "event"
-        : options?.strategy;
+      const strategy =
+        ctx.platform === "darwin" && (!options?.strategy || options.strategy === "auto")
+          ? "event"
+          : options?.strategy;
       await act("scroll", {
         target: bindTarget(binding, target, "scroll"),
         app_ref: binding.appRef,
@@ -873,16 +891,32 @@ function resolveTextRange(binding, elementIndex, text, options) {
  * （macOS cmd，Linux / Windows ctrl）。
  */
 const KEY_ALIASES = Object.freeze({
-  return: "return", enter: "return", kp_enter: "return",
-  control_l: "ctrl", control_r: "ctrl", control: "ctrl", ctrl: "ctrl",
-  alt_l: "alt", alt_r: "alt", meta_l: "alt", alt: "alt",
-  shift_l: "shift", shift_r: "shift", shift: "shift",
-  escape: "esc", esc: "esc",
-  prior: "pageup", next: "pagedown",
+  return: "return",
+  enter: "return",
+  kp_enter: "return",
+  control_l: "ctrl",
+  control_r: "ctrl",
+  control: "ctrl",
+  ctrl: "ctrl",
+  alt_l: "alt",
+  alt_r: "alt",
+  meta_l: "alt",
+  alt: "alt",
+  shift_l: "shift",
+  shift_r: "shift",
+  shift: "shift",
+  escape: "esc",
+  esc: "esc",
+  prior: "pageup",
+  next: "pagedown",
   // 曾有 greater: ">"——输出 ">" 从未通过工具层白名单（S2 前后均如此），是端到端
   // 死路径，且会让组合契约测试（sdk-key-chord-contract.node-test.mjs）被迫开
   // 豁免口，故移除。需要输出 ">" 时应先给工具层 canonical 集补该 token。
-  period: ".", comma: ",", slash: "/", minus: "-", equal: "=",
+  period: ".",
+  comma: ",",
+  slash: "/",
+  minus: "-",
+  equal: "=",
 });
 
 function normalizeKeyChord(chord, platform) {
@@ -1220,4 +1254,10 @@ export async function setupComputerUseRuntime({ globals }) {
   return cua;
 }
 
-export { COMPUTER_METHOD_NAMES, PLATFORM_EXCLUDED_METHODS, ComputerUseError, normalizeKeyChord, KEY_ALIASES };
+export {
+  COMPUTER_METHOD_NAMES,
+  PLATFORM_EXCLUDED_METHODS,
+  ComputerUseError,
+  normalizeKeyChord,
+  KEY_ALIASES,
+};

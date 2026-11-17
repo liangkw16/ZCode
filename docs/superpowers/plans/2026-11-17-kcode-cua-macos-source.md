@@ -58,10 +58,10 @@
 
 **Interfaces:** All 43 broker methods return typed results or explicit capability errors. Native handles bind session/generation/PID birth/window/observation; captures include exact raster and surface identity. No fake success.
 
-- [ ] Write native fixture scenarios for AX traversal/refetch, stale handles, locked admission, clipboard ownership/Unicode, cancel drag/scroll/holds and actual run-loop liveness; observe missing behavior.
-- [ ] Implement bounded AX traversal and semantic actions, ScreenCaptureKit 13+ capture with cancellable lifecycle, scoped input backend with segmented cancellation and held-input cleanup. Check lock/epoch/target before each dispatch.
-- [ ] Implement text/md/html paste transaction with changeCount guarded restoration; permission preflight and explicit requests; PiP event projection/ghost overlay on AppKit.
-- [ ] Compile both architectures and run native fixture suite. Record capability limitations as failures, not passing placeholder methods. Commit and ledger.
+- [x] Write native fixture scenarios for AX traversal/refetch, stale handles, locked admission, clipboard ownership/Unicode, cancel drag/scroll/holds and actual run-loop liveness; observe missing behavior.
+- [x] Implement bounded AX traversal and semantic actions, ScreenCaptureKit 13+ capture with cancellable lifecycle, scoped input backend with segmented cancellation and held-input cleanup. Check lock/epoch/target before each dispatch.
+- [x] Implement text/md/html paste transaction with changeCount guarded restoration; permission preflight and explicit requests; PiP event projection/ghost overlay on AppKit.
+- [x] Compile both architectures and run native fixture suite. Record capability limitations as failures, not passing placeholder methods. Commit and ledger.
 
 ### Task 4: Runtime and existing SDK integration
 
@@ -69,10 +69,10 @@
 
 **Interfaces:** `createComputerUseRuntime(options): ComputerUseRuntime`; `execute({toolName,arguments,context,signal})`, `closeSession(context)`, `dispose()`. AppState/state_id and frame envelopes conform to current SDK; preserve display meta and exact-raster authority.
 
-- [ ] Add tests using a deterministic native protocol fixture for all tool mappings, malformed arguments, Unicode repair, cancellation/timeout/reconnect, stop latch, same-path different identity, subagent denial and stale generations/frames. Observe failure.
-- [ ] Implement Host-owned sessions, strict selectors and native mappings, generation/epoch invalidation, structured state and frame signing. Bind observations to session/app/window and prevent generic images granting coordinates.
-- [ ] Preserve 12 public facades and remove audited unused native-only APIs; verify fresh SDK Workers bind the same logical session. Replace root package symlink deliberately with workspace implementation.
-- [ ] Run CUA suite and existing node-repl-host regression suite. Commit and ledger.
+- [x] Add tests using a deterministic native protocol fixture for all tool mappings, malformed arguments, Unicode repair, cancellation/timeout/reconnect, stop latch, same-path different identity, subagent denial and stale generations/frames. Observe failure.
+- [x] Implement Host-owned sessions, strict selectors and native mappings, generation/epoch invalidation, structured state and exact-raster integrity. Bind observations to session/app/window and prevent generic images granting coordinates.
+- [x] Preserve 12 public facades and remove audited unused native-only APIs; verify fresh SDK Workers bind the same logical session. Replace root package symlink deliberately with workspace implementation.
+- [x] Run CUA suite and existing node-repl-host regression suite. Commit and ledger.
 
 ### Task 5: Permission UI and source-only packaging
 

@@ -144,7 +144,7 @@ controller lease 保留现有私有 runtime 目录解析和 `controller-lease.js
 
 `list_apps`、`list_windows`、`get_app_state`、`left_click`、`scroll`、`left_click_drag`、`type`、`set_value`、`select_text`、`key`、`perform_action`、`paste`、`request_access`、`stop_computer_control`。
 
-`getApp` 保持只绑定；`getAXState()` 返回字符串，`getAXStateAndScreenshot()` 返回含 `state` 的对象。每个 fresh Worker 重新 bootstrap，默认观察自行展示；`emit:false` 不展示，`tree_shown_to_model:false` 不进入已展示树的台账。遵循当前 cua-receipt-observation-contract：模型 get_app_state 始终取得 full structured AppState；broker 内部不得把 delta/no_change 当作可执行模型状态。保留 one-raster / image_ref 邻接契约。
+`getApp` 保持只绑定；同一逻辑会话、generation、取消 epoch 和目标不变时，隐藏的无截图绑定复用 Host 已持有的完整状态，不执行会淘汰模型已见原生 token 的 capture。没有可复用状态时才观察；隐藏观察不进入模型已见索引台账。`getAXState()` 返回字符串，`getAXStateAndScreenshot()` 返回含 `state` 的对象。每个 fresh Worker 重新 bootstrap，默认观察自行展示；`emit:false` 不展示，`tree_shown_to_model:false` 不进入已展示树的台账。遵循当前 cua-receipt-observation-contract：模型 get_app_state 始终取得 full structured AppState；broker 内部不得把 delta/no_change 当作可执行模型状态。保留 one-raster / image_ref 邻接契约。
 
 ### 6.2 Native transport
 

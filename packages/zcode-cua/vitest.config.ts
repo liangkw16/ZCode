@@ -4,7 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   root: import.meta.dirname,
   test: {
-    name: "cua-placeholder",
+    name: "kcode-cua",
     include: ["test/**/*.test.ts"],
     // 根项目已有普通与串行两组；独立分组避免不同 worker 数使整个单测入口退出。
     maxWorkers: 1,

@@ -3,7 +3,7 @@ import { createComputerUseRuntime } from "../index.js";
 import { callBrokerMethod } from "../broker.js";
 import { isCuaPermissionStatusAvailable } from "../broker-ports.js";
 
-describe("Computer Use placeholder", () => {
+describe("Computer Use public admission", () => {
   it("正常权限结果不要求 available 标记，不可用和无效结果不能冒充权限真值", () => {
     expect(
       isCuaPermissionStatusAvailable({
@@ -33,9 +33,9 @@ describe("Computer Use placeholder", () => {
     await runtime.dispose();
   });
 
-  it("broker 方法拒绝执行真实系统能力", async () => {
+  it("未知 broker 方法在连接前拒绝", async () => {
     await expect(
       callBrokerMethod({ method: "example", socketPath: "unused" }),
-    ).rejects.toMatchObject({ code: "unavailable" });
+    ).rejects.toMatchObject({ code: "method_not_found" });
   });
 });

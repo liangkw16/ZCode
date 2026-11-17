@@ -280,3 +280,19 @@ it("requires a fresh observation when a lock transition advanced the native epoc
   await client.call("click", {}, { session: "s" });
   expect(inputs).toBe(1);
 });
+it("does not report a session release complete until all native work is drained", async () => {
+  let polls = 0;
+  const client = await fixture((r, s) => {
+    if (r.method === "session_release") {
+      polls++;
+      s.end(
+        JSON.stringify({ id: 1, ok: true, result: { cleanup_complete: polls > 1, epoch: 1 } }) +
+          "\n",
+      );
+    }
+  });
+  expect(await client.call("session_release", {}, { session: "s" })).toMatchObject({
+    cleanup_complete: true,
+  });
+  expect(polls).toBe(2);
+});

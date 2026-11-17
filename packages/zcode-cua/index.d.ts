@@ -21,7 +21,7 @@ export interface ComputerUseRuntimeExecuteInput {
 }
 
 export interface ComputerUseRuntime {
-  // 公共 broker 读取 MCP 元数据；占位返回同一结果类型，避免导出后丢失契约。
+  // Host owns this runtime; fresh SDK Workers keep the same logical session.
   execute(input: ComputerUseRuntimeExecuteInput): Promise<CallToolResult>;
   closeSession(context: ComputerUseRuntimeContext): Promise<void>;
   dispose(): Promise<void>;

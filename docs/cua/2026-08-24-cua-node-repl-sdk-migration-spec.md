@@ -206,6 +206,17 @@ envelope。skill 必须将“动作 cell 末尾显式观察并写出 AX 文本�
   `true` 或抛错就立即停止，沿原路径报告可能已发送，不重放已完成的事件，也不转为全局输入。
   验收一页必须产生显著位移（至少半个视口，
   且页面有足够剩余空间），移动 1 像素不能判为通过。
+- producer 的 `action_receipt` 文本块是动作派发收据，与历史顶层、`structuredContent`、
+  `action_outcome` 保持兼容。SDK 必须读取其中的 `action_sent` 与 `dispatch_status`；即使
+  MCP `isError` 不是 `true`，`possibly_sent` 也必须抛出 `ComputerUseError`，携带
+  `actionSent=true`、`retry=reobserve`，同一次 SDK 调用不得重放动作。明确 accepted 才按
+  原有语义返回 void；`isError=true` 的 not_sent 仍按原有错误码抛错。
+  收据只由 producer 签发，SDK 只做既有结果映射，不维护派发状态或启动补偿。
+
+  ```text
+  Helper 派发/拒绝 → producer action_receipt → SDK 解析 → 成功 void / 抛错
+                                                     └─ possibly_sent → 先观察，禁止自动重放
+  ```
 - shared host 仍是 session、取消和命令 admission 的唯一所有者，Helper 仍负责权限、窗口身份、
   帧/元素 freshness、输入锁及剪贴板恢复。SDK 不持有第二套状态，不对可能已发送的动作重试。
 - Helper 在接纳新的输入及 `capture_app` 前，实时读取 macOS 的 `IOConsoleLocked`。已锁屏时

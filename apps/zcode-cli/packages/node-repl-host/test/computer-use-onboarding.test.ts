@@ -116,3 +116,68 @@ describe("computer-use platform input dispatch", () => {
     expect(call).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("computer-use producer action receipts", () => {
+  it("rejects possibly_sent from the real action_receipt envelope without replay", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockResolvedValueOnce({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            action_receipt: {
+              schema_version: "zcode-cua-action-receipt-v1",
+              action_sent: true,
+              dispatch_status: "possibly_sent",
+              retry_action: false,
+            },
+          }),
+        },
+      ],
+      isError: false,
+    });
+    await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
+      name: "ComputerUseError",
+      code: "TIMEOUT",
+      actionSent: true,
+      dispatchStatus: "possibly_sent",
+      retry: "reobserve",
+    });
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [false, true, "accepted"],
+    [true, false, "not_sent"],
+  ] as const)(
+    "preserves isError=%s action_sent=%s dispatch=%s",
+    async (isError, actionSent, dispatch) => {
+      const { target, call } = await makeTarget("darwin");
+      call.mockResolvedValueOnce({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              action_receipt: {
+                action_sent: actionSent,
+                dispatch_status: dispatch,
+              },
+            }),
+          },
+        ],
+        structuredContent: { code: "permission_denied" },
+        isError,
+      });
+      const action = target.scroll(1, "down", 1);
+      if (isError)
+        await expect(action).rejects.toMatchObject({
+          code: "PERMISSION_DENIED",
+          actionSent: false,
+          dispatchStatus: "not_sent",
+          retry: "never",
+        });
+      else await expect(action).resolves.toBeUndefined();
+      expect(call).toHaveBeenCalledTimes(1);
+    },
+  );
+});

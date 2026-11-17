@@ -176,6 +176,10 @@ function receiptOf(result) {
     const parsed = parseJsonRecord(text);
     if (!parsed) continue;
     candidates.push(parsed);
+    // 真机 producer 用 action_receipt 承载 possibly_sent；漏读会把原生拒绝误报成功。
+    if (parsed.action_receipt && typeof parsed.action_receipt === "object") {
+      candidates.push(parsed.action_receipt);
+    }
     if (parsed.action_outcome && typeof parsed.action_outcome === "object") {
       candidates.push(parsed.action_outcome);
     }

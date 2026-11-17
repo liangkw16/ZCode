@@ -170,3 +170,15 @@ CFRange KCUATextSelection(NSString *value, NSArray *range) {
              @"Text selection splits a character or exceeds the current value");
   return CFRangeMake(start, length);
 }
+
+id KCUAAXScalarValue(id value) {
+  if ([value isKindOfClass:NSString.class])
+    return KCUAScalarString(value, 16384);
+  if ([value isKindOfClass:NSNumber.class] &&
+      std::isfinite([value doubleValue]))
+    return value;
+  return [NSNull null];
+}
+NSString *KCUAElementLabel(NSString *title, NSString *description) {
+  return title.length ? title : description;
+}

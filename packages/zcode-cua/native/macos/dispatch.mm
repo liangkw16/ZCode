@@ -3,8 +3,40 @@ id KCUADispatch(NSString *method, NSDictionary *params, const KCUAOp &op) {
   (void)params;
   KCUACheck(op);
   if ([method isEqual:@"permission_status"] ||
-      [method isEqual:@"request_access"])
-    return KCUAPermissionStatus();
+      [method isEqual:@"request_access"]) {
+    NSMutableDictionary *report = [KCUAPermissionStatus() mutableCopy];
+    if ([method isEqual:@"permission_status"] &&
+        [params[@"include_functional_probes"] boolValue]) {
+      @try {
+        KCUARequireAccessibility();
+        pid_t pid =
+            NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+        if (pid <= 1 || pid == getpid())
+          KCUAFail(@"probe_unavailable", @"No foreign target for AX probe");
+        AXUIElementRef target = AXUIElementCreateApplication(pid);
+        AXUIElementSetMessagingTimeout(target, 1.0);
+        id role;
+        @try {
+          role = KCUAAXAttribute(target, kAXRoleAttribute);
+        } @finally {
+          CFRelease(target);
+        }
+        bool valid = [role isKindOfClass:NSString.class] && [role length] > 0;
+        report[@"accessibility_probe"] = @{
+          @"ok" : @(valid),
+          @"classification" : valid ? @"functional" : @"no_target_role"
+        };
+      } @catch (NSException *error) {
+        if ([error.name isEqual:@"cancelled"] ||
+            [error.name isEqual:@"cleanup_incomplete"])
+          @throw;
+        report[@"accessibility_probe"] =
+            @{@"ok" : @NO,
+              @"classification" : error.name};
+      }
+    }
+    return report;
+  }
   if ([method isEqual:@"supports_accessibility"])
     return @YES;
   if ([method isEqual:@"input_permission_status"])

@@ -1,7 +1,11 @@
 #import "protocol.h"
+#import <ApplicationServices/ApplicationServices.h>
 #include <cstdio>
 #include <cstring>
 #include <signal.h>
+extern int KCUALifecycleGuard(NSString *);
+extern int KCUAPrintProcessIdentity(pid_t);
+extern int KCUAInspectSocketOwner(NSString *, NSString *);
 
 #ifndef KCODE_BUILD_ID
 #error Native build must provide a source-derived build ID
@@ -24,6 +28,25 @@ int main(int argc, const char *argv[]) {
       return 0;
     }
     NSArray<NSString *> *earlyArgs = NSProcessInfo.processInfo.arguments;
+    if (earlyArgs.count > 2 && [earlyArgs[1] isEqual:@"--lifecycle-guard"])
+      return KCUALifecycleGuard(earlyArgs[2]);
+    if (earlyArgs.count > 2 && [earlyArgs[1] isEqual:@"--process-identity"])
+      return KCUAPrintProcessIdentity([earlyArgs[2] intValue]);
+    if (earlyArgs.count > 3 && [earlyArgs[1] isEqual:@"--inspect-socket-owner"])
+      return KCUAInspectSocketOwner(earlyArgs[2], earlyArgs[3]);
+    if ([earlyArgs containsObject:@"--request-permission"]) {
+      NSUInteger index = [earlyArgs indexOfObject:@"--request-permission"];
+      NSString *kind = index + 1 < earlyArgs.count ? earlyArgs[index + 1] : nil;
+      if ([kind isEqual:@"accessibility"]) {
+        NSDictionary *prompt =
+            @{(__bridge NSString *)kAXTrustedCheckOptionPrompt : @YES};
+        AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)prompt);
+      } else if ([kind isEqual:@"screen"])
+        CGRequestScreenCaptureAccess();
+      else
+        return 2;
+      return 0;
+    }
     if ([earlyArgs containsObject:@"--permission-preflight"]) {
       NSDictionary *report = KCUAPermissionStatus();
       NSData *data = [NSJSONSerialization dataWithJSONObject:report

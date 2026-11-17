@@ -34,12 +34,28 @@ describe("电脑控制权限状态（候选）", () => {
             if (prop !== "getStatus") return Reflect.get(target, prop);
             return async (_path: string, _identity: string, options: any) => {
               state.__cuaPermissionProbeRequested ||= options?.includeFunctionalProbes === true;
-              if (state.__cuaPermissionMode === "reject") throw new Error("E2E permission RPC fault");
+              if (state.__cuaPermissionMode === "reject")
+                throw new Error("E2E permission RPC fault");
               if (state.__cuaPermissionMode === "granted")
                 return {
                   grantOwner: "ZCode Computer Use",
                   accessibility: "granted",
                   screenRecording: "granted",
+                };
+              if (["unknown", "denied", "locked"].includes(state.__cuaPermissionMode))
+                return {
+                  grantOwner: "KCode Computer Use",
+                  accessibility:
+                    state.__cuaPermissionMode === "locked" ? "granted" : state.__cuaPermissionMode,
+                  screenRecording:
+                    state.__cuaPermissionMode === "locked" ? "granted" : state.__cuaPermissionMode,
+                  accessibilityProbeOk: false,
+                  screenCaptureProbeOk: false,
+                  helperGeneration: "e2e-g2",
+                  desktopEpoch: 2,
+                  desktopAvailability:
+                    state.__cuaPermissionMode === "locked" ? "locked" : "unlocked",
+                  freshPreflight: true,
                 };
               return { available: false, reason: "E2E Helper unavailable" };
             };
@@ -94,6 +110,26 @@ describe("电脑控制权限状态（候选）", () => {
       timeout: 20_000,
     });
     expect((await page.getText()).match(/已授权/g)?.length).toBe(2);
+    expect(await browser.execute(() => (window as any).__cuaPermissionProbeRequested)).toBe(false);
+  });
+
+  it("新 unknown/denied 事实覆盖旧 granted，锁屏不伪造未授权且不主动抓屏", async function () {
+    this.timeout(60_000);
+    const page = $(`[data-testid="${TID_SETTINGS_PAGE}"]`);
+    for (const mode of ["unknown", "denied", "locked"]) {
+      await browser.execute((value) => {
+        (window as any).__cuaPermissionMode = value;
+        window.dispatchEvent(new Event("focus"));
+      }, mode);
+      await browser.waitUntil(
+        async () =>
+          mode === "locked"
+            ? (await page.getText()).match(/已授权/g)?.length === 2
+            : !(await page.getText()).includes("已授权"),
+        { timeout: 20_000 },
+      );
+      expect(await page.getText()).not.toContain("已授权，正在验证");
+    }
     expect(await browser.execute(() => (window as any).__cuaPermissionProbeRequested)).toBe(false);
   });
 });

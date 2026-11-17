@@ -20,6 +20,10 @@ and system frameworks. Build provenance is emitted in the signed app resource
 `source-manifest.json` and adjacent `build-manifest.json`. Default ad-hoc builds
 are development artifacts; production launch requires a verified signed Helper.
 The native app is `KCode Computer Use.app` (`dev.zcode.cua-helper.kcode`).
+The installed Helper must share the verified KCode Main application's actual
+signing leaf certificate. A manifest's signing label alone grants no authority.
+The same signed artifacts can be transferred to M2 without moving private keys;
+record M2 source compilation and installed runtime validation separately.
 
 Cancellation drains native work before allowing continuation and requires a new
 observation. Stop stays latched for that logical session. Input is never replayed

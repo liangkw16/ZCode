@@ -43,7 +43,7 @@ it("keeps a live silent socket owner instead of unlinking its transport and laun
   const dir = await mkdtemp(join(tmpdir(), "kcua-host-"));
   const runtime = join(dir, "zcode-cua");
   await mkdir(runtime, { mode: 0o700 });
-  const path = join(runtime, "broker.sock");
+  const path = join(runtime, "kcode-broker.sock");
   const sockets = new Set<import("node:net").Socket>();
   const server = createServer((socket) => {
     sockets.add(socket);

@@ -66,3 +66,25 @@ it("request-access metadata validates actual facts rather than rejecting every v
     }).success,
   ).toBe(false);
 });
+it("keeps the existing explicit functional-probe option and rejects malformed permission facts", async () => {
+  const { isCuaPermissionStatusAvailable } = await import("../broker-ports.js");
+  expect(shouldRunCuaScreenCaptureProbe("granted", { includeFunctionalProbes: true })).toBe(true);
+  expect(
+    isCuaPermissionStatusAvailable({
+      accessibility: "maybe",
+      screenRecording: "granted",
+      grantOwner: null,
+    } as any),
+  ).toBe(false);
+});
+it("uses one stable KCode socket while preserving explicit transport overrides", async () => {
+  const { resolveBrokerSocketPath, mintBrokerSocketPath } = await import("../broker.js");
+  expect(resolveBrokerSocketPath({ env: {} })).toBe(resolveBrokerSocketPath({ env: {} }));
+  expect(resolveBrokerSocketPath({ env: { XDG_RUNTIME_DIR: "/private/fixture" } })).toBe(
+    "/private/fixture/zcode-cua/kcode-broker.sock",
+  );
+  expect(
+    resolveBrokerSocketPath({ env: { ZCODE_CUA_PERMISSION_BROKER_SOCKET: "/explicit/socket" } }),
+  ).toBe("/explicit/socket");
+  expect(mintBrokerSocketPath()).not.toBe(mintBrokerSocketPath());
+});

@@ -100,7 +100,8 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//
 <key>CFBundleExecutable</key><string>KCode Computer Use</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0.0</string>
-<key>CFBundleVersion</key><string>${buildId}</string>
+<key>CFBundleVersion</key><string>1.${parseInt(buildId.slice(0, 2), 16) % 100}.${parseInt(buildId.slice(2, 4), 16) % 100}</string>
+<key>KCodeSourceBuildID</key><string>${buildId}</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>

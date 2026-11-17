@@ -45,6 +45,7 @@ void KCUACheck(const KCUAOp &op);
 id KCUADispatch(NSString *method, NSDictionary *params, const KCUAOp &op);
 void KCUACleanup(const KCUAOp &op);
 NSDictionary *KCUALeaseStatus(void);
+size_t KCUAActiveOperationCount(void);
 void KCUAAcquireLease(void);
 void KCUAReleaseLease(void);
 void KCUAStartServer(NSString *socketPath, NSString *runtimeDir,
@@ -70,3 +71,5 @@ void KCUAStartAvailabilityTracking(void);
 void KCUAStopAvailabilityTracking(void);
 
 void KCUASuspendPresentationForDesktop(void);
+
+void KCUAReapDeadScopes(void);

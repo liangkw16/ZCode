@@ -904,29 +904,15 @@ export async function runCuaScreenCaptureReadinessProbe(
   }
 }
 
-/**
- * Screen Recording 的展示态取值：优先短命 Helper 读到的 TCC 真值，拿不到才沿用常驻 Helper 的报告。
- *
- * 为什么不能直接信常驻 Helper：macOS 撤销 Screen Recording 对**已运行进程**不生效 ——
- * 进程在退出前保留已获得的录屏能力，`CGPreflightScreenCaptureAccess()` 也继续返回撤销前的值。
- * 于是用户在系统设置里关掉授权后，常驻 broker Helper 会一直报 granted 直到它自己重启，
- * 设置页跟着显示「已授权」；而下一次 Helper 重启 CUA 就真的不可用了。
- * 授予方向同样陈旧：刚授权完常驻 Helper 仍可能报 denied。
- *
- * fail-open 是刻意的：预检失败（open 失败 / 超时 / 结果不合法）时沿用报告值，
- * 不比不做预检更糟。硬报 denied 会把已授权用户推进一次无意义的授权引导。
- */
+/** 新进程预检是授权事实；预检失败不能沿用常驻进程缓存的 granted。 */
 export async function resolveCuaScreenRecordingState(
   host: Pick<CuaHelperHost, "queryScreenRecordingPreflight">,
-  reported: "granted" | "denied" | "unknown",
+  _reported: "granted" | "denied" | "unknown",
 ): Promise<"granted" | "denied" | "unknown"> {
-  // unknown 表示连 CGPreflight 符号都没拿到（macOS 10.15 前）。预检跑的是同一个 native 调用，
-  // 换个进程也只会得到 unknown，不值得花一次 LaunchServices 冷启。
-  if (reported === "unknown") return reported;
   try {
-    return (await host.queryScreenRecordingPreflight()) ?? reported;
+    return (await host.queryScreenRecordingPreflight()) ?? "unknown";
   } catch {
-    return reported;
+    return "unknown";
   }
 }
 
@@ -2139,16 +2125,20 @@ export function createLocalServices(options: {
         }
       }
       try {
-        const report = await host.queryPermissionStatus();
+        const report = await host.queryPermissionStatus({
+          includeFunctionalProbes: queryOptions?.includeFunctionalProbes === true,
+        });
         if (!helper || !isDefaultCuaProductHelperCurrent(helper)) {
           return {
             available: false,
             reason: "ZCode Computer Use lifecycle is disposed.",
           };
         }
-        // Screen Recording 的真值必须来自一个新进程：撤销对已运行的常驻 Helper 不生效，
-        // 它会一直报撤销前的 granted。拿不到真值时 fail-open 沿用 report 值。
-        const screenRecording = await resolveCuaScreenRecordingState(host, report.screen_recording);
+        // source Host 已读取同 bundle 的短命进程；失败必须未知，不能沿用常驻 granted。
+        const screenRecording =
+          report.fresh_preflight === true
+            ? report.screen_recording
+            : await resolveCuaScreenRecordingState(host, report.screen_recording);
         if (!isDefaultCuaProductHelperCurrent(helper)) {
           return {
             available: false,
@@ -2176,6 +2166,15 @@ export function createLocalServices(options: {
           grantOwner: report.grant_owner,
           grantOwnerDisplayName: reportedOwnerDisplayName ?? report.grant_owner,
           accessibility: report.accessibility,
+          helperGeneration:
+            typeof report.helper_generation === "string" ? report.helper_generation : undefined,
+          desktopEpoch: typeof report.desktop_epoch === "number" ? report.desktop_epoch : undefined,
+          desktopAvailability: ["unlocked", "locked", "unknown"].includes(
+            String(report.desktop_availability),
+          )
+            ? (report.desktop_availability as "unlocked" | "locked" | "unknown")
+            : "unknown",
+          freshPreflight: report.fresh_preflight === true,
           accessibilityProbeOk:
             report.accessibility_probe?.ok === true &&
             report.accessibility_probe?.classification === "functional",

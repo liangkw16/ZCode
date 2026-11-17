@@ -18,6 +18,7 @@ static std::condition_variable queueChanged;
 static std::deque<KCUAOp> queue;
 static std::map<std::string, KCUAOp> operations;
 static std::set<std::string> releasedSessions;
+static std::map<std::string, KCUAOp> activeScopes;
 static std::map<std::string, uint64_t> sessionEpochs;
 static std::thread worker;
 static bool stopping = false;
@@ -120,14 +121,98 @@ NSDictionary *KCUALeaseStatus(void) {
                     [owner[@"processIdentity"] isEqual:leaseIdentity])
   };
 }
+size_t KCUAActiveOperationCount(void) {
+  std::lock_guard<std::mutex> lock(queueMutex);
+  size_t count = 0;
+  for (const auto &entry : operations)
+    if (!entry.second->settled)
+      ++count;
+  return count;
+}
 void KCUAAcquireLease(void) {
   NSString *lock = [runtimePath
       stringByAppendingPathComponent:@".controller-lease-reclaim.lock"];
-  // 与旧 producer 共用原子 mkdir 互斥；任何存活 owner 均不能按 TTL 抢占。
-  if (mkdir(lock.fileSystemRepresentation, 0700) != 0)
-    KCUAFail(@"controller_busy",
-             @"CUA lease reclamation is already in progress");
+  NSString *aux = [runtimePath
+      stringByAppendingPathComponent:@".controller-lease-reclaim.guard"];
+  int guard =
+      open(aux.fileSystemRepresentation, O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+  if (guard < 0)
+    KCUAFail(@"controller_busy", @"Cannot acquire lease recovery guard");
   @try {
+    checkPrivatePath(aux, false);
+  } @catch (NSException *error) {
+    close(guard);
+    @throw;
+  }
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (flock(guard, LOCK_EX | LOCK_NB) != 0) {
+    if ((errno != EWOULDBLOCK && errno != EAGAIN) ||
+        std::chrono::steady_clock::now() >= deadline) {
+      close(guard);
+      KCUAFail(@"controller_busy", @"Another lease recovery is active");
+    }
+    if (currentOperation) {
+      @try {
+        KCUACheck(currentOperation);
+      } @catch (NSException *error) {
+        close(guard);
+        @throw;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  NSString *staging =
+      [runtimePath stringByAppendingFormat:@"/.controller-reclaim-%d-%@.tmp",
+                                           getpid(), [NSUUID UUID].UUIDString];
+  bool published = false;
+  @try {
+    struct stat existing = {};
+    if (lstat(lock.fileSystemRepresentation, &existing) == 0) {
+      checkPrivatePath(lock, true);
+      NSString *ownerPath = [lock stringByAppendingPathComponent:@"owner.json"];
+      // 旧 producer 的空目录没有可证明的 owner，不能按超时擅自抢占。
+      if (access(ownerPath.fileSystemRepresentation, F_OK) != 0)
+        KCUAFail(@"controller_busy",
+                 @"Legacy lease reclaimer has no provable owner");
+      checkPrivatePath(ownerPath, false);
+      NSDictionary *owner = [NSJSONSerialization
+          JSONObjectWithData:[NSData dataWithContentsOfFile:ownerPath]
+                     options:0
+                       error:nil];
+      pid_t pid = [owner[@"pid"] intValue];
+      if ([owner[@"schema"] intValue] != 1 ||
+          ![owner[@"kind"] isEqual:@"kcode-cua"] || pid <= 1 ||
+          kill(pid, 0) == 0 || errno != ESRCH)
+        KCUAFail(@"controller_busy",
+                 @"Lease reclaimer owner is live or unknown");
+      if (unlink(ownerPath.fileSystemRepresentation) != 0 ||
+          rmdir(lock.fileSystemRepresentation) != 0)
+        KCUAFail(@"controller_busy", @"Cannot reclaim a dead lease reclaimer");
+    }
+    if (mkdir(staging.fileSystemRepresentation, 0700) != 0)
+      KCUAFail(@"controller_busy", @"Cannot stage lease reclaimer");
+    NSString *ownerPath =
+        [staging stringByAppendingPathComponent:@"owner.json"];
+    NSData *ownerData = [NSJSONSerialization dataWithJSONObject:@{
+      @"schema" : @1,
+      @"kind" : @"kcode-cua",
+      @"pid" : @(getpid()),
+      @"birth" : KCUAProcessBirth(getpid())
+    }
+                                                        options:0
+                                                          error:nil];
+    int ownerFD = open(ownerPath.fileSystemRepresentation,
+                       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (ownerFD < 0)
+      KCUAFail(@"controller_busy", @"Cannot persist lease reclaimer identity");
+    ssize_t written = write(ownerFD, ownerData.bytes, ownerData.length);
+    fsync(ownerFD);
+    close(ownerFD);
+    if (written != (ssize_t)ownerData.length ||
+        renamex_np(staging.fileSystemRepresentation,
+                   lock.fileSystemRepresentation, RENAME_EXCL) != 0)
+      KCUAFail(@"controller_busy", @"Another controller won lease reclamation");
+    published = true;
     NSDictionary *owner = readLease();
     if (owner) {
       pid_t pid = [owner[@"pid"] intValue];
@@ -171,7 +256,16 @@ void KCUAAcquireLease(void) {
     if (count != (ssize_t)data.length)
       KCUAFail(@"controller_busy", @"Could not persist controller lease");
   } @finally {
-    rmdir(lock.fileSystemRepresentation);
+    if (published) {
+      unlink([lock stringByAppendingPathComponent:@"owner.json"]
+                 .fileSystemRepresentation);
+      rmdir(lock.fileSystemRepresentation);
+    }
+    unlink([staging stringByAppendingPathComponent:@"owner.json"]
+               .fileSystemRepresentation);
+    rmdir(staging.fileSystemRepresentation);
+    flock(guard, LOCK_UN);
+    close(guard);
   }
 }
 void KCUAReleaseLease(void) {
@@ -179,6 +273,15 @@ void KCUAReleaseLease(void) {
   if ([owner[@"pid"] intValue] == getpid() &&
       [owner[@"processIdentity"] isEqual:leaseIdentity])
     unlink(leaseFile().fileSystemRepresentation);
+}
+static void releaseLeaseIfIdle(void) {
+  if (!activeScopes.empty())
+    return;
+  for (const auto &entry : operations)
+    if (!entry.second->settled && !KCUAIsReadOnly(entry.second->method) &&
+        ![entry.second->method hasPrefix:@"pip_"])
+      return;
+  KCUAReleaseLease();
 }
 static void cancelOperation(const KCUAOp &op) {
   bool first = !op->cancelled.exchange(true);
@@ -338,6 +441,11 @@ void KCUACoordinatorStart(NSString *runtimeDir, NSString *socketPath) {
           op->cleanupComplete = cleanupSafe;
           op->settled = true;
         }
+        {
+          std::lock_guard<std::mutex> lock(queueMutex);
+          if (cleanupSafe)
+            releaseLeaseIfIdle();
+        }
         op->changed.notify_all();
         if (!cleanupSafe) {
           recovering = true;
@@ -377,6 +485,8 @@ NSDictionary *KCUASubmit(NSString *method, NSDictionary *params, NSString *peer,
           @"cancelled", @"Operation cancelled before admission",
           @{@"action_sent" : @NO});
     if (!op->settled && !op->admitted.exchange(true)) {
+      if (!KCUAIsReadOnly(method) && ![method hasPrefix:@"pip_"])
+        activeScopes.try_emplace(sid, op);
       queue.push_back(op);
       queueChanged.notify_one();
     }
@@ -408,15 +518,38 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
   {
     std::lock_guard<std::mutex> lock(queueMutex);
     NSString *session = context[@"session"] ?: @"legacy";
-    if ([method isEqual:@"session_release"])
+    const bool allPeer = [context[@"all_peer_scopes"] boolValue];
+    const bool scopeControl =
+        [@[ @"session_release", @"controller_stop", @"cancel_input_holds" ]
+            containsObject:method];
+    if ([method isEqual:@"controller_stop"]) {
+      for (auto it = activeScopes.begin(); it != activeScopes.end();)
+        if ([it->second->peer isEqual:peer] &&
+            (allPeer || [it->second->session isEqual:session]))
+          it = activeScopes.erase(it);
+        else
+          ++it;
+    }
+    if ([method isEqual:@"session_release"]) {
       releasedSessions.insert(sessionKey(peer, session));
-    NSString *opId = [method isEqual:@"session_release"]
+      activeScopes.erase(sessionKey(peer, session));
+    }
+    NSString *opId = scopeControl
                          ? nil
                          : (params[@"operation_id"] ?: context[@"operationId"]);
     if (![method isEqual:@"operation_status"]) {
       auto &epoch = sessionEpochs[sessionKey(peer, session)];
       epoch = std::max(epoch,
                        (uint64_t)[context[@"epoch"] unsignedLongLongValue] + 1);
+      if (allPeer) {
+        std::set<std::string> advanced;
+        for (auto &entry : operations)
+          if ([entry.second->peer isEqual:peer]) {
+            auto key = sessionKey(peer, entry.second->session);
+            if (advanced.insert(key).second && key != sessionKey(peer, session))
+              sessionEpochs[key]++;
+          }
+      }
     }
     if ([method isEqual:@"operation_cancel"] && opId) {
       NSMutableDictionary *target = [context mutableCopy];
@@ -433,7 +566,7 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
     }
     for (auto &entry : operations)
       if ([entry.second->peer isEqual:peer] &&
-          [entry.second->session isEqual:session] &&
+          (allPeer || [entry.second->session isEqual:session]) &&
           (!opId || [entry.second->operationId isEqual:opId])) {
         selected.push_back(entry.second);
         if (![method isEqual:@"operation_status"])
@@ -442,11 +575,13 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
   }
   bool complete = ![method isEqual:@"operation_status"] || !selected.empty(),
        sent = false;
+  const auto cleanupDeadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
   for (auto &op : selected) {
     std::unique_lock<std::mutex> lock(op->mutex);
     if (![method isEqual:@"operation_status"])
-      op->changed.wait_for(lock, std::chrono::seconds(3),
-                           [&] { return op->settled.load(); });
+      op->changed.wait_until(lock, cleanupDeadline,
+                             [&] { return op->settled.load(); });
     complete &= op->settled.load() && op->cleanupComplete.load();
     sent |= op->dispatched.load();
   }
@@ -455,14 +590,21 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
     std::lock_guard<std::mutex> lock(queueMutex);
     currentEpoch =
         sessionEpochs[sessionKey(peer, context[@"session"] ?: @"legacy")];
+    if (complete)
+      releaseLeaseIfIdle();
   }
-  return KCUAOK(@{
+  NSMutableDictionary *result = [@{
     @"cleanup_complete" : @(complete),
     @"found" : @(!selected.empty()),
     @"dispatch_status" : sent ? @"possibly_sent" : @"not_sent",
     @"generation" : generation,
     @"epoch" : @(currentEpoch)
-  });
+  } mutableCopy];
+  if ([method isEqual:@"controller_stop"])
+    result[@"stopped"] = @(complete);
+  if ([method isEqual:@"cancel_input_holds"])
+    result[@"released"] = @(complete);
+  return KCUAOK(result);
 }
 void KCUACancelPeer(NSString *peer) {
   std::lock_guard<std::mutex> lock(queueMutex);
@@ -496,4 +638,40 @@ void KCUANotifyDesktopUnavailable(void) {
   for (auto &entry : operations)
     if (!entry.second->settled)
       cancelOperation(entry.second);
+}
+
+void KCUAReapDeadScopes(void) {
+  std::lock_guard<std::mutex> lock(queueMutex);
+  for (auto it = activeScopes.begin(); it != activeScopes.end();) {
+    auto anchor = it->second;
+    NSArray *parts = [anchor->peer componentsSeparatedByString:@":"];
+    if (parts.count < 5) {
+      ++it;
+      continue;
+    }
+    pid_t pid = [parts[1] intValue];
+    if (pid <= 1) {
+      ++it;
+      continue;
+    }
+    NSString *expected = [NSString
+                 stringWithFormat:@"%@:%@:%@", parts[1], parts[2], parts[3]],
+             *birth = KCUAProcessBirth(pid);
+    bool ended = birth ? ![birth isEqual:expected]
+                       : (kill(pid, 0) != 0 && errno == ESRCH);
+    if (!ended) {
+      ++it;
+      continue;
+    }
+    // socket 是按请求建立的，不能按 EOF
+    // 释放会话；这里只使用真实调用进程死亡/出生身份变化的证明。
+    sessionEpochs[it->first]++;
+    for (auto &entry : operations)
+      if ([entry.second->peer isEqual:anchor->peer] &&
+          [entry.second->session isEqual:anchor->session] &&
+          !entry.second->settled)
+        cancelOperation(entry.second);
+    it = activeScopes.erase(it);
+  }
+  releaseLeaseIfIdle();
 }

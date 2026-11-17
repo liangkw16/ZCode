@@ -15,7 +15,7 @@ const context = {
   workspacePath: "/work",
   workspaceIdentity: "one",
 };
-async function fixture(options: { screenshot?: boolean; hold?: string } = {}) {
+async function fixture(options: { screenshot?: boolean; hold?: string; pressable?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "kcua-rt-"));
   const socketPath = join(dir, "broker.sock");
   const calls: any[] = [];
@@ -83,6 +83,7 @@ async function fixture(options: { screenshot?: boolean; hold?: string } = {}) {
                 elements: [
                   {
                     native: "token1",
+                    actions: options.pressable === false ? [] : ["AXPress"],
                     role: "AXTextField",
                     kind: "text_field",
                     title: "Text",
@@ -179,6 +180,8 @@ it("rejects unknown keys, selectors, nonfinite numbers and subagents before brok
     { app_ref: { pid: 700 }, extra: true },
     { app_ref: { pid: NaN } },
     { app_ref: { pid: 1.2 } },
+    { app_ref: { pid: 4294967297 } },
+    { app_ref: { pid: 700, window_id: 4294967306 } },
     { app_ref: { name: " " } },
   ]) {
     expect(
@@ -461,5 +464,29 @@ it("SDK exposes stale-state and lock refusals with recovery codes instead of INT
     code: "DESKTOP_LOCKED",
     retry: "never",
     actionSent: false,
+  });
+});
+
+it("chooses raw click for a non-pressable AX element and preserves native refetch authority", async () => {
+  const f = await fixture({ pressable: false });
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  expect(
+    (await f.run("left_click", { app_ref: { pid: 700 }, target: { type: "element", index: 0 } }))
+      .isError,
+  ).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "click",
+    params: { native_target: "token1", app_ref: { pid: 700, window_id: 10 } },
+  });
+});
+it("forwards trusted turn context to presentation without accepting it as a model argument", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false }, {
+    ...context,
+    turnId: "trusted-turn",
+  } as any);
+  expect(f.calls.find((c) => c.method === "capture_app").params.pip_session_context).toEqual({
+    session_id: "s1",
+    turn_id: "trusted-turn",
   });
 });

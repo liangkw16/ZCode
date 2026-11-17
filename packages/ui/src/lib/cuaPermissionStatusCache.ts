@@ -41,12 +41,7 @@ export const CUA_PERMISSION_STATUS_CACHE_KEY = "zcode-cua-permission-status";
  */
 export const CUA_PERMISSION_STATUS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-const PERMISSION_STATES: readonly CuaPermissionState[] = [
-  "granted",
-  "stale",
-  "denied",
-  "unknown",
-];
+const PERMISSION_STATES: readonly CuaPermissionState[] = ["granted", "stale", "denied", "unknown"];
 
 interface CachedEnvelope {
   savedAt: number;
@@ -92,9 +87,9 @@ function parseCachedStatus(value: unknown): CuaPermissionStatus | null {
   const parsed: CuaPermissionStatus = {
     grantOwner: candidate.grantOwner,
     accessibility: candidate.accessibility,
-    accessibilityProbeOk: candidate.accessibilityProbeOk,
+    accessibilityProbeOk: false,
     screenRecording: candidate.screenRecording,
-    screenCaptureProbeOk: candidate.screenCaptureProbeOk,
+    screenCaptureProbeOk: false,
   };
   if (typeof candidate.grantOwnerDisplayName === "string") {
     parsed.grantOwnerDisplayName = candidate.grantOwnerDisplayName;

@@ -15,6 +15,10 @@ int main(void) {
     unichar characters[] = {0x4e2d, 0xd83c, 'A', 0xdc00, 0xd83c, 0xdf1f};
     NSString *broken = [NSString stringWithCharacters:characters length:6];
     assert([KCUAScalarString(broken, 100) isEqual:@"中\uFFFDA\uFFFD🌟"]);
+    assert([KCUAAXScalarValue(@YES) isEqual:@YES]);
+    assert([KCUAAXScalarValue(@0.75) isEqual:@0.75]);
+    assert([KCUAElementLabel(@"", @"Fixture text") isEqual:@"Fixture text"]);
+    assert([KCUAElementLabel(@"Title", @"Description") isEqual:@"Title"]);
     CFRange legal = KCUATextSelection(@"A🌟B", @[ @1, @2 ]);
     assert(legal.location == 1 && legal.length == 2);
     assert(rejected(@"A🌟B", @[ @2, @1 ]));

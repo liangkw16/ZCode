@@ -49,6 +49,38 @@ static bool developmentSignature(void) {
   return ([info[(__bridge NSString *)kSecCodeInfoFlags] unsignedIntValue] &
           kSecCodeSignatureAdhoc) != 0;
 }
+extern bool KCUATrustedProductPeer(NSData *, NSData *, NSString *, NSString *,
+                                   NSString *, bool);
+static NSData *signingLeaf(NSDictionary *info) {
+  NSArray *certificates = info[(__bridge NSString *)kSecCodeInfoCertificates];
+  if (![certificates isKindOfClass:NSArray.class] || !certificates.count)
+    return nil;
+  return CFBridgingRelease(SecCertificateCopyData(
+      (__bridge SecCertificateRef)certificates.firstObject));
+}
+static pid_t parentOf(pid_t pid) {
+  struct proc_bsdinfo info = {};
+  return proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) ==
+                     sizeof(info) &&
+                 info.pbi_uid == getuid()
+             ? info.pbi_ppid
+             : 0;
+}
+static NSString *verifiedMain(pid_t pid, NSData *leaf) {
+  NSDictionary *info = signingInformation(pid);
+  if (![info[(__bridge NSString *)kSecCodeInfoIdentifier]
+          isEqual:@"dev.zcode.app.kcode"] ||
+      ![signingLeaf(info) isEqual:leaf])
+    return nil;
+  NSRunningApplication *app =
+      [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+  if (![app.bundleIdentifier isEqual:@"dev.zcode.app.kcode"] ||
+      app.terminated ||
+      app.activationPolicy != NSApplicationActivationPolicyRegular ||
+      ![app.executableURL.path isEqual:KCUAExecutable(pid)])
+    return nil;
+  return app.bundleURL.path.stringByResolvingSymlinksInPath;
+}
 static bool verifyPeer(int fd, NSString **identity,
                        bool *presentationEligible) {
   uid_t uid;
@@ -58,60 +90,35 @@ static bool verifyPeer(int fd, NSString **identity,
   if (getpeereid(fd, &uid, &gid) != 0 || uid != getuid() ||
       getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) != 0 || pid <= 1)
     return false;
-  NSString *birth = KCUAProcessBirth(pid);
-  NSString *path = KCUAExecutable(pid);
+  NSString *birth = KCUAProcessBirth(pid), *path = KCUAExecutable(pid);
   if (!birth || !path)
     return false;
   NSDictionary *peer = signingInformation(pid),
                *own = signingInformation(getpid());
-  NSString *peerTeam = peer[(__bridge NSString *)kSecCodeInfoTeamIdentifier];
-  NSString *ownTeam = own[(__bridge NSString *)kSecCodeInfoTeamIdentifier];
-  NSString *identifier = peer[(__bridge NSString *)kSecCodeInfoIdentifier];
-  bool sameTeam = peerTeam.length && [peerTeam isEqual:ownTeam];
-  bool approved = sameTeam && [identifier isEqual:@"dev.zcode.app.kcode"];
-  *presentationEligible =
-      sameTeam && [identifier isEqual:@"dev.zcode.app.kcode"];
-  if (!approved) {
-    // 官方 Node 签名与产品证书可能不同；只接受签入 Helper
-    // 资源的确切可执行文件摘要。
-    NSURL *url = [[NSBundle mainBundle] URLForResource:@"trusted-hosts"
-                                         withExtension:@"plist"];
-    NSArray *entries = url ? [NSArray arrayWithContentsOfURL:url] : nil;
-    for (NSDictionary *entry in entries) {
-      if (![entry[@"identifier"] isEqual:identifier])
-        continue;
-      NSString *relative = entry[@"relativePath"];
-      NSString *appParent =
-          [[[NSBundle mainBundle].bundlePath stringByDeletingLastPathComponent]
-              stringByStandardizingPath];
-      NSString *expected =
-          [[appParent stringByAppendingPathComponent:relative ?: @""]
-              stringByResolvingSymlinksInPath];
-      if (![path isEqual:expected])
-        continue;
-      SecRequirementRef requirement = nullptr;
-      if (SecRequirementCreateWithString(
-              (__bridge CFStringRef)entry[@"requirement"], kSecCSDefaultFlags,
-              &requirement) != errSecSuccess)
-        continue;
-      SecCodeRef code = nullptr;
-      NSDictionary *attributes =
-          @{(__bridge NSString *)kSecGuestAttributePid : @(pid)};
-      if (SecCodeCopyGuestWithAttributes(
-              nullptr, (__bridge CFDictionaryRef)attributes, kSecCSDefaultFlags,
-              &code) == errSecSuccess) {
-        approved = SecCodeCheckValidity(code, kSecCSStrictValidate,
-                                        requirement) == errSecSuccess;
-        CFRelease(code);
-      }
-      CFRelease(requirement);
-      if (approved)
-        break;
+  NSData *leaf = signingLeaf(own), *peerLeaf = signingLeaf(peer);
+  NSString *identifier = peer[(__bridge NSString *)kSecCodeInfoIdentifier],
+           *mainPath = nil;
+  pid_t mainPid = 0, candidate = pid;
+  for (int depth = 0; candidate > 1 && depth < 8; depth++) {
+    mainPath = verifiedMain(candidate, leaf);
+    if (mainPath) {
+      mainPid = candidate;
+      break;
     }
+    candidate = parentOf(candidate);
   }
+  bool approved = KCUATrustedProductPeer(leaf, peerLeaf, identifier, path,
+                                         mainPath, mainPid > 1);
+  // 本机证书可能没有 TeamIdentifier，必须比较 OS 验证后的叶证书，不能改成同 UID
+  // 任意进程。
+  *presentationEligible =
+      approved &&
+      (pid == mainPid || ([identifier isEqual:@"dev.zcode.app.kcode.helper"] &&
+                          parentOf(pid) == mainPid));
   if (!approved && developmentAllowed && developmentSignature())
     approved = true;
-  if (!approved)
+  if (!approved || ![birth isEqual:KCUAProcessBirth(pid)] ||
+      ![path isEqual:KCUAExecutable(pid)])
     return false;
   *identity = [NSString stringWithFormat:@"%u:%@:%@", uid, birth, path];
   return true;
@@ -312,12 +319,23 @@ static void handleConnection(int fd) {
               }
               if ([method isEqual:@"operation_cancel"] ||
                   [method isEqual:@"operation_status"] ||
-                  [method isEqual:@"session_release"]) {
-                if (!context)
+                  [method isEqual:@"session_release"] ||
+                  [method isEqual:@"cancel_input_holds"] ||
+                  [method isEqual:@"controller_stop"]) {
+                bool legacyControl =
+                    [@[ @"cancel_input_holds", @"controller_stop" ]
+                        containsObject:method];
+                if (!context && !legacyControl)
                   KCUAFail(
                       @"not_authorized",
                       @"Cleanup control requires negotiated Host authority");
-                response = KCUAControl(method, params, peer, context);
+                response = KCUAControl(
+                    method, params, peer, context ?: @{
+                      @"session" : @"legacy",
+                      @"operationId" : [NSUUID UUID].UUIDString,
+                      @"epoch" : @(KCUASessionEpoch(peer, @"legacy")),
+                      @"all_peer_scopes" : @YES
+                    });
               } else if ([method isEqual:@"broker_info"]) {
                 bool responsive = KCUAMainLoopResponsive(0.5);
                 response =
@@ -331,6 +349,7 @@ static void handleConnection(int fd) {
                             @"serverApiVersion" : @3,
                             @"framing" : @"ndjson",
                             @"generation" : KCUAGeneration(),
+                            @"desktop_epoch" : @(KCUADesktopEpoch()),
                             @"main_loop_responsive" : @YES,
                             @"platform" : @"darwin",
                             @"capabilities" : @{@"cleanup_fence" : @YES}
@@ -341,7 +360,9 @@ static void handleConnection(int fd) {
                            @"permission_status", @"request_access",
                            @"input_permission_status", @"screen_capture_status",
                            @"supports_accessibility"
-                         ] containsObject:method]) {
+                         ] containsObject:method] &&
+                         !([method isEqual:@"permission_status"] &&
+                           [params[@"include_functional_probes"] boolValue])) {
                 if ([method isEqual:@"supports_accessibility"])
                   response = KCUAOK(@YES);
                 else if ([method isEqual:@"input_permission_status"])
@@ -356,9 +377,11 @@ static void handleConnection(int fd) {
                   });
                 else
                   response = KCUAOK(KCUAPermissionStatus());
-              } else if ([method isEqual:@"controller_status"])
-                response = KCUAOK(KCUALeaseStatus());
-              else {
+              } else if ([method isEqual:@"controller_status"]) {
+                NSMutableDictionary *status = [KCUALeaseStatus() mutableCopy];
+                status[@"active_operations"] = @(KCUAActiveOperationCount());
+                response = KCUAOK(status);
+              } else {
                 static NSSet *brokerMethods;
                 static dispatch_once_t once;
                 dispatch_once(&once, ^{

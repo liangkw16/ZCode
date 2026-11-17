@@ -457,6 +457,8 @@ export function captureComputerUseRuntimeFromEnvironment(
   const socketPath = env.ZCODE_CUA_PERMISSION_BROKER_SOCKET?.trim();
   if (!socketPath) return undefined;
   return createComputerUseRuntime({
+    // 插件启动后会恢复 process.env；原生冷启动和故障重连必须使用入场时的同一份配置。
+    env: { ...env },
     brokerSocketPath: socketPath,
     refreshMarkerPath: env.ZCODE_CUA_PERMISSION_BROKER_REFRESH_MARKER?.trim(),
   });

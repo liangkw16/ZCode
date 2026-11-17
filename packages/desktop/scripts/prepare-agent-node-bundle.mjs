@@ -22,14 +22,12 @@ import {
   isSharpRequiredByComputerUse,
   stageSharpIntoBundledAgents,
 } from "./sharp-package-assets.mjs";
-import { stageKoffiIntoBundledAgents } from "./koffi-package-assets.mjs";
 import { BUNDLED_NPM_VERSION, stageBundledNpm } from "./bundled-npm-assets.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptDir, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const cliBundlePath = resolve(repoRoot, "apps/zcode-cli/packages/cli/dist/zcode.cjs");
-const adaptersRoot = resolve(repoRoot, "apps/zcode-cli/packages/adapters");
 const pnpmRunEnv = {
   ...process.env,
   // pnpm 11 会在 apps/zcode-cli 子 workspace 执行 run 前触发 install；
@@ -517,22 +515,6 @@ function stageSharpForNodeReplPlugin() {
   }
 }
 
-function stageKoffiForCuaPlugin() {
-  const cuaPluginStagedDir = resolve(glmDir, "packages", "zcode-cua-plugin");
-  if (!existsSync(resolve(cuaPluginStagedDir, ".zcode-plugin", "plugin.json"))) {
-    console.log("[prepare:agent-bundle] zcode-cua-plugin not staged, skip koffi staging");
-    return;
-  }
-  stageKoffiIntoBundledAgents({
-    koffiPackageRoot: adaptersRoot,
-    glmDir: cuaPluginStagedDir,
-    targetPlatform: { os: platform, arch },
-  });
-  console.log(
-    `[prepare:agent-bundle] staged koffi into ${resolve(cuaPluginStagedDir, "node_modules")} (${platform}-${arch})`,
-  );
-}
-
 // 修复原因：Electron 生产包只带 resources/glm/zcode.cjs 时，app-server 进程的
 // __dirname 附近没有官方插件目录，启动时 seed 找不到 source，用户侧不会自动得到内置插件。
 // 这里把官方插件按 bootstrap 的 rootCandidates 期望放到 glm/packages/*-plugin，
@@ -545,5 +527,5 @@ await stageBundle();
 stageOfficialPlugins();
 stageBundledSkillPack();
 await stageBundledNpmRuntime();
-stageKoffiForCuaPlugin();
+
 stageSharpForNodeReplPlugin();

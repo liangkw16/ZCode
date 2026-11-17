@@ -213,7 +213,30 @@ sequenceDiagram
 
 恢复只能有一个发起者。Helper 能响应时由控制队列签发带旧 generation 的 recoveryId；Helper 不可响应时，package lifecycle adapter 在同一私有 reclaim 互斥边界下取得恢复权，验证并等待旧进程退出。其他 Host 等待新的 lease/generation，不各自 kill/spawn；恢复锁不是第二份 controller lease。正常取消、client 退出、锁屏或权限拒绝本身均不触发全局重启。
 
+Agent 注入的 socket 地址只标识传输入口，不表示 Helper 已经存活。`node_repl` 在清理启动环境前复制 CUA 环境；产品 runtime 对匹配该环境的传输入口，在每次新工具调用前通过同一个 package lifecycle adapter 确认 Helper 可用，使用已验证的随包源码 Helper。显式注入的测试/外部 broker 地址仍由调用者管理。退出、启动和显式重启 Promise 必须串行收敛；停止结束后不能被此前的重启重新写回 running。死亡后的新调用可以建立新 generation，原调用及 mutation 均不自动重放。
+
+```mermaid
+sequenceDiagram
+  participant R as runtime 新工具调用
+  participant L as package lifecycle adapter
+  participant G as 内核启动与恢复互斥
+  participant N as 唯一原生 Helper
+  R->>L: prepare（不携带待重放输入）
+  L->>G: 获取跨 Host 互斥
+  L->>N: 身份、socket owner 与 AppKit 健康检查
+  alt 自有 Helper 已死亡或无响应
+    L->>N: 核验 PID/出生身份并收敛旧进程
+    N-->>L: 已确认死亡
+    L->>N: 启动新 generation
+  end
+  N-->>L: 已验证的就绪进程
+  L-->>R: 释放互斥，仅继续本次新调用
+  Note over L: stop 等待已接受的 start/restart 收敛后清除本 Host handle
+```
+
 M04/M10 必须加入双 Host 场景：A 的正常取消不影响 B；A 的不可恢复 native stall 触发一次全局冻结/恢复，B 逻辑 session 保持且旧帧失效，双方重新观察后继续，无重复 Helper、误归属收据或重放。
+
+进程身份中的可执行路径采用文件系统解析后的真实路径，例如 macOS 的 `/var` 与 `/private/var` 是同一系统目录。安装包末级仍拒绝符号链接；身份比较不能因合法的祖先目录别名误判自有进程，也不能只比较 basename 或忽略 PID、出生身份、签名与 socket 所有权。
 
 ## 8. 锁屏、权限与用户显示
 
@@ -334,6 +357,8 @@ state_id、元素索引和 frame_id 继续绑定会话、目标、观察版本�
 
 M02 的冷启动不包含首次授权弹窗；M05 正常锁屏不应改变 PID，M04 故障恢复则允许 generation/PID 改变。无法运行的场景标记未完成，不能因功能脚本或此前本机结果通过而替代。
 
+签名私钥保留在已有钥匙串所在主机；允许在构建 Mac 使用其可用身份为主应用及 Helper 统一签名，再传输已签名产物到 M2。M2 独立源码编译证据、发布产物来源和实际叶证书分别记录，不把公证或另一台机器的运行结果推断为 M2 验收，也不复制私钥、账户配置或密码。M2 首次安装该签名身份后的授权仍须在本机真实完成。
+
 M09 记录真实模型/服务端版本、任务成功率、端到端耗时、模型调用数、工具调用数、重观察/错误数、token用量（服务提供时）、取消和恢复延迟。恢复版历史结果用于已知行为对照；不同机器和模型时间不能作为严格性能 A/B 的因果证明。不以单轮耗时下结论，不预先承诺提升。
 
 ### 11.3 测试层次与执行报告
@@ -375,3 +400,13 @@ M09 记录真实模型/服务端版本、任务成功率、端到端耗时、模
 - `packages/services/src/node.ts`、`packages/services/src/cua-permission-broker`、`apps/zcode-cli/packages/node-repl-host/src/cua-broker.ts`、`apps/zcode-cli/packages/zcode-cua-plugin/scripts/computer-use-client.mjs` 与现有 CLI/CUA 测试。
 - REA 本机报告：`.tmp/kcode-cua-recovery-20261116/source-inquiry/REPORT.md`、`HELPER-MODULES.md`、`helper-module-manifest.json`、`native-inspection.json`。它们是研究证据，不是构建依赖。
 - 系统 API 依据：[AXUIElementSetMessagingTimeout](https://developer.apple.com/documentation/applicationservices/1459345-axuielementsetmessagingtimeout)、[ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)、[Capturing screen content in macOS](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos)。具体 availability、错误及取消行为仍须以构建 SDK 和真机测试为准。
+
+### 权限样本与桌面 epoch（实现接线）
+
+Helper Host 通过 LaunchServices 启动同一已验证 bundle 的短命进程读取 AX/录屏 preflight；结果经私有目录返回。失败或非法响应必须成为 unknown/不可用，不能沿用常驻进程的 granted。后台查询不请求权限、不截图；`includeFunctionalProbes` 或 `probeScreenCapture` 只在显式用户路径运行功能探针。
+
+服务保留同一权限所有者，向 UI 透传 `helperGeneration`、`desktopEpoch`、`desktopAvailability` 与 `freshPreflight`。sticky 功能结果只在同一 generation、同一桌面 epoch、明确 unlocked 且当前双项 granted 时复用；历史缓存不携带已验证探针。模型 `request_access` 返回当前事实和授权说明，不自动弹系统授权。
+
+macOS 桌面事实兼容 root.IOConsoleLocked + 同 UID console owner；缺失或其他用户的会话仍 fail closed。锁定后 epoch 变化即使 UI 没有在锁屏期间查询也会使旧探针失效。
+
+正式 peer 使用系统验证后的签名叶证书 DER 精确匹配（兼容没有 TeamIdentifier 的本机签名），并验证真实 Main 的进程出生身份、bundle path 与父进程链。当前源码的 Agent 使用 Electron Node，无独立外部 Node 白名单；Main/Host 的 identifier 必须属于 KCode，路径必须在已验证 Main.app 的 Contents 下。presentation 仅授予 GUI Main 和由该 Main 直接启动的 Host；任意 Node、错误父进程或仅同 UID 均不能通过。开发例外只对 ad-hoc Helper 的显式参数有效。

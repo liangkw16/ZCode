@@ -101,18 +101,26 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       sync(key, s);
     }
   }
-  async function observe(args: Bag, key: string, s: Session, signal?: AbortSignal) {
-    // SDK 每个 cell 只绑定的观察不能淘汰模型已见 token；真正展示或截图仍走新 capture。
-    if (args.tree_shown_to_model === false && args.include_screenshot === false)
+  async function observe(
+    args: Bag,
+    key: string,
+    s: Session,
+    signal?: AbortSignal,
+    context?: ComputerUseRuntimeContext,
+  ) {
+    // 隐藏绑定只验证已有缓存；无缓存时直接 capture_app，保留显式 getApp 拉起应用的能力。
+    const cachedState = () =>
+      s.observations.find(
+        (o) =>
+          appMatches(o.state, args.app_ref) &&
+          o.generation === ports.broker.generation &&
+          o.epoch === ports.broker.epoch(key),
+      );
+    if (args.tree_shown_to_model === false && args.include_screenshot === false && cachedState()) {
       await native("application_info", { app_ref: args.app_ref }, key, s, signal);
-    const cached = s.observations.find(
-      (o) =>
-        appMatches(o.state, args.app_ref) &&
-        o.generation === ports.broker.generation &&
-        o.epoch === ports.broker.epoch(key),
-    );
-    if (args.tree_shown_to_model === false && args.include_screenshot === false && cached)
-      return ok(cached.state);
+      const cached = cachedState();
+      if (cached) return ok(cached.state);
+    }
     const raw = await native(
       "capture_app",
       {
@@ -120,6 +128,9 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         include_screenshot: args.include_screenshot ?? true,
         force_full: true,
         tree_shown_to_model: args.tree_shown_to_model !== false,
+        ...(context?.turnId
+          ? { pip_session_context: { session_id: context.sessionId, turn_id: context.turnId } }
+          : {}),
       },
       key,
       s,
@@ -244,7 +255,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
     t: Bag,
     app: Bag,
     s: Session,
-  ): { native?: string; point: Bag; guards: Bag } {
+  ): { native?: string; point: Bag; guards: Bag; appRef: Bag; canPress?: boolean } {
     if (t.type === "element") {
       const observation = s.observations.find((o) => appMatches(o.state, app));
       const token = observation?.tokens.get(t.index),
@@ -253,7 +264,13 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         throw new RequestError("stale_state", "Observe this app before using an element index");
       const b = element.bounds;
       if (!b) throw new RequestError("element_unavailable", "Element has no bounds");
-      return { native: token, point: { x: b.x + b.width / 2, y: b.y + b.height / 2 }, guards: {} };
+      return {
+        native: token,
+        point: { x: b.x + b.width / 2, y: b.y + b.height / 2 },
+        guards: {},
+        appRef: { pid: observation!.state.app.pid, window_id: observation!.state.window.window_id },
+        canPress: Array.isArray(element.actions) && element.actions.includes("AXPress"),
+      };
     }
     const f = s.frame;
     if (
@@ -271,6 +288,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       );
     const b = f.raw.pointer ?? f.raw.screenshot_bounds;
     return {
+      appRef: { pid: f.raw.app.pid, window_id: f.raw.window.window_id },
       point: { x: b.x + (t.x * b.width) / f.width, y: b.y + (t.y * b.height) / f.height },
       guards: {
         expected_pid: f.raw.app.pid,
@@ -298,7 +316,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         await release(key, s);
         return ok({ stopped: true });
       }
-      if (name === "get_app_state") return await observe(args, key, s, input.signal);
+      if (name === "get_app_state") return await observe(args, key, s, input.signal, input.context);
       if (name === "list_apps")
         return ok({ apps: await native("list_applications", {}, key, s, input.signal) });
       if (name === "list_windows")
@@ -310,9 +328,11 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       let method: string,
         params: Bag = { app_ref: args.app_ref };
       const target = args.target ? resolveTarget(args.target, args.app_ref, s) : undefined;
+      if (target) params.app_ref = target.appRef;
       if (name === "left_click") {
         const semantic =
           target?.native &&
+          (args.strategy === "ax" || target.canPress) &&
           args.strategy !== "event" &&
           (args.mouse_button ?? "left") === "left" &&
           (args.click_count ?? 1) === 1 &&
@@ -325,6 +345,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
             ? { native: target!.native }
             : {
                 point: target!.point,
+                ...(target!.native ? { native_target: target!.native } : {}),
                 button: args.mouse_button ?? "left",
                 clicks: args.click_count ?? 1,
                 modifiers: args.modifiers ?? [],
@@ -335,20 +356,33 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         params = {
           ...params,
           ...target?.guards,
-          ...(method === "element_scroll" ? { native: target!.native } : { point: target!.point }),
+          ...(method === "element_scroll"
+            ? { native: target!.native }
+            : {
+                point: target!.point,
+                ...(target!.native ? { native_target: target!.native } : {}),
+              }),
           direction: args.scroll_direction,
           amount: args.scroll_amount ?? 1,
         };
       } else if (name === "left_click_drag") {
         const from = resolveTarget(args.from_target, args.app_ref, s),
           to = resolveTarget(args.to, args.app_ref, s);
+        if (from.appRef.pid !== to.appRef.pid || from.appRef.window_id !== to.appRef.window_id)
+          throw new RequestError(
+            "invalid_request",
+            "Drag endpoints must belong to the same verified window",
+          );
         method = "drag";
         params = {
           ...params,
           ...from.guards,
           ...to.guards,
+          app_ref: from.appRef,
           from: from.point,
           to: to.point,
+          ...(from.native ? { from_native: from.native } : {}),
+          ...(to.native ? { to_native: to.native } : {}),
           modifiers: args.modifiers ?? [],
         };
       } else if (["set_value", "select_text", "perform_action"].includes(name)) {
@@ -397,6 +431,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           key,
           s,
           input.signal,
+          input.context,
         );
         return {
           ...observed,

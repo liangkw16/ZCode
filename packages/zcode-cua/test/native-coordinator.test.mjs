@@ -30,6 +30,27 @@ test(
       ]);
       const normal = await exec(binary, [], { timeout: 3000 });
       assert.match(normal.stdout, /continuation and session isolation passed/);
+      const leaseModes = [
+        ["--legacy-cancel", /continuation and session isolation passed/],
+        ["--peer-death", /dead peer scope drained and lease released/],
+        ["--lease-reclaim", /dead lease reclaimer recovered/],
+        ["--lease-release", /last scope releases physical controller lease/],
+      ];
+      const leaseResults = await Promise.allSettled(
+        leaseModes.map(async ([mode, expected]) =>
+          assert.match((await exec(binary, [mode], { timeout: 3000 })).stdout, expected),
+        ),
+      );
+      assert.ok(
+        leaseResults.every((r) => r.status === "fulfilled"),
+        leaseResults
+          .map((r, i) =>
+            r.status === "rejected"
+              ? `${leaseModes[i][0]}: ${r.reason.stderr ?? r.reason.message}`
+              : "passed",
+          )
+          .join("\n"),
+      );
       const start = performance.now();
       await assert.rejects(
         exec(binary, ["--stall"], { timeout: 10000 }),

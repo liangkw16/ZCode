@@ -8,3 +8,6 @@ struct KCUAKeyChord {
 NSString *KCUAScalarString(NSString *input, NSUInteger limit);
 CFRange KCUATextSelection(NSString *value, NSArray *range);
 KCUAKeyChord KCUAParseKeyChord(NSString *text);
+
+id KCUAAXScalarValue(id value);
+NSString *KCUAElementLabel(NSString *title, NSString *description);

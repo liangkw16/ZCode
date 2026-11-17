@@ -216,7 +216,7 @@ export function createBrokerClient(options: {
       timeoutMs?: number;
     } = {},
   ): Promise<T> {
-    const control = (CONTROL_METHODS as readonly string[]).includes(method);
+    const control = [...CONTROL_METHODS, "controller_stop", "cancel_input_holds"].includes(method);
     if (closed) throw new NativeBrokerError("broker_unavailable", "CUA client is closed");
     if (callOptions.signal?.aborted)
       throw new NativeBrokerError("cancelled", "CUA request cancelled before dispatch", {
@@ -437,7 +437,8 @@ export function createBrokerClient(options: {
       callOptions?: { signal?: AbortSignal; session?: string; epoch?: number },
     ) {
       const promise = (async () => {
-        if (method !== "session_release") return call<T>(method, params, callOptions);
+        if (!["session_release", "controller_stop", "cancel_input_holds"].includes(method))
+          return call<T>(method, params, callOptions);
         const deadline = Date.now() + 8000;
         for (;;) {
           const remaining = deadline - Date.now();
@@ -456,7 +457,10 @@ export function createBrokerClient(options: {
           );
           if (callOptions?.session && typeof result.epoch === "number")
             sessionEpochs.set(callOptions.session, result.epoch);
-          if (result.cleanup_complete === true) return result as T;
+          if (result.cleanup_complete === true) {
+            if (callOptions?.session) requireObservation.add(callOptions.session);
+            return result as T;
+          }
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
       })();

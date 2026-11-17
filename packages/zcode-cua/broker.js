@@ -1,6 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   callBrokerMethod as nativeCall,
   probeHelperHealth as nativeHealth,
@@ -53,17 +50,7 @@ export async function callBrokerMethod(args) {
 }
 export const probeHelperHealth = nativeHealth;
 
-export function mintBrokerSocketPath(options = {}) {
-  const dir = typeof options.dir === "string" ? options.dir : tmpdir();
-  return join(dir, `zcode-cua-broker-${randomUUID()}.sock`);
-}
-
-export function resolveBrokerSocketPath(options = {}) {
-  const env = options.env ?? process.env;
-  const fromEnv = env[BROKER_SOCKET_ENV];
-  if (typeof fromEnv === "string" && fromEnv.trim()) return fromEnv;
-  return mintBrokerSocketPath(options);
-}
+export { resolveBrokerSocketPath, mintBrokerSocketPath } from "./dist/adapters/socket-path.js";
 
 export function parseRequestLine(line) {
   try {

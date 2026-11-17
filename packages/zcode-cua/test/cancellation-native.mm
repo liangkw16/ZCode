@@ -1,11 +1,14 @@
 #import "../native/macos/protocol.h"
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <signal.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 static std::atomic<int> dispatchCount{0};
 static bool fixtureStall = false;
+extern size_t KCUAActiveOperationCount(void);
 id KCUADispatch(NSString *method, NSDictionary *params, const KCUAOp &op) {
   (void)params;
   if ([method isEqual:@"fixture_hold"]) {
@@ -26,8 +29,7 @@ void KCUACleanup(const KCUAOp &op) {
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
 }
 int main(int argc, const char *argv[]) {
-  (void)argv;
-  fixtureStall = argc > 1;
+  fixtureStall = argc > 1 && strcmp(argv[1], "--stall") == 0;
   if (fixtureStall)
     signal(SIGTERM, SIG_IGN);
   @autoreleasepool {
@@ -35,6 +37,85 @@ int main(int argc, const char *argv[]) {
     assert(mkdtemp(dir));
     NSString *path = [NSString stringWithUTF8String:dir];
     KCUACoordinatorStart(path, [path stringByAppendingPathComponent:@"socket"]);
+    if (argc > 1 && strcmp(argv[1], "--peer-death") == 0) {
+      pid_t owner = fork();
+      if (owner == 0) {
+        for (;;)
+          pause();
+      }
+      NSString *peer = [NSString stringWithFormat:@"%u:%@:%@", getuid(),
+                                                  KCUAProcessBirth(owner),
+                                                  KCUAExecutable(owner)];
+      std::atomic<bool> open{false};
+      NSDictionary *scope = @{
+        @"session" : @"peer-death",
+        @"operationId" : @"input",
+        @"epoch" : @0
+      };
+      KCUASubmit(@"fixture_count", @{}, peer, scope, &open);
+      assert([KCUALeaseStatus()[@"controlled"] boolValue]);
+      kill(owner, SIGTERM);
+      waitpid(owner, nullptr, 0);
+      KCUAReapDeadScopes();
+      assert(![KCUALeaseStatus()[@"controlled"] boolValue]);
+      assert(KCUASessionEpoch(peer, @"peer-death") == 1);
+      KCUACoordinatorStop();
+      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+      puts("dead peer scope drained and lease released");
+      return 0;
+    }
+    if (argc > 1 && (strcmp(argv[1], "--lease-reclaim") == 0 ||
+                     strcmp(argv[1], "--lease-release") == 0)) {
+      if (strcmp(argv[1], "--lease-reclaim") == 0) {
+        pid_t dead = fork();
+        if (dead == 0)
+          _exit(0);
+        waitpid(dead, nullptr, 0);
+        NSString *lock = [path
+            stringByAppendingPathComponent:@".controller-lease-reclaim.lock"];
+        [[NSFileManager defaultManager]
+                  createDirectoryAtPath:lock
+            withIntermediateDirectories:NO
+                             attributes:@{
+                               NSFilePosixPermissions : @0700
+                             }
+                                  error:nil];
+        NSData *record = [NSJSONSerialization dataWithJSONObject:@{
+          @"schema" : @1,
+          @"kind" : @"kcode-cua",
+          @"pid" : @(dead),
+          @"birth" : @"dead"
+        }
+                                                         options:0
+                                                           error:nil];
+        [record writeToFile:[lock stringByAppendingPathComponent:@"owner.json"]
+                 atomically:YES];
+        [[NSFileManager defaultManager]
+            setAttributes:@{
+              NSFilePosixPermissions : @0600
+            }
+             ofItemAtPath:[lock stringByAppendingPathComponent:@"owner.json"]
+                    error:nil];
+        KCUAAcquireLease();
+        assert([KCUALeaseStatus()[@"is_owner"] boolValue]);
+        puts("dead lease reclaimer recovered");
+      } else {
+        std::atomic<bool> open{false};
+        NSDictionary *scope =
+            @{@"session" : @"only",
+              @"operationId" : @"input",
+              @"epoch" : @0};
+        KCUASubmit(@"fixture_count", @{}, @"peer", scope, &open);
+        assert([KCUALeaseStatus()[@"is_owner"] boolValue]);
+        auto release = KCUAControl(@"session_release", @{}, @"peer", scope);
+        assert([release[@"result"][@"cleanup_complete"] boolValue]);
+        assert(![KCUALeaseStatus()[@"controlled"] boolValue]);
+        puts("last scope releases physical controller lease");
+      }
+      KCUACoordinatorStop();
+      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+      return 0;
+    }
     NSDictionary *context =
         @{@"session" : @"one",
           @"operationId" : @"hold-one",
@@ -48,6 +129,7 @@ int main(int argc, const char *argv[]) {
     });
     while (!dispatchCount)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(KCUAActiveOperationCount() == 1);
     NSDictionary *queuedContext = @{
       @"session" : @"one",
       @"operationId" : @"queued-old-epoch",
@@ -74,8 +156,15 @@ int main(int argc, const char *argv[]) {
     }
     auto start = std::chrono::steady_clock::now();
     NSDictionary *cancel =
-        KCUAControl(@"operation_cancel", @{@"operation_id" : @"hold-one"},
-                    @"peer", context);
+        argc > 1 && strcmp(argv[1], "--legacy-cancel") == 0
+            ? KCUAControl(
+                  @"cancel_input_holds", @{}, @"peer", @{
+                    @"session" : @"one",
+                    @"operationId" : @"cancel-control",
+                    @"epoch" : @0
+                  })
+            : KCUAControl(@"operation_cancel", @{@"operation_id" : @"hold-one"},
+                          @"peer", context);
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::steady_clock::now() - start)
                        .count();
@@ -88,6 +177,7 @@ int main(int argc, const char *argv[]) {
     assert(elapsed >= 75);
     execute.join();
     queued.join();
+    assert(KCUAActiveOperationCount() == 0);
     assert([queuedResult[@"error"][@"code"] isEqual:@"cancelled"]);
     assert(dispatchCount == 1);
     assert([result[@"error"][@"code"] isEqual:@"cancelled"]);

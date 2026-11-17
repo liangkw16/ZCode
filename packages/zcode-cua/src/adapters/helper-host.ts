@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { mkdir, lstat, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { withLifecycleGuard } from "./lifecycle-guard.js";
+import { runtimeDirectory, resolveBrokerSocketPath } from "./socket-path.js";
 import type {
   CuaHelperHandle,
   CuaHelperHost,
@@ -15,20 +16,16 @@ import {
   HELPER_ID,
   helperManifest,
 } from "./helper-installer.js";
+import { readFreshHelperPermissions } from "./permission-launch.js";
+import { socketOwner, retireProcess, type ProcessIdentity } from "./process-identity.js";
 const exec = promisify(execFile);
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function processExecutable(pid: number) {
-  const { stdout } = await exec("/bin/ps", ["-p", String(pid), "-o", "comm="]);
-  return stdout.trim();
-}
 export function createProductCuaHelperHost(
   options: CreateProductCuaHelperHostOptions = {},
 ): CuaHelperHost {
   const env = options.env ?? process.env;
-  const runtimeDir = env.XDG_RUNTIME_DIR
-    ? join(env.XDG_RUNTIME_DIR, "zcode-cua")
-    : `/tmp/zcode-cua-${process.getuid?.() ?? "nouid"}`;
-  const path = env.ZCODE_CUA_PERMISSION_BROKER_SOCKET || join(runtimeDir, "broker.sock");
+  const runtimeDir = runtimeDirectory(env);
+  const path = resolveBrokerSocketPath({ env });
   const authority = randomUUID();
   const installer =
     options.helperInstaller ??
@@ -36,7 +33,8 @@ export function createProductCuaHelperHost(
   let handle: CuaHelperHandle | undefined;
   let starting: Promise<CuaHelperHandle> | undefined;
   let stopping: Promise<void> | undefined;
-  let ownedPid: number | undefined;
+  let lastIdentity: ProcessIdentity | undefined;
+  let restarting: Promise<{ handle: CuaHelperHandle; reused: boolean }> | undefined;
   let appPath: string | undefined;
   const client = () => createBrokerClient({ socketPath: path, timeoutMs: 2500 });
   async function query<T>(method: string, params?: Record<string, unknown>) {
@@ -54,6 +52,7 @@ export function createProductCuaHelperHost(
       generation: string;
       main_loop_responsive: boolean;
       version: string;
+      desktop_epoch: number;
     }>("broker_info");
     if (
       info.bundle_id !== HELPER_ID ||
@@ -65,8 +64,15 @@ export function createProductCuaHelperHost(
         "helper_unresponsive",
         "Helper identity or AppKit health check failed",
       );
-    if (appPath && (await processExecutable(info.pid)) !== executablePath(appPath))
-      throw new NativeBrokerError("not_authorized", "Socket belongs to another executable");
+    if (appPath) {
+      const owner = await socketOwner(executablePath(appPath), path, executablePath(appPath));
+      if (owner.pid !== info.pid)
+        throw new NativeBrokerError(
+          "not_authorized",
+          "Reported PID does not own the Helper socket",
+        );
+      lastIdentity = owner;
+    }
     if (appPath && (await helperManifest(appPath)).buildId !== info.version)
       throw new NativeBrokerError(
         "version_mismatch",
@@ -74,9 +80,21 @@ export function createProductCuaHelperHost(
       );
     return info;
   }
-  async function start() {
-    if (stopping) await stopping;
-    appPath = await installer.ensureInstalled();
+  async function startLocked(guardHeld = false): Promise<CuaHelperHandle> {
+    try {
+      appPath = await installer.ensureInstalled();
+    } catch (error) {
+      if (
+        !(error instanceof NativeBrokerError) ||
+        error.code !== "upgrade_required" ||
+        !guardHeld ||
+        !options.bundledHelperAppPath
+      )
+        throw error;
+      const identity = error.details as unknown as ProcessIdentity;
+      await retireProcess(executablePath(options.bundledHelperAppPath), identity);
+      appPath = await installer.ensureInstalled();
+    }
     await installer.verifyInstalled(appPath);
     await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
     const directory = await lstat(runtimeDir);
@@ -102,13 +120,32 @@ export function createProductCuaHelperHost(
       return handle;
     } catch (error) {
       // 签名或版本不匹配不能当作“未启动”另起进程，避免并行原生 owner。
-      if (
-        !(error instanceof NativeBrokerError) ||
-        error.code !== "broker_unavailable" ||
-        !["ENOENT", "ECONNREFUSED"].includes(String(error.details.connection_code))
-      )
-        throw error;
+      if (!(error instanceof NativeBrokerError)) throw error;
+      const absent =
+        error.code === "broker_unavailable" &&
+        ["ENOENT", "ECONNREFUSED"].includes(String(error.details.connection_code));
+      const stalled = ["timeout", "helper_unresponsive"].includes(error.code);
+      if (!absent && !stalled) throw error;
+      if (stalled && !guardHeld)
+        await socketOwner(executablePath(appPath), path, executablePath(appPath)).catch(() => {
+          throw error;
+        });
+      if (!guardHeld) return withLifecycleGuard(appPath, runtimeDir, () => startLocked(true));
+      if (stalled) {
+        // 超时不能证明进程死亡；先由内核 socket owner 和签名确认归属，再收敛旧进程。
+        const identity = await socketOwner(
+          executablePath(appPath),
+          path,
+          executablePath(appPath),
+        ).catch(() => {
+          throw error;
+        });
+        await retireProcess(executablePath(appPath), identity);
+        handle = undefined;
+        lastIdentity = undefined;
+      }
     }
+    if (!guardHeld) return withLifecycleGuard(appPath, runtimeDir, () => startLocked(true));
     try {
       const stale = await lstat(path);
       if (!stale.isSocket() || stale.uid !== process.getuid?.())
@@ -125,6 +162,8 @@ export function createProductCuaHelperHost(
       runtimeDir,
       "--launcher-pid",
       String(process.pid),
+      "--pip-mode",
+      "--ghost-cursor-overlay",
     ];
     if (env.ZCODE_CUA_HELPER_ALLOW_UNSIGNED_LOCAL === "1")
       args.push("--allow-unsigned-launcher-local-dev");
@@ -134,7 +173,6 @@ export function createProductCuaHelperHost(
     do {
       try {
         const info = await health();
-        ownedPid = info.pid;
         handle = {
           socketPath: path,
           launchSocketPath: path,
@@ -159,6 +197,57 @@ export function createProductCuaHelperHost(
       `Source Helper did not become ready (${last instanceof NativeBrokerError ? last.code : "unknown"})`,
     );
   }
+  async function start() {
+    if (options.bundledHelperAppPath) {
+      await installer.verifyInstalled(options.bundledHelperAppPath);
+      return withLifecycleGuard(options.bundledHelperAppPath, runtimeDir, () => startLocked(true));
+    }
+    return startLocked();
+  }
+  function restartFresh(
+    beforeFreshStart?: () => void,
+  ): Promise<{ handle: CuaHelperHandle; reused: boolean }> {
+    if (stopping) return stopping.then(() => restartFresh(beforeFreshStart));
+    if (restarting) return restarting;
+    const expectedPid = handle?.pid;
+    const pendingStart = starting;
+    restarting = (async () => {
+      if (pendingStart) await pendingStart;
+      const guardApp =
+        options.bundledHelperAppPath ?? appPath ?? (await installer.ensureInstalled());
+      await installer.verifyInstalled(guardApp);
+      return withLifecycleGuard(guardApp, runtimeDir, async () => {
+        appPath ??= await installer.ensureInstalled();
+        const identity = await socketOwner(
+          executablePath(guardApp),
+          path,
+          executablePath(appPath!),
+        ).catch(async (error) => {
+          if (lastIdentity) return lastIdentity;
+          throw error;
+        });
+        if (expectedPid && identity.pid !== expectedPid)
+          return { handle: await startLocked(true), reused: true };
+        // 正常重启不能打断其他 Host 的原生工作；失去响应时按精确身份执行受控恢复。
+        const status = await query<{ active_operations?: number }>("controller_status").catch(
+          () => undefined,
+        );
+        if (status && typeof status.active_operations === "number" && status.active_operations > 0)
+          throw new NativeBrokerError(
+            "controller_busy",
+            "Native work must drain before restarting the shared Helper",
+          );
+        await retireProcess(executablePath(guardApp), identity);
+        lastIdentity = undefined;
+        handle = undefined;
+        beforeFreshStart?.();
+        return { handle: await startLocked(true), reused: false };
+      });
+    })().finally(() => {
+      restarting = undefined;
+    });
+    return restarting;
+  }
   const host: CuaHelperHost = {
     get running() {
       return Boolean(handle);
@@ -173,6 +262,8 @@ export function createProductCuaHelperHost(
       return { socketPath: path, pluginAuthority: authority };
     },
     start() {
+      if (stopping) return stopping.then(() => host.start());
+      if (restarting) return restarting.then((result) => result.handle);
       if (!starting)
         starting = start()
           .catch((error) => {
@@ -186,9 +277,11 @@ export function createProductCuaHelperHost(
     },
     async stop() {
       if (stopping) return stopping;
+      const pendingStart = starting,
+        pendingRestart = restarting;
       stopping = (async () => {
-        if (starting) await starting.catch(() => {});
-        // Shared service stays alive when another Host may own sessions. Logical session cleanup belongs to runtime.dispose.
+        await Promise.allSettled([pendingStart, pendingRestart]);
+        // 先等已接受的重启收敛，避免 stop 完成后又写回 running；共享 Helper 仍由其他 Host 复用。
         handle = undefined;
       })().finally(() => {
         stopping = undefined;
@@ -196,39 +289,13 @@ export function createProductCuaHelperHost(
       return stopping;
     },
     async restart() {
-      if (starting) await starting;
-      if (
-        ownedPid &&
-        appPath &&
-        (await processExecutable(ownedPid).catch(() => "")) === executablePath(appPath)
-      ) {
-        process.kill(ownedPid, "SIGTERM");
-        const deadline = Date.now() + 8000;
-        while (Date.now() < deadline) {
-          try {
-            process.kill(ownedPid, 0);
-          } catch {
-            ownedPid = undefined;
-            break;
-          }
-          await pause(50);
-        }
-        if (ownedPid)
-          throw new NativeBrokerError(
-            "cleanup_incomplete",
-            "Previous Helper has not exited; refusing a parallel restart",
-          );
-      }
-      handle = undefined;
-      return host.start();
+      return (await restartFresh()).handle;
     },
     restartAfterCurrentStart() {
       return host.restart();
     },
-    async restartAfterCurrentStartPreservingTransport(restartOptions) {
-      restartOptions?.beforeFreshStart?.();
-      const next = await host.restart();
-      return { handle: next, reused: false };
+    restartAfterCurrentStartPreservingTransport(restartOptions) {
+      return restartFresh(restartOptions?.beforeFreshStart);
     },
     async waitForTransport() {
       const current = await host.start();
@@ -243,18 +310,24 @@ export function createProductCuaHelperHost(
     },
     async queryScreenRecordingPreflight() {
       if (!appPath) await host.start();
-      const { stdout } = await exec(
-        executablePath(appPath!),
-        ["--permission-preflight", "screen"],
-        { env, timeout: 3000, maxBuffer: 8192 },
-      );
-      const result: { screen_recording?: string } = JSON.parse(stdout);
-      return ["granted", "denied", "unknown"].includes(result.screen_recording ?? "")
-        ? (result.screen_recording as "granted" | "denied" | "unknown")
-        : "unknown";
+      return (await readFreshHelperPermissions({ appPath: appPath!, env })).screen_recording;
     },
-    async queryPermissionStatus() {
-      return query("permission_status");
+    async queryPermissionStatus(queryOptions) {
+      if (!appPath) await host.start();
+      const healthInfo = await health();
+      const fresh = await readFreshHelperPermissions({ appPath: appPath!, env });
+      const resident = await query<import("../../broker-server.js").CuaPermissionStatusQueryReport>(
+        "permission_status",
+        { include_functional_probes: queryOptions?.includeFunctionalProbes === true },
+      );
+      return {
+        ...resident,
+        ...fresh,
+        accessibility_probe: resident.accessibility_probe,
+        helper_generation: healthInfo.generation,
+        desktop_epoch: healthInfo.desktop_epoch,
+        fresh_preflight: true,
+      };
     },
   };
   return host;

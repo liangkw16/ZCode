@@ -271,3 +271,9 @@ must still fail before input dispatch. Native action and post-install evidence r
 - 同一份旧历史连续重发时，provider 收到的解码后文本无孤立 surrogate；合法 emoji、历史原文、媒体配对和错误语义保持有效。
 - 已安装版本中，保留发生 UTF-8 编码 500 的原会话，发送仅查询窗口与截图的后续请求，验证无需删除历史即可完成。
 - 在专用验收会话发起真实模型电脑操作，主动中断，再次发送只读电脑操作；须重新取得真实窗口 AX 与 image block，并检查无该编码 500 或 Helper“不响应”。
+
+### 2026-11-17 source Helper 权限回归
+
+沿用设置页候选用例，增加 granted→unknown、granted→denied 与 locked 样本，确认旧授权/功能探针不覆盖新事实，后台查询从不带主动截图意图。source Helper 的真实 TCC 授予/撤销/重授、代际变化和锁定恢复仍需 M2 M05/M06 运行证据；注入响应的 UI 用例不能代替真实 OS 验收。
+
+设置页候选 E2E 已在 `packages/desktop/.e2e-artifacts/desktop-e2e-20261117152424494-p64959-0de6a1c3203b4ec4` 通过（2/2，显式 common fixture replay；不调用模型）。此前两次运行分别停在 capture 缺配置、相对 fixture 路径解析的准备阶段，未执行 UI 断言。真实 OS 与模型矩阵仍为 pending。

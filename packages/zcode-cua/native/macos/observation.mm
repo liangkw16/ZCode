@@ -1,4 +1,5 @@
 #import "automation.h"
+#import "text-contract.h"
 #include <chrono>
 #include <cmath>
 #include <dlfcn.h>
@@ -259,6 +260,7 @@ struct ElementRecord {
   __strong NSString *peer, *session, *role, *title, *identifier;
   CGRect bounds;
   uint64_t epoch;
+  bool visible = true;
   ElementRecord(AXUIElementRef item)
       : element((AXUIElementRef)CFRetain(item)) {}
   ~ElementRecord() { CFRelease(element); }
@@ -272,13 +274,16 @@ static NSString *textAttribute(AXUIElementRef item, CFStringRef attribute,
 }
 static NSDictionary *describeElement(AXUIElementRef item,
                                      const KCUATargetRef &target,
-                                     const KCUAOp &op, NSUInteger depth) {
+                                     const KCUAOp &op, NSUInteger depth,
+                                     bool visible = true) {
   NSString *role = textAttribute(item, kAXRoleAttribute, 128);
   if (!role)
     return nil;
-  NSString *title = textAttribute(item, kAXTitleAttribute)
-                        ?: textAttribute(item, kAXDescriptionAttribute);
-  NSString *value = textAttribute(item, kAXValueAttribute, 16384);
+  NSString *title =
+      KCUAElementLabel(textAttribute(item, kAXTitleAttribute),
+                       textAttribute(item, kAXDescriptionAttribute));
+  // AXValue 的数字/布尔值是 checkbox、slider 的真实状态，不能按字符串过滤掉。
+  id value = KCUAAXScalarValue(KCUAAXAttribute(item, kAXValueAttribute));
   NSString *identifier = textAttribute(item, kAXIdentifierAttribute, 1024);
   CFArrayRef actionsRef = nullptr;
   AXUIElementCopyActionNames(item, &actionsRef);
@@ -293,6 +298,7 @@ static NSDictionary *describeElement(AXUIElementRef item,
   record->identifier = identifier;
   record->bounds = bounds;
   record->epoch = op->epoch;
+  record->visible = visible;
   NSString *token = [NSUUID UUID].UUIDString;
   elements[token.UTF8String] = record;
   bool editable = [role isEqual:@"AXTextField"] ||
@@ -337,8 +343,8 @@ static AXUIElementRef refetch(const std::shared_ptr<ElementRecord> &record,
             ? [textAttribute(node, kAXIdentifierAttribute, 1024)
                   isEqual:record->identifier]
             : (record->title.length &&
-               [textAttribute(node, kAXTitleAttribute)
-                       ?: textAttribute(node, kAXDescriptionAttribute)
+               [KCUAElementLabel(textAttribute(node, kAXTitleAttribute),
+                                 textAttribute(node, kAXDescriptionAttribute))
                    isEqual:record->title] &&
                CGRectEqualToRect(KCUAAXBounds(node), record->bounds));
     if (sameRole && sameIdentity) {
@@ -383,8 +389,9 @@ AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &op,
            ? [textAttribute(record->element, kAXIdentifierAttribute, 1024)
                  isEqual:record->identifier]
            : ((record->title.length == 0 ||
-               [(textAttribute(record->element, kAXTitleAttribute)
-                     ?: textAttribute(record->element, kAXDescriptionAttribute))
+               [KCUAElementLabel(
+                   textAttribute(record->element, kAXTitleAttribute),
+                   textAttribute(record->element, kAXDescriptionAttribute))
                    isEqual:record->title]) &&
               CGRectEqualToRect(KCUAAXBounds(record->element),
                                 record->bounds)));
@@ -496,7 +503,9 @@ id KCUAObservation(NSString *method, NSDictionary *params, const KCUAOp &op) {
     auto &r = it->second;
     if ([r->peer isEqual:op->peer] && [r->session isEqual:op->session] &&
         r->target->pid == target->pid &&
-        r->target->windowId == target->windowId)
+        r->target->windowId == target->windowId &&
+        ([params[@"tree_shown_to_model"] boolValue] ||
+         params[@"tree_shown_to_model"] == nil || !r->visible))
       it = elements.erase(it);
     else
       ++it;
@@ -519,7 +528,10 @@ id KCUAObservation(NSString *method, NSDictionary *params, const KCUAOp &op) {
     auto node = pending.back();
     pending.pop_back();
     AXUIElementRef item = (__bridge AXUIElementRef)node.item;
-    NSDictionary *description = describeElement(item, target, op, node.depth);
+    NSDictionary *description =
+        describeElement(item, target, op, node.depth,
+                        params[@"tree_shown_to_model"] == nil ||
+                            [params[@"tree_shown_to_model"] boolValue]);
     if (description) {
       payloadBytes += [NSJSONSerialization dataWithJSONObject:description
                                                       options:0

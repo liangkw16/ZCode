@@ -80,16 +80,16 @@
 
 **Interfaces:** Native permission facts are authoritative; background query never prompts/captures. Installed Helper identity and source manifest are verified before launch; transport ownership stays in services.
 
-- [ ] Maintain permission E2E scenarios for denied/unknown/locked/probe pending before UI implementation. Add engineering packaging checks against private recovery dependencies.
-- [ ] Wire source Helper build into Release packaging, remove obsolete recovered-binary patching and placeholder-only gates; preserve Windows isolation. Fix stale permission ready projection and fresh preflight failure mapping.
-- [ ] Run `pnpm typecheck`, `pnpm lint`, related CUA/engineering checks, format and architecture checks. Review hooks warnings if React changed. Build signed Release from source and record provenance.
-- [ ] Commit and ledger, keeping baseline failures explicit.
+- [x] Maintain permission E2E scenarios for denied/unknown/locked/probe pending before UI implementation. Add engineering packaging checks against private recovery dependencies.
+- [x] Wire source Helper build into Release packaging, remove obsolete recovered-binary patching and placeholder-only gates; preserve Windows isolation. Fix stale permission ready projection and fresh preflight failure mapping.
+- [x] Run `pnpm typecheck`, `pnpm lint`, related CUA/engineering checks, format and architecture checks. Review hooks warnings if React changed. Build signed Release from source and record provenance.
+- [x] Commit and ledger, keeping baseline failures explicit.
 
 ### Task 6: M2 installed Release acceptance and final review
 
 **Files:** `docs/cua/validation/2026-11-17-kcode-cua-m2.md`, reproducible native/browser/model acceptance scripts under CUA test, evidence in ignored task workspace.
 
-**Interfaces:** M01–M11 in the spec are the completion gate. SSH alias `m2`; install canonical apps in `~/Applications` after checking existing installations. Use M2 signing identity locally; never transfer signing keys or silently copy account secrets.
+**Interfaces:** M01–M11 in the spec are the completion gate. SSH alias `m2`; install canonical apps in `~/Applications` after checking existing installations. Sign Main and Helper together on the build Mac using its available identity, then verify signatures on M2; never transfer signing keys or silently copy account secrets. Record the independent M2 source compilation separately.
 
 - [ ] Inspect M2 toolchain/session/configuration and provision missing public build tools. Source-only build on clean inputs, verify 12/14/43 contracts and signatures (M01).
 - [ ] Install Release and run real-config cold starts x3, cancellation and recovery/lock matrix, actual permission facts, all tools and browser oracle (M02–M08). Manual unlock is an explicit user action; no automatic unlock.

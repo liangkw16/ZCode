@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { CuaHelperInstaller, CuaHelperInstallerOptions } from "../../broker-server.js";
 import { NativeBrokerError } from "./broker-client.js";
+import { certificateFingerprint, productMainCertificate } from "./signing.js";
+import { findLiveHelper } from "./process-identity.js";
 const exec = promisify(execFile);
 export const HELPER_NAME = "KCode Computer Use.app";
 export const HELPER_ID = "dev.zcode.cua-helper.kcode";
@@ -38,6 +40,7 @@ export function createCuaHelperInstaller(
   const installRoot = env.ZCODE_CUA_HELPER_INSTALL_ROOT || join(homedir(), "Applications");
   const destination = join(installRoot, HELPER_NAME);
   let installing: Promise<string> | undefined;
+  let mainCertificate: Promise<string | undefined> | undefined;
   const verifyInstalled = async (app: string) => {
     const info = await lstat(app);
     if (info.isSymbolicLink() || !info.isDirectory())
@@ -53,6 +56,21 @@ export function createCuaHelperInstaller(
         "Helper is not a compatible source-built KCode producer",
       );
     await defaultCuaHelperVerifierDependencies.verifyCodeSignature(app);
+    mainCertificate ??= productMainCertificate();
+    const [mainSigner, helperSigner] = await Promise.all([
+      mainCertificate,
+      certificateFingerprint(app),
+    ]);
+    // manifest 的 signing 字段只是构建记录；实际签名必须匹配正在运行的 KCode 主应用。
+    if (
+      mainSigner
+        ? helperSigner !== mainSigner
+        : !(env.ZCODE_CUA_HELPER_ALLOW_UNSIGNED_LOCAL === "1" && helperSigner === undefined)
+    )
+      throw new NativeBrokerError(
+        "not_authorized",
+        "Helper signer does not match the verified KCode application",
+      );
     const readArchs =
       options.dependencies?.readExecutableArchs ??
       defaultCuaHelperVerifierDependencies.readExecutableArchs;
@@ -86,14 +104,24 @@ export function createCuaHelperInstaller(
     }
     await verifyInstalled(source);
     if (resolve(source) === resolve(destination)) return destination;
+    let exists = true;
     try {
+      await lstat(destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      exists = false;
+    }
+    if (exists) {
       await verifyInstalled(destination);
       if ((await helperManifest(source)).buildId === (await helperManifest(destination)).buildId)
         return destination;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        /* Existing invalid installation is replaced only after source verification. */
-      }
+      const live = await findLiveHelper(executablePath(source), executablePath(destination));
+      if (live)
+        throw new NativeBrokerError(
+          "upgrade_required",
+          "Running source Helper must exit before replacing its bundle",
+          { ...live },
+        );
     }
     await mkdir(installRoot, { recursive: true });
     const stagingRoot = await mkdtemp(join(installRoot, ".kcode-cua-install-"));

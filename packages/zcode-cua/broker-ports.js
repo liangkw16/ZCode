@@ -4,11 +4,14 @@ export function isCuaPermissionStatusAvailable(result) {
     Boolean(result) &&
     typeof result === "object" &&
     result.available !== false &&
-    "accessibility" in result &&
-    "screenRecording" in result
+    ["granted", "stale", "denied", "unknown"].includes(result.accessibility) &&
+    ["granted", "stale", "denied", "unknown"].includes(result.screenRecording)
   );
 }
 
 export function shouldRunCuaScreenCaptureProbe(state, options) {
-  return state === "granted" && options?.probeScreenCapture === true;
+  return (
+    state === "granted" &&
+    (options?.probeScreenCapture === true || options?.includeFunctionalProbes === true)
+  );
 }

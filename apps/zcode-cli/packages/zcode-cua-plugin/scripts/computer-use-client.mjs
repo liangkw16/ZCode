@@ -93,6 +93,7 @@ const ERROR_CODE_BY_BROKER = Object.freeze({
   desktop_locked: "DESKTOP_LOCKED",
   desktop_unavailable: "HELPER_UNAVAILABLE",
   stopped: "CONTROL_STOPPED",
+  control_stopped: "CONTROL_STOPPED",
   cancelled: "CANCELLED",
   cleanup_incomplete: "CLEANUP_INCOMPLETE",
   unimplemented: "ACTION_UNAVAILABLE",

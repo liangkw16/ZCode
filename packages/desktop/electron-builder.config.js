@@ -34,7 +34,7 @@ import {
   findMissingMacElectronLocales,
   resolveMacElectronFrameworkResourcesDir,
 } from "./scripts/mac-electron-locales.mjs";
-import { verifyStagedKoffi } from "./scripts/koffi-package-assets.mjs";
+
 import {
   finalizePackagedWindowsCuaHelper,
   resolveElectronBuilderWindowsTarget,
@@ -74,7 +74,10 @@ const shouldEnableMacSigning =
 const workspaceRoot = resolve(import.meta.dirname, "../..");
 const desktopPackageRoot = import.meta.dirname;
 // Computer Use Helper（macOS .app、Windows runtime）只随真实 producer 打包；开源占位包下跳过随包资源与校验。
-const shouldPackageComputerUseHelper = isRealComputerUseProducerInstalled({ desktopPackageRoot });
+const shouldPackageComputerUseHelper = isRealComputerUseProducerInstalled({
+  desktopPackageRoot,
+  platform: targetPlatform.os,
+});
 const HELPER_FILENAME = "zcode-browser-import-helper.exe";
 const runtimeModuleLookupRoots = [
   desktopPackageRoot,
@@ -84,9 +87,9 @@ const runtimeModuleLookupRoots = [
 ];
 const desktopDistDir = process.env.ZCODE_DESKTOP_DIST_DIR || "dist";
 const bundledCuaHelperSource = resolve(
-  desktopPackageRoot,
-  "bundled-cua-helper",
-  targetPlatform.arch,
+  workspaceRoot,
+  "packages/zcode-cua/dist/native",
+  `darwin-${targetPlatform.arch}`,
   HELPER_APP_NAME,
 );
 const DEFAULT_ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/";
@@ -543,18 +546,6 @@ function assertPackagedCuaSharp(context) {
   }
 }
 
-function assertPackagedCuaKoffi(context) {
-  const problems = verifyStagedKoffi({
-    resourcesDir: resolvePackagedResourcesDir(context),
-    targetPlatform,
-  });
-  if (problems.length > 0) {
-    throw new Error(
-      `CUA plugin koffi runtime is incomplete in the packaged app:\n- ${problems.join("\n- ")}`,
-    );
-  }
-}
-
 function assertSignedWindowsHelper(context, relativeHelperPath) {
   if (context.electronPlatformName !== "win32" || !shouldEnableWindowsVsign) return;
   const helperPath = resolve(context.appOutDir, "resources", relativeHelperPath);
@@ -767,7 +758,6 @@ export default {
       assertPackagedNodePtyPrebuild(context),
     );
     runTimedSync("afterPack:assertPackagedCuaSharp", () => assertPackagedCuaSharp(context));
-    runTimedSync("afterPack:assertPackagedCuaKoffi", () => assertPackagedCuaKoffi(context));
     runTimedSync("afterPack:assertPackagedCuaHelper", () => assertPackagedCuaHelper(context));
     runTimedSync("afterPack:assertPackagedMacElectronLocales", () =>
       assertPackagedMacElectronLocales(context),

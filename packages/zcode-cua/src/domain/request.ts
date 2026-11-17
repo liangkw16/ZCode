@@ -53,6 +53,10 @@ export function appReference(v: unknown): Bag {
   for (const key of ["pid", "window_id"])
     if (app[key] !== undefined && !positiveInteger(app[key]))
       fail(`${key} must be a positive integer`);
+  if (app.pid !== undefined && app.pid > 2147483647)
+    fail("pid exceeds the native process ID range");
+  if (app.window_id !== undefined && app.window_id > 4294967295)
+    fail("window_id exceeds the native window ID range");
   for (const key of ["bundle_id", "name"])
     if (
       app[key] !== undefined &&

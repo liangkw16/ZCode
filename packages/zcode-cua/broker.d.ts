@@ -109,6 +109,10 @@ export interface CuaPermissionStatus {
   screenCaptureProbeOk?: boolean;
   idle?: boolean;
   reason?: string;
+  helperGeneration?: string;
+  desktopEpoch?: number;
+  desktopAvailability?: "unlocked" | "locked" | "unknown";
+  freshPreflight?: boolean;
 }
 
 export interface CuaPermissionStatusUnavailable {

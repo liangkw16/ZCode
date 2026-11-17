@@ -4,36 +4,21 @@
 #include <chrono>
 #include <thread>
 
+extern NSString *KCUADesktopAvailabilityFromFacts(NSDictionary *, NSArray *, id,
+                                                  uid_t);
 NSString *KCUADesktopAvailability(void) {
   NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
-  if (!session)
-    return @"unknown";
-  if ([session[@"CGSSessionScreenIsLocked"] boolValue])
-    return @"locked";
-  if (![session[(__bridge NSString *)kCGSessionOnConsoleKey] boolValue] ||
-      ![session[(__bridge NSString *)kCGSessionLoginDoneKey] boolValue])
-    return @"unknown";
-  // 锁屏状态在部分系统只发布在
-  // IOConsoleUsers；缺失事实时不把后台进程当成解锁证明。
   io_registry_entry_t root = IORegistryGetRootEntry(kIOMainPortDefault);
-  CFTypeRef usersRef =
-      root ? IORegistryEntryCreateCFProperty(root, CFSTR("IOConsoleUsers"),
-                                             kCFAllocatorDefault, 0)
-           : nullptr;
+  id users = root ? CFBridgingRelease(IORegistryEntryCreateCFProperty(
+                        root, CFSTR("IOConsoleUsers"), kCFAllocatorDefault, 0))
+                  : nil;
+  id locked = root
+                  ? CFBridgingRelease(IORegistryEntryCreateCFProperty(
+                        root, CFSTR("IOConsoleLocked"), kCFAllocatorDefault, 0))
+                  : nil;
   if (root)
     IOObjectRelease(root);
-  NSArray *users = CFBridgingRelease(usersRef);
-  for (NSDictionary *user in [users isKindOfClass:NSArray.class] ? users
-                                                                 : @[]) {
-    if ([user[@"kCGSSessionUserIDKey"] unsignedIntValue] != getuid())
-      continue;
-    id locked = user[@"CGSSessionScreenIsLocked"];
-    if ([locked isKindOfClass:NSNumber.class])
-      return [locked boolValue] ? @"locked" : @"unlocked";
-  }
-  if (session[@"CGSSessionScreenIsLocked"] != nil)
-    return @"unlocked";
-  return @"unknown";
+  return KCUADesktopAvailabilityFromFacts(session, users, locked, getuid());
 }
 void KCUARequireDesktop(void) {
   NSString *availability = KCUADesktopAvailability();
@@ -102,9 +87,12 @@ void KCUAStartAvailabilityTracking(void) {
                 observeAvailability(@"locked");
               }];
   availabilityThread = std::thread([] {
+    unsigned tick = 0;
     while (!availabilityStopping) {
       @autoreleasepool {
         observeAvailability(KCUADesktopAvailability());
+        if (++tick % 20 == 0)
+          KCUAReapDeadScopes();
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

@@ -174,11 +174,14 @@ function isFunctionallyReady(result: CuaPermissionStatusResult | null): boolean 
     result.accessibility === "granted" &&
     result.accessibilityProbeOk === true &&
     result.screenRecording === "granted" &&
-    result.screenCaptureProbeOk === true
+    result.screenCaptureProbeOk === true &&
+    result.desktopAvailability === "unlocked" &&
+    typeof result.helperGeneration === "string" &&
+    typeof result.desktopEpoch === "number"
   );
 }
 
-/** 应用 sticky 探针，返回真正对外发布的结果。 */
+/** 同一原生代际/桌面 epoch 才能沿用探针；锁屏或重启后旧成功不是当前功能证明。 */
 function withStickyProbes(
   slot: Slot,
   result: CuaPermissionStatusResult,
@@ -194,7 +197,12 @@ function withStickyProbes(
   if (
     slot.stickyReady &&
     result.accessibility === "granted" &&
-    result.screenRecording === "granted"
+    result.screenRecording === "granted" &&
+    result.desktopAvailability === "unlocked" &&
+    typeof result.helperGeneration === "string" &&
+    result.helperGeneration === slot.stickyReady.helperGeneration &&
+    typeof result.desktopEpoch === "number" &&
+    result.desktopEpoch === slot.stickyReady.desktopEpoch
   ) {
     return {
       ...result,

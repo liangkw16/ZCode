@@ -361,6 +361,39 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
     element = KCUAResolveElement(params, op, &target);
   else
     target = KCUAResolveTarget(params[@"app_ref"] ?: @{}, op, false);
+  if (!element) {
+    NSMutableDictionary *resolved = [params mutableCopy];
+    auto pointForNative = [&](NSString *token) -> NSDictionary * {
+      KCUATargetRef owner;
+      AXUIElementRef observed =
+          KCUAResolveElement(@{@"native" : token}, op, &owner);
+      if (owner->pid != target->pid || owner->windowId != target->windowId ||
+          ![owner->birth isEqual:target->birth])
+        KCUAFail(
+            @"element_unavailable", @"Event target belongs to another window",
+            @{@"action_sent" : @NO});
+      CGRect bounds = KCUAAXBounds(observed);
+      if (CGRectIsEmpty(bounds) ||
+          !CGRectIntersectsRect(bounds, target->bounds))
+        KCUAFail(
+            @"element_unavailable",
+            @"Event target is not visible in the verified window",
+            @{@"action_sent" : @NO});
+      CGRect visible = CGRectIntersection(bounds, target->bounds);
+      return
+          @{@"x" : @(CGRectGetMidX(visible)),
+            @"y" : @(CGRectGetMidY(visible))};
+    };
+    // 原生索引对应的事件点必须在派发前按 token 重取，不能直接使用旧树里的
+    // bounds。
+    if (params[@"native_target"])
+      resolved[@"point"] = pointForNative(params[@"native_target"]);
+    if (params[@"from_native"])
+      resolved[@"from"] = pointForNative(params[@"from_native"]);
+    if (params[@"to_native"])
+      resolved[@"to"] = pointForNative(params[@"to_native"]);
+    params = resolved;
+  }
   if (activationPolicy.count(policyKey) && !activationPolicy[policyKey] &&
       NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier !=
           target->pid)

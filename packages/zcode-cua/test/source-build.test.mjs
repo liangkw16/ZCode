@@ -38,3 +38,15 @@ test("native builder rejects an unsupported architecture before compilation", as
   assert.notEqual(result.code, 0);
   assert.match(result.output, /Unsupported architecture/);
 });
+test(
+  "native application metadata uses an OS-valid numeric bundle version",
+  { skip: process.platform !== "darwin" },
+  async () => {
+    const plist = await readFile(
+      resolve(root, "dist/native/darwin-arm64/KCode Computer Use.app/Contents/Info.plist"),
+      "utf8",
+    );
+    const version = plist.match(/<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+    assert.match(version ?? "", /^\d+(?:\.\d+){0,2}$/);
+  },
+);

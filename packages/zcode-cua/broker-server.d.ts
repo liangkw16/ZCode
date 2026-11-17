@@ -123,7 +123,9 @@ export interface CuaHelperHost extends CuaProductHelperHost {
   waitForTransport(timeoutMs?: number): Promise<CuaHelperTransportHandle>;
   queryScreenCaptureProbe(): Promise<{ ok: boolean; reason?: string }>;
   queryScreenRecordingPreflight(): Promise<"granted" | "denied" | "unknown" | undefined>;
-  queryPermissionStatus(): Promise<CuaPermissionStatusQueryReport>;
+  queryPermissionStatus(options?: {
+    includeFunctionalProbes?: boolean;
+  }): Promise<CuaPermissionStatusQueryReport>;
 }
 
 export interface CuaHelperTransportRestartOptions {

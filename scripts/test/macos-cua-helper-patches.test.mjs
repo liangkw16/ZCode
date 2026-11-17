@@ -5,6 +5,7 @@ import {
   patchMacosCuaSessionGate,
   macosCuaScrollDistance,
   patchMacosCuaScrollPages,
+  dispatchMacosCuaScrollPixels,
 } from "../../packages/desktop/scripts/macos-cua-helper-patches.mjs";
 
 function fixture(states) {
@@ -118,10 +119,54 @@ test("macOS scroll pages use the validated window axis with a visible page dista
 test("scroll patch converts only the unique macOS window dispatch and refuses drift", () => {
   const call =
     "adapter.scrollToWindow(target.pid, target.bundleId, target.windowId, target.bounds, point2.x, point2.y, amount2, direction2, ...provenAttachedSurfaceArgs(target))";
-  const patched = patchMacosCuaScrollPages(call);
+  const adapter = `scrollToWindow: hasMacBackgroundInput ? (...args) => withMacBackgroundSequence("scroll_to_window", () => {
+      const dispatch = scrollToWindow ?? scrollToWindowLegacy;
+      return dispatch(...args);
+    }) : void 0,`;
+  const source = call + ";\nconst adapterFixture = {" + adapter + "};";
+  const patched = patchMacosCuaScrollPages(source);
   assert.match(patched, /macosCuaScrollDistance/);
+  assert.match(patched, /withMacBackgroundSequence\("scroll_to_window", \(\) =>/);
+  assert.match(patched, /dispatchMacosCuaScrollPixels/);
   assert.doesNotThrow(() => new Function(patched));
   assert.throws(() => patchMacosCuaScrollPages("unknown"), /exactly one/);
-  assert.throws(() => patchMacosCuaScrollPages(call + call), /exactly one/);
+  assert.throws(() => patchMacosCuaScrollPages(source + source), /exactly one/);
   assert.throws(() => patchMacosCuaScrollPages(patched), /exactly one/);
+});
+
+test("native scroll dispatch keeps every event within the 100px ABI and preserves target proof", async () => {
+  const calls = [];
+  const bounds = [853, -1920, 2160, 1920];
+  const args = [3629, "com.google.Chrome", 49193, bounds, 1933, -960, 1536, "down", true];
+  const sent = await dispatchMacosCuaScrollPixels(async (...input) => {
+    calls.push(input);
+    return true;
+  }, args);
+  assert.equal(sent, true);
+  assert.equal(calls.length, 16);
+  assert.equal(
+    calls.reduce((sum, input) => sum + input[6], 0),
+    1536,
+  );
+  for (const input of calls) {
+    assert(input[6] > 0 && input[6] <= 100);
+    assert.deepEqual(input.slice(0, 6), args.slice(0, 6));
+    assert.deepEqual(input.slice(7), args.slice(7));
+  }
+});
+
+test("native scroll stops after refusal, unavailable receipt or error without replay", async () => {
+  for (const outcome of [false, undefined, new Error("native rejection")]) {
+    let calls = 0;
+    const args = [3629, "com.google.Chrome", 49193, [0, 0, 2160, 1920], 50, 100, 1536, "down"];
+    const result = dispatchMacosCuaScrollPixels(async () => {
+      calls++;
+      if (calls === 1) return true;
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    }, args);
+    if (outcome instanceof Error) await assert.rejects(result, /native rejection/);
+    else assert.equal(await result, false);
+    assert.equal(calls, 2);
+  }
 });

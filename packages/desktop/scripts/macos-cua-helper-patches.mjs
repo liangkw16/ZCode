@@ -77,11 +77,36 @@ export function macosCuaScrollDistance(pages, direction, bounds) {
   return Math.round(pages * bounds[axis] * 0.8);
 }
 
+export async function dispatchMacosCuaScrollPixels(dispatch, args) {
+  // 真机原生 ABI 对大于 100px 的事件直接拒绝；在既有输入锁内分段，拒绝后不再派发。
+  for (let remaining = args[6]; remaining > 0; ) {
+    const amount = Math.min(remaining, 100);
+    const sent = await dispatch(...args.slice(0, 6), amount, ...args.slice(7));
+    if (sent !== true) return false;
+    remaining -= amount;
+  }
+  return true;
+}
+
 export function patchMacosCuaScrollPages(source) {
   const call =
     "adapter.scrollToWindow(target.pid, target.bundleId, target.windowId, target.bounds, point2.x, point2.y, amount2, direction2, ...provenAttachedSurfaceArgs(target))";
   if (source.split(call).length !== 2)
     throw new Error("Expected exactly one macOS window scroll dispatch");
+  const adapter = `scrollToWindow: hasMacBackgroundInput ? (...args) => withMacBackgroundSequence("scroll_to_window", () => {
+      const dispatch = scrollToWindow ?? scrollToWindowLegacy;
+      return dispatch(...args);
+    }) : void 0,`;
+  if (source.split(adapter).length !== 2)
+    throw new Error("Expected exactly one macOS scroll adapter sequence");
+  // 保持唯一输入锁，不能在锁外循环 adapter 而让其他命令插入半页滚动。
+  source = source.replace(
+    adapter,
+    adapter.replace(
+      "return dispatch(...args);",
+      `return (${dispatchMacosCuaScrollPixels.toString()})(dispatch, args);`,
+    ),
+  );
   // 真机记录证明原生参数按像素消费；在已验证窗口的派发边界换算页数，避免一页只动 1px。
   return source.replace(
     call,

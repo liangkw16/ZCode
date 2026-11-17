@@ -129,6 +129,10 @@ read it only for an argument shape or response field this page does not give.
 
 Observe once, act, then observe again before deciding the next step.
 
+On macOS, `typeText` inserts exact plain text through clipboard-preserving paste,
+so the current input method does not rewrite punctuation. Default/`auto` scroll
+uses the window-scoped event backend; explicit `a11y` still requires native support.
+
 `agent.computerUse.getApp(...)` binds an app and shows nothing; call `getAXState`
 when you need to see its state. Binding also launches it if not running; there is
 no separate launch tool. Its argument is a display name or a bundle identifier —
@@ -305,3 +309,5 @@ read as a bundle id, so pass `{name: "Notes"}` for a display name.
 is `auto|a11y|event`, and `return_state` is `compact|full|none` to return the app
 state in the same call. For `target`, `text_range`, `modifiers` and the response
 shapes, see `nodeRepl.write(await agent.documentation.get("computer-use"))`.
+
+On macOS, one scroll page is 80% of the target window’s size on the requested axis. Re-observe the viewport to confirm movement; a successful dispatch alone does not prove it scrolled.

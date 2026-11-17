@@ -196,7 +196,9 @@ stop_computer_control({reason?})
 - `text_range` — `[start, length]` into the element's current value. `select_text`
   without it selects the whole value.
 - `strategy` — `auto | a11y | event`. `auto` prefers accessibility and falls back
-  to synthetic events; the other two force one path. `event` sends global input and
+  to synthetic events; the other two force one path. The bound macOS `scroll`
+  defaults to its window-scoped event backend because native AX scroll is not
+  implemented; explicit `a11y` is preserved and fails if unsupported. `event` sends global input and
   requires the target app (and `window_id`, when given) to be frontmost already —
   it never activates anything, so on a background app it is refused with
   `FOREGROUND_REQUIRED` and nothing is sent. Target an element instead.
@@ -347,6 +349,7 @@ Minimize round trips while keeping the state fresh:
 await target.click(42);
 await target.setValue(42, "example.com");
 await target.pressKey("Return");
+// macOS typeText uses plain-text paste and restores the clipboard, bypassing IME rewriting.
 await target.typeText("hello");
 await target.scroll(42, "down", 1);
 await target.scroll([640, 480], "down", 1);
@@ -469,3 +472,5 @@ result. If an action leaves the state unchanged, produces no results, or only
 reaches an intermediate page, try another approach. Respond only after the
 requested state is visibly present, or explain a concrete blocker you cannot
 resolve.
+
+On macOS, one scroll page is 80% of the target window’s size on the requested axis. Re-observe the viewport to confirm movement; a successful dispatch alone does not prove it scrolled.

@@ -758,12 +758,16 @@ function createTarget(ctx, binding) {
           { code: "INTERNAL" },
         );
       }
+      // macOS 未实现 element_scroll；直接走已有窗口事件，保留 Helper 的身份/freshness/输入锁校验。
+      const strategy = ctx.platform === "darwin" && (!options?.strategy || options.strategy === "auto")
+        ? "event"
+        : options?.strategy;
       await act("scroll", {
         target: bindTarget(binding, target, "scroll"),
         app_ref: binding.appRef,
         scroll_direction: LONG_DIRECTION[dir] ?? dir,
         scroll_amount: pages === undefined ? 1 : pages,
-        ...(options?.strategy ? { strategy: options.strategy } : {}),
+        ...(strategy ? { strategy } : {}),
       });
     },
 
@@ -790,7 +794,12 @@ function createTarget(ctx, binding) {
       if (typeof text !== "string") {
         throw new ComputerUseError("typeText requires text", { code: "INTERNAL" });
       }
-      await act("type", { text, app_ref: binding.appRef });
+      // 中文输入法会改写逐键输入的网址标点；复用 Helper 会恢复剪贴板的纯文本粘贴路径。
+      if (ctx.platform === "darwin") {
+        await act("paste", { text, app_ref: binding.appRef, format: "text" });
+      } else {
+        await act("type", { text, app_ref: binding.appRef });
+      }
     },
 
     async performSecondaryAction(elementIndex, action) {

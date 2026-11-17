@@ -187,3 +187,44 @@ envelope。skill 必须将“动作 cell 末尾显式观察并写出 AX 文本�
    已删除的工具名不得出现在任何模型可见文档里（contract test 钉死）。
 3. 同一 shared host 多次 Worker 调用不会创建独立 CUA MCP 进程，也不会线性增长 runtime 内存。
 4. Browser Use、桌面 continuous、手机 replayable、subagent 隔离和旧 transcript 回放均通过回归。
+
+
+### 2026-11-17 macOS 浏览器输入与滚动修复
+
+真机验收发现：中文输入法会将 `typeText` 逐键输入的网址标点改写；macOS Helper 未实现
+`element_scroll`，而默认 `auto` 先调用该方法并返回 `unimplemented`，导致浏览器元素滚动失败。
+
+- SDK 仅负责按平台选取已有命令。macOS 的 `typeText` 使用 `paste` 的纯文本路径，由 Helper
+  串行保存、写入并恢复剪贴板；Windows/Linux 继续使用 `type`。不改变插入语义。
+- macOS 的绑定 `scroll` 在默认、`auto`、`event` 下直接选择窗口事件滚动；显式 `a11y` 继续
+  透传并在能力不可用时失败。Windows/Linux 保留原策略。macOS 窗口事件不激活其他窗口。
+- 真机记录发现窗口原生滚动量是像素，不能把 SDK 的页数直接传成像素。Helper 在已解析且
+  已验证的 macOS 目标窗口上，按对应轴窗口尺寸的 80% 将每页换算为像素；保留方向、
+  freshness、输入锁与取消顺序，其他平台不变。验收一页必须产生显著位移（至少半个视口，
+  且页面有足够剩余空间），移动 1 像素不能判为通过。
+- shared host 仍是 session、取消和命令 admission 的唯一所有者，Helper 仍负责权限、窗口身份、
+  帧/元素 freshness、输入锁及剪贴板恢复。SDK 不持有第二套状态，不对可能已发送的动作重试。
+- Helper 在接纳新的输入及 `capture_app` 前，实时读取 macOS 的 `IOConsoleLocked`。已锁屏时
+  返回 `permission_denied` / `reason: screen_locked` / `action_sent: false`，明确提示解锁后重新观察；
+  系统状态缺失或读取失败时同样拒绝，不将其解释为已解锁。该状态不缓存，不进入 Host/session。
+- 取消、释放输入保持和 broker 健康检查不受锁屏准入限制。解锁后原 host/session 必须能够重新
+  观察并继续动作，不要求重启 Helper。取消仍须等待已接纳的原生动作清理完成，再接纳下一条动作。
+- 此检查拒绝“接纳时已经锁屏”的新动作；执行中途锁屏仍由系统隔离和原生取消/释放机制处理，
+  不保证原子地执行一次跨越锁屏切换的长动作。
+
+```mermaid
+sequenceDiagram
+  participant SDK as Worker SDK
+  participant Host as shared host / session owner
+  participant Helper as native Helper
+  SDK->>Host: macOS typeText → paste / scroll auto → window event
+  Host->>Helper: 原 admission、权限与目标校验
+  Helper->>Helper: 实时检查 IOConsoleLocked；锁屏或未知则拒绝
+  Helper->>Helper: 通过后按原输入锁执行；paste 恢复剪贴板
+  Helper-->>Host: 动作收据或明确失败
+  Host-->>SDK: 返回结果；不盲目重放
+```
+
+验收：平台分派回归覆盖 macOS 和非 macOS、显式 a11y、失败不重放；真实模型使用中文输入法
+输入本机网址与表单，默认元素滚动后提交，由本机服务独立记录结果；实际锁屏/解锁后，在同一
+host/session 验证拒绝屏蔽输入和恢复观察、截图、动作。未完成的真机项不得标记通过。

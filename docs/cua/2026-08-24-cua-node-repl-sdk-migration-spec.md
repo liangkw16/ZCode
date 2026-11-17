@@ -243,3 +243,11 @@ sequenceDiagram
 验收：平台分派回归覆盖 macOS 和非 macOS、显式 a11y、失败不重放；真实模型使用中文输入法
 输入本机网址与表单，默认元素滚动后提交，由本机服务独立记录结果；实际锁屏/解锁后，在同一
 host/session 验证拒绝屏蔽输入和恢复观察、截图、动作。未完成的真机项不得标记通过。
+
+### 2026-11-17 观察返回值说明
+
+真实模型在浏览器验收中连续把 `getAXState()` 返回值当作 MCP `content` 对象解析，
+导致空字符串匹配及无效重复观察。保留现有 API：`getAXState()` 返回树文本字符串，
+`getAXStateAndScreenshot()` 返回 `{ state: string, screenshot? }`；skill 与按需参考都提供
+`emit: false` 的文本提取示例，明确无需读取 `.content`。CUA 回归测试验证两种真实 SDK
+返回形状，不引入额外状态或兼容包装。

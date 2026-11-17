@@ -78,6 +78,18 @@ async function makeTarget(platform: NodeJS.Platform) {
   return { target, call };
 }
 
+describe("computer-use observation return values", () => {
+  it("returns tree text directly and the combined tree in state", async () => {
+    // 真机模型误读 .content 造成反复空匹配；锁定既有 SDK 返回契约，文档示例直接解析字符串。
+    const { target } = await makeTarget("darwin");
+    const tree = await target.getAXState({ emit: false, disableDiffing: true });
+    expect(tree).toBe("1 browser content");
+    const combined = await target.getAXStateAndScreenshot({ emit: false, disableDiffing: true });
+    expect(combined.state).toBe(tree);
+    expect(combined).not.toHaveProperty("content");
+  });
+});
+
 describe("computer-use platform input dispatch", () => {
   it.each(["darwin", "win32", "linux"] as const)("preserves text and resolved identity on %s", async (platform) => {
     const { target, call } = await makeTarget(platform);

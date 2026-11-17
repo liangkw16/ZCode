@@ -367,6 +367,17 @@ await target.getAXState();
   `emitImage`: a second raster in one result breaks the one-raster rule and the
   frame is removed entirely, leaving no picture at all. Pass `{ emit: false }` to
   suppress the display and still get the value back.
+
+`getAXState()` returns a **string**, not an MCP content object. To inspect it:
+
+```javascript
+const tree = await app.getAXState({ emit: false, disableDiffing: true });
+const line = tree.split("\n").find((text) => text.includes("Submit"));
+```
+
+Do not read `tree.content`: it is undefined. `getAXStateAndScreenshot()` returns
+`{ state, screenshot? }`; its tree is the string `result.state`.
+
 - Action methods display nothing and resolve to `undefined` on success.
 
 ## Errors

@@ -189,6 +189,16 @@ Never pass their return value to `nodeRepl.write(...)` or
 rule and the frame is removed entirely, so you end up with no picture at all.
 Pass `{ emit: false }` to suppress the display and still receive the value.
 
+`getAXState()` returns a **string**, not an MCP content object. To inspect it:
+
+```javascript
+const tree = await app.getAXState({ emit: false, disableDiffing: true });
+const line = tree.split("\n").find((text) => text.includes("Submit"));
+```
+
+Do not read `tree.content`: it is undefined. `getAXStateAndScreenshot()` returns
+`{ state, screenshot? }`; its tree is the string `result.state`.
+
 Action methods display nothing.
 
 ## Coordinates

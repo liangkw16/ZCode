@@ -21,6 +21,7 @@ test("source producer builds its public protocol without recovery artifacts", as
   const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
   assert.notEqual(manifest.zcodeCuaPlaceholder, true, "source producer is still a placeholder");
   assert.equal(Object.keys(manifest.exports).length, 12);
+  assert.equal(manifest.zcodeCuaProducer.protocol, 3);
   const built = await run(["scripts/build.mjs", "--typescript-only"]);
   assert.equal(built.code, 0, built.output);
   const protocol = await import("../dist/contract/manifest.js");

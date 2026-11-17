@@ -31,18 +31,27 @@ const run = (cmd, args) =>
 const sourceDir = resolve(root, "native/macos");
 const sources = (await readdir(sourceDir)).filter((n) => n.endsWith(".mm")).sort();
 if (!sources.length) throw new Error("No native source files");
-const { BROKER_METHODS } = await import("../src/contract/manifest.ts");
-const sourceHashes = {
-  "src/contract/manifest.ts": createHash("sha256")
-    .update(await readFile(resolve(root, "src/contract/manifest.ts")))
-    .digest("hex"),
-};
-for (const name of (await readdir(sourceDir)).sort()) {
-  if (!/\.(mm|h|cc)$/.test(name)) continue;
-  sourceHashes[`native/macos/${name}`] = createHash("sha256")
-    .update(await readFile(resolve(sourceDir, name)))
-    .digest("hex");
+const { BROKER_METHODS, INLINE_FRAME_BASE64_BYTES } = await import("../src/contract/manifest.ts");
+const sourceHashes = {};
+async function collectSource(directory) {
+  for (const entry of (await readdir(resolve(root, directory), { withFileTypes: true })).sort(
+    (a, b) => a.name.localeCompare(b.name),
+  )) {
+    const path = `${directory}/${entry.name}`;
+    if (entry.isSymbolicLink()) throw new Error(`Source build refuses symlink input: ${path}`);
+    if (entry.isDirectory()) await collectSource(path);
+    else if (/\.(ts|js|mjs|mm|h|cc|md)$/.test(entry.name))
+      sourceHashes[path] = createHash("sha256")
+        .update(await readFile(resolve(root, path)))
+        .digest("hex");
+  }
 }
+for (const directory of ["src", "native", "scripts"]) await collectSource(directory);
+for (const name of (await readdir(root)).sort())
+  if (/\.(js|ts|json)$/.test(name))
+    sourceHashes[name] = createHash("sha256")
+      .update(await readFile(resolve(root, name)))
+      .digest("hex");
 const buildId = createHash("sha256")
   .update(JSON.stringify(sourceHashes))
   .digest("hex")
@@ -76,6 +85,7 @@ const compilerOutput = await run("xcrun", [
   "-Wextra",
   "-Werror=return-type",
   `-DKCODE_BUILD_ID="${buildId}"`,
+  `-DKCODE_INLINE_FRAME_BYTES=${Math.floor((INLINE_FRAME_BASE64_BYTES * 3) / 4)}`,
   `-DKCODE_BROKER_METHODS=${BROKER_METHODS.map((method) => `@"${method}"`).join(",")}`,
   ...sources.map((n) => resolve(sourceDir, n)),
   ...frameworks.flatMap((f) => ["-framework", f]),
@@ -97,6 +107,10 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//
 <key>NSScreenCaptureUsageDescription</key><string>KCode 需要录制目标应用窗口以完成你授权的电脑操作。</string>
 </dict></plist>`;
 await writeFile(resolve(app, "Contents/Info.plist"), plist);
+await writeFile(
+  resolve(app, "Contents/Resources/THIRD_PARTY_NOTICES.txt"),
+  await readFile(resolve(root, "native/THIRD_PARTY_NOTICES.md")),
+);
 const identity = option("--identity", process.env.KCODE_CUA_SIGN_IDENTITY || "-");
 const manifest = {
   schema: 1,

@@ -1,4 +1,5 @@
 export const IPC_VERSION = 3;
+export const INLINE_FRAME_BASE64_BYTES = 200 * 1024;
 export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 export const MODEL_TOOLS = [
   "list_apps",

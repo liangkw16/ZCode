@@ -8,7 +8,10 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
-async function fixture(respond: (request: any, socket: Socket) => void) {
+async function fixture(
+  respond: (request: any, socket: Socket) => void,
+  options: { epoch?: () => number; generation?: () => string; pid?: () => number } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), "kcua-"));
   const path = join(dir, "broker.sock");
   const sockets = new Set<Socket>();
@@ -29,7 +32,13 @@ async function fixture(respond: (request: any, socket: Socket) => void) {
               result: {
                 authenticated: true,
                 serverApiVersion: 3,
-                kcode: { generation: "g1", capability: "host-cap", cleanupFence: true },
+                kcode: {
+                  generation: options.generation?.() ?? "g1",
+                  capability: "host-cap",
+                  cleanupFence: true,
+                  cancellationEpoch: options.epoch?.() ?? 0,
+                  pid: options.pid?.(),
+                },
               },
             }) + "\n",
           );
@@ -197,4 +206,77 @@ it("preserves Unicode when a native UTF-8 response splits inside an emoji", asyn
     setTimeout(() => socket.end(bytes.subarray(split)), 5);
   });
   expect(await client.call("list_windows", {})).toBe("中文🌟");
+});
+
+it("does not treat cancel-received as cleanup-complete and advances the native epoch", async () => {
+  let began!: () => void;
+  const started = new Promise<void>((resolve) => {
+    began = resolve;
+  });
+  let allowDrain = false;
+  const client = await fixture((request, socket) => {
+    if (request.method === "operation_cancel")
+      socket.end(
+        JSON.stringify({ id: 1, ok: true, result: { cleanup_complete: false, epoch: 1 } }) + "\n",
+      );
+    else if (request.method === "operation_status")
+      socket.end(
+        JSON.stringify({
+          id: 1,
+          ok: true,
+          result: { cleanup_complete: allowDrain, epoch: 1, dispatch_status: "possibly_sent" },
+        }) + "\n",
+      );
+    else if (request.method === "list_windows") {
+      socket.end(
+        JSON.stringify({ id: 1, ok: true, result: request.params.kcode_operation.epoch }) + "\n",
+      );
+    } else began();
+  });
+  const controller = new AbortController();
+  let settled = false;
+  const result = client
+    .call("drag", {}, { signal: controller.signal, session: "s" })
+    .then(
+      () => "success",
+      (error: { code: string }) => error.code,
+    )
+    .finally(() => {
+      settled = true;
+    });
+  await started;
+  controller.abort();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(settled).toBe(false);
+  allowDrain = true;
+  expect(await result).toBe("cancelled");
+  expect(await client.call("list_windows", {}, { session: "s" })).toBe(1);
+});
+
+it("requires a fresh observation when a lock transition advanced the native epoch while idle", async () => {
+  let epoch = 0;
+  let inputs = 0;
+  const client = await fixture(
+    (request, socket) => {
+      if (request.method === "click") inputs++;
+      socket.end(
+        JSON.stringify({
+          id: 1,
+          ok: true,
+          result: request.method === "capture_app" ? { observed: true } : null,
+        }) + "\n",
+      );
+    },
+    { epoch: () => epoch },
+  );
+  await client.call("capture_app", {}, { session: "s" });
+  epoch = 1;
+  await expect(client.call("click", {}, { session: "s" })).rejects.toMatchObject({
+    code: "stale_state",
+    details: { action_sent: false },
+  });
+  expect(inputs).toBe(0);
+  await client.call("capture_app", {}, { session: "s" });
+  await client.call("click", {}, { session: "s" });
+  expect(inputs).toBe(1);
 });

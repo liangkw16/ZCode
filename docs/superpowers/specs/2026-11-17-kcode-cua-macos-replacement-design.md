@@ -106,6 +106,14 @@ Main 仍只处理原生窗口、调度与转发；不新增 task/session 业务�
 
 所有当前 exports 必须有明确去向：`.`、`frame-contract`、`host-display-contract`、`request-access-contract`、`pip-session`、`pip-session/node`、`broker`、`broker/server`、`broker/ports`、`broker/socketPath`、`broker/helperConstants`、`broker/helperHealth`。生产路径不得再返回占位成功或恒 false。已退役且没有消费者的 native-only API 可在引用审计后同步清理声明和文档；不得留下会在 macOS 主链路调用时抛 unavailable 的假兼容门面。
 
+原生截图在签发模型 frame_id 之前完成最终编码，沿用 producer 的 **200 KiB base64 字符上限**。小 PNG 保留原字节；超限时以有界尺寸/质量组合编码 JPEG，最终尺寸与字节确定后才签发帧、摘要及坐标映射。Host 保持签发后的字节不变，不事后压缩权威帧。
+
+### 4.5 后台输入 ABI 的实现来源与验证边界
+
+原生 backend 独立以 Objective-C++ 编写。窗口定向事件和 synthetic target focus 的未公开 ABI 声明/事件记录布局，参考公开 MIT 项目 open-zcode-computer-use（202395e65218f83086b30daceb0f11d2f3430dd8）对 Cua Driver/yabai 的记录；只提取接口事实并重新实现隔离适配器，不引入其 Swift runtime、会话状态或进程模型。来源与许可证保存在包内 native/THIRD_PARTY_NOTICES.md，随 Helper 打包。
+
+此项不改变路线 A 的源码闭包与所有权。所有未公开符号集中在 scoped-input.mm，动态解析且缺失时拒绝后台 event 输入，绝不回落全局事件或真实激活。synthetic focus 只通知目标进程，不调用激活/置前 API；cleanup 对称收回，并保护用户期间主动改变的前台状态。符号存在只表示可尝试，不表示功能探针通过。M2 必须通过后台浏览器实际输入/滚动、前台窗口和物理光标保持验证；未通过则不能宣称该能力可用。
+
 ## 5. 唯一状态所有者与并发规则
 
 | 状态                                                                          | 唯一所有者                                                | 其他层的权限                                                               |
@@ -136,7 +144,7 @@ controller lease 保留现有私有 runtime 目录解析和 `controller-lease.js
 
 `list_apps`、`list_windows`、`get_app_state`、`left_click`、`scroll`、`left_click_drag`、`type`、`set_value`、`select_text`、`key`、`perform_action`、`paste`、`request_access`、`stop_computer_control`。
 
-`getApp` 保持只绑定；`getAXState()` 返回字符串，`getAXStateAndScreenshot()` 返回含 `state` 的对象。每个 fresh Worker 重新 bootstrap，默认观察自行展示；`emit:false` 不展示，`tree_shown_to_model:false` 不进入已展示树的台账。保留完整、delta、no_change 的完整 structured AppState，以及 one-raster / image_ref 邻接契约。
+`getApp` 保持只绑定；`getAXState()` 返回字符串，`getAXStateAndScreenshot()` 返回含 `state` 的对象。每个 fresh Worker 重新 bootstrap，默认观察自行展示；`emit:false` 不展示，`tree_shown_to_model:false` 不进入已展示树的台账。遵循当前 cua-receipt-observation-contract：模型 get_app_state 始终取得 full structured AppState；broker 内部不得把 delta/no_change 当作可执行模型状态。保留 one-raster / image_ref 邻接契约。
 
 ### 6.2 Native transport
 

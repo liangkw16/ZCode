@@ -21,6 +21,7 @@ test(
         "-fblocks",
         '-DKCODE_BUILD_ID="fixture"',
         join(root, "native/macos/coordinator.mm"),
+        join(root, "native/macos/protocol-error.mm"),
         join(root, "test/cancellation-native.mm"),
         "-framework",
         "Cocoa",

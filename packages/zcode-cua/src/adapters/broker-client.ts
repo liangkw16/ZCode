@@ -17,7 +17,13 @@ export class NativeBrokerError extends Error {
 interface Auth {
   authenticated: boolean;
   serverApiVersion?: number;
-  kcode?: { generation: string; capability: string; cleanupFence: boolean };
+  kcode?: {
+    generation: string;
+    capability: string;
+    cleanupFence: boolean;
+    pid?: number;
+    cancellationEpoch?: number;
+  };
 }
 interface Operation {
   capability: string;
@@ -32,6 +38,8 @@ interface ExchangeOptions {
   beforeDispatch?: (auth: Auth) => void;
   dispatched?: () => void;
   afterDrain?: AbortSignal;
+  session?: string;
+  role?: "tool" | "presentation";
 }
 function exchange<T>(
   socketPath: string,
@@ -75,7 +83,12 @@ function exchange<T>(
         JSON.stringify({
           id: 0,
           method: "authenticate",
-          params: { clientApiVersion: IPC_VERSION, extensions: ["kcode-cleanup-v1"] },
+          params: {
+            clientApiVersion: IPC_VERSION,
+            extensions: ["kcode-cleanup-v1"],
+            ...(options.session ? { session_id: options.session } : {}),
+            ...(options.role ? { role: options.role } : {}),
+          },
         }) + "\n",
       ),
     );
@@ -174,12 +187,24 @@ const OBSERVATIONS = new Set([
 export function createBrokerClient(options: {
   socketPath: string;
   timeoutMs?: number;
+  role?: "tool" | "presentation";
 }): BrokerPort {
   let generation: string | undefined;
   let closed = false;
   const active = new Set<Promise<unknown>>();
   const controllers = new Set<AbortController>();
-  const frozenSessions = new Set<string>();
+  const frozenSessions = new Map<string, number | undefined>();
+  const requireObservation = new Set<string>();
+  let helperPid: number | undefined;
+  const processEnded = (pid: number | undefined) => {
+    if (!pid || !Number.isSafeInteger(pid) || pid <= 1) return false;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+  };
   const sessionEpochs = new Map<string, number>();
   async function call<T>(
     method: string,
@@ -192,10 +217,25 @@ export function createBrokerClient(options: {
         action_sent: false,
         dispatch_status: "not_sent",
       });
-    if (callOptions.session && frozenSessions.has(callOptions.session) && !OBSERVATIONS.has(method))
+    if (callOptions.session && frozenSessions.has(callOptions.session)) {
+      if (processEnded(frozenSessions.get(callOptions.session))) {
+        frozenSessions.delete(callOptions.session);
+        requireObservation.add(callOptions.session);
+      } else if (!OBSERVATIONS.has(method))
+        throw new NativeBrokerError(
+          "broker_unavailable",
+          "Native cleanup could not be confirmed; mutation is frozen",
+          { action_sent: false, dispatch_status: "not_sent" },
+        );
+    }
+    if (
+      callOptions.session &&
+      requireObservation.has(callOptions.session) &&
+      !OBSERVATIONS.has(method)
+    )
       throw new NativeBrokerError(
-        "broker_unavailable",
-        "Native cleanup could not be confirmed; mutation is frozen",
+        "stale_state",
+        "Helper recovery requires a fresh observation before input",
         { action_sent: false, dispatch_status: "not_sent" },
       );
     const local = new AbortController();
@@ -209,46 +249,74 @@ export function createBrokerClient(options: {
     const cancel = () => {
       if (!sent || !operation || cleanup) return;
       // 中断只能在原生清理回执后结束；关闭 socket 并不能证明 AX/输入已停止。
-      cleanup = exchange<{ cleanup_complete?: boolean; epoch?: number; dispatch_status?: string }>(
-        options.socketPath,
-        "operation_cancel",
-        { operation_id: operation.operationId },
-        {
-          operation,
-          timeoutMs: 8000,
-          beforeDispatch(auth) {
-            if (auth.kcode?.generation !== operation?.generation)
-              throw new NativeBrokerError(
-                "generation_changed",
-                "Helper changed while cleanup was pending",
-              );
-          },
-        },
-      )
-        .then((result) => {
-          if (result.cleanup_complete !== true)
-            throw new NativeBrokerError("cleanup_incomplete", "Native cleanup has not completed");
-          if (callOptions.session && typeof result.epoch === "number")
-            sessionEpochs.set(callOptions.session, result.epoch);
-          drained.abort(
-            new NativeBrokerError("cancelled", "CUA operation cancelled after native cleanup", {
-              action_sent: result.dispatch_status !== "not_sent",
-              dispatch_status: result.dispatch_status ?? "possibly_sent",
-            }),
+      const pendingOperation = operation;
+      const pendingPid = helperPid;
+      cleanup = (async () => {
+        const deadline = Date.now() + 8000;
+        let controlMethod = "operation_cancel";
+        let result: { cleanup_complete?: boolean; epoch?: number; dispatch_status?: string } = {};
+        for (;;) {
+          if (processEnded(pendingPid)) {
+            if (callOptions.session) requireObservation.add(callOptions.session);
+            result = { cleanup_complete: true, dispatch_status: "possibly_sent" };
+            break;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0)
+            throw new NativeBrokerError(
+              "cleanup_incomplete",
+              "Native cleanup exceeded its recovery deadline",
+            );
+          try {
+            result = await exchange(
+              options.socketPath,
+              controlMethod,
+              { operation_id: pendingOperation.operationId },
+              {
+                operation: pendingOperation,
+                session: pendingOperation.session,
+                role: options.role,
+                timeoutMs: Math.min(controlMethod === "operation_cancel" ? 3500 : 500, remaining),
+                beforeDispatch(auth) {
+                  if (auth.kcode?.generation !== pendingOperation.generation)
+                    throw new NativeBrokerError(
+                      "generation_changed",
+                      "Helper changed while cleanup was pending",
+                    );
+                },
+              },
+            );
+            if (callOptions.session) requireObservation.add(callOptions.session);
+            if (callOptions.session && typeof result.epoch === "number")
+              sessionEpochs.set(callOptions.session, result.epoch);
+            if (result.cleanup_complete === true) break;
+          } catch (error) {
+            if (
+              !(error instanceof NativeBrokerError) ||
+              !["broker_unavailable", "timeout", "generation_changed"].includes(error.code)
+            )
+              throw error;
+          }
+          controlMethod = "operation_status";
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))),
           );
-        })
-        .catch((error) => {
-          if (callOptions.session) frozenSessions.add(callOptions.session);
-          throw new NativeBrokerError(
-            "cleanup_incomplete",
-            "Native cleanup could not be confirmed",
-            {
-              action_sent: sent,
-              dispatch_status: sent ? "possibly_sent" : "not_sent",
-              cause_code: error instanceof NativeBrokerError ? error.code : "internal",
-            },
-          );
+        }
+        drained.abort(
+          new NativeBrokerError("cancelled", "CUA operation cancelled after native cleanup", {
+            action_sent: result.dispatch_status !== "not_sent",
+            dispatch_status: result.dispatch_status ?? "possibly_sent",
+            cleanup_complete: true,
+          }),
+        );
+      })().catch((error) => {
+        if (callOptions.session) frozenSessions.set(callOptions.session, pendingPid);
+        throw new NativeBrokerError("cleanup_incomplete", "Native cleanup could not be confirmed", {
+          action_sent: sent,
+          dispatch_status: sent ? "possibly_sent" : "not_sent",
+          cause_code: error instanceof NativeBrokerError ? error.code : "internal",
         });
+      });
       // Observe immediately; the original exchange can still be waiting on its deadline.
       void cleanup.catch(() => {});
     };
@@ -257,9 +325,35 @@ export function createBrokerClient(options: {
       const result = await exchange<T>(options.socketPath, method, params, {
         timeoutMs: options.timeoutMs ?? 12000,
         afterDrain: drained.signal,
+        session: callOptions.session,
+        role: options.role,
         beforeDispatch(auth) {
-          generation = auth.kcode?.generation;
+          const nextGeneration = auth.kcode?.generation;
+          const changed = generation !== undefined && generation !== nextGeneration;
+          if (changed) sessionEpochs.clear();
+          generation = nextGeneration;
+          helperPid = auth.kcode?.pid;
+          if (changed && !OBSERVATIONS.has(method))
+            throw new NativeBrokerError(
+              "stale_state",
+              "Native Helper generation changed; observe before input",
+              { action_sent: false, dispatch_status: "not_sent" },
+            );
           if (callOptions.session) {
+            const floor = auth.kcode?.cancellationEpoch;
+            const known = sessionEpochs.get(callOptions.session);
+            if (typeof floor === "number" && Number.isSafeInteger(floor) && floor >= 0) {
+              sessionEpochs.set(callOptions.session, Math.max(known ?? 0, floor));
+              if (known !== undefined && floor > known) {
+                requireObservation.add(callOptions.session);
+                if (!OBSERVATIONS.has(method))
+                  throw new NativeBrokerError(
+                    "stale_state",
+                    "Desktop availability or cancellation epoch changed; observe again",
+                    { action_sent: false, dispatch_status: "not_sent" },
+                  );
+              }
+            }
             if (!auth.kcode?.cleanupFence)
               throw new NativeBrokerError(
                 "version_mismatch",
@@ -290,6 +384,8 @@ export function createBrokerClient(options: {
           dispatch_status: OBSERVATIONS.has(method) ? "not_sent" : "possibly_sent",
         });
       }
+      if (callOptions.session && ["capture_app"].includes(method))
+        requireObservation.delete(callOptions.session);
       return result;
     } catch (error) {
       if (
@@ -323,6 +419,9 @@ export function createBrokerClient(options: {
   return {
     get generation() {
       return generation;
+    },
+    epoch(session: string) {
+      return sessionEpochs.get(session) ?? 0;
     },
     call<T>(
       method: string,

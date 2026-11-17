@@ -32,5 +32,6 @@ export interface BrokerPort {
     },
   ): Promise<T>;
   readonly generation: string | undefined;
+  epoch(session: string): number;
   close(): Promise<void>;
 }

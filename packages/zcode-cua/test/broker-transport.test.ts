@@ -1,0 +1,200 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { createServer, type Server, type Socket } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createBrokerClient } from "../src/adapters/broker-client.js";
+const cleanup: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close();
+});
+async function fixture(respond: (request: any, socket: Socket) => void) {
+  const dir = await mkdtemp(join(tmpdir(), "kcua-"));
+  const path = join(dir, "broker.sock");
+  const sockets = new Set<Socket>();
+  const server: Server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString();
+      for (let i = buffer.indexOf("\n"); i >= 0; i = buffer.indexOf("\n")) {
+        const request = JSON.parse(buffer.slice(0, i));
+        buffer = buffer.slice(i + 1);
+        if (request.method === "authenticate")
+          socket.write(
+            JSON.stringify({
+              id: 0,
+              ok: true,
+              result: {
+                authenticated: true,
+                serverApiVersion: 3,
+                kcode: { generation: "g1", capability: "host-cap", cleanupFence: true },
+              },
+            }) + "\n",
+          );
+        else respond(request, socket);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(path, resolve));
+  cleanup.push(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true });
+  });
+  const client = createBrokerClient({ socketPath: path, timeoutMs: 300 });
+  cleanup.push(() => client.close());
+  return client;
+}
+describe("zcode-cua compatible transport", () => {
+  it("uses authenticate then existing numeric-id NDJSON and preserves error receipts", async () => {
+    const client = await fixture((r, s) => {
+      expect(r.id).toBe(1);
+      expect(r.method).toBe("click");
+      s.end(
+        JSON.stringify({
+          id: 1,
+          ok: false,
+          error: { code: "element_unavailable", message: "stale", details: { action_sent: false } },
+        }) + "\n",
+      );
+    });
+    await expect(client.call("click", {})).rejects.toMatchObject({
+      code: "element_unavailable",
+      details: { action_sent: false },
+    });
+  });
+  it("waits for native cleanup-complete before cancellation settles", async () => {
+    let nativeRequest: any;
+    let nativeSocket: Socket;
+    let acknowledge!: () => void;
+    const ack = new Promise<void>((r) => {
+      acknowledge = r;
+    });
+    const client = await fixture((r, s) => {
+      if (r.method === "operation_cancel")
+        void ack.then(() => {
+          s.end(
+            JSON.stringify({ id: 1, ok: true, result: { cleanup_complete: true, epoch: 1 } }) +
+              "\n",
+          );
+          nativeSocket.end(
+            JSON.stringify({
+              id: 1,
+              ok: false,
+              error: {
+                code: "cancelled",
+                message: "cancelled",
+                details: { action_sent: true, dispatch_status: "possibly_sent" },
+              },
+            }) + "\n",
+          );
+        });
+      else {
+        nativeRequest = r;
+        nativeSocket = s;
+      }
+    });
+    const controller = new AbortController();
+    let settled = false;
+    const result = client
+      .call("drag", {}, { session: "s1", signal: controller.signal })
+      .finally(() => {
+        settled = true;
+      });
+    // Attach the rejection observer before cancellation can settle.
+    const checked = expect(result).rejects.toMatchObject({
+      code: "cancelled",
+      details: { dispatch_status: "possibly_sent" },
+    });
+    await new Promise<void>((resolve) => {
+      const check = () => (nativeRequest ? resolve() : setTimeout(check, 1));
+      check();
+    });
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(settled).toBe(false);
+    acknowledge();
+    await checked;
+    expect(client.generation).toBe("g1");
+  });
+  it("does not replay disconnected input; only a future call reconnects", async () => {
+    let dispatches = 0;
+    const client = await fixture((r, s) => {
+      if (r.method === "operation_cancel")
+        s.end(JSON.stringify({ id: 1, ok: true, result: { cleanup_complete: true } }) + "\n");
+      else if (r.method === "click") {
+        dispatches++;
+        s.destroy();
+      } else s.end(JSON.stringify({ id: 1, ok: true, result: ["observed"] }) + "\n");
+    });
+    await expect(client.call("click", {}, { session: "s" })).rejects.toMatchObject({
+      details: { dispatch_status: "possibly_sent" },
+    });
+    expect(dispatches).toBe(1);
+    expect(await client.call("list_windows", {})).toEqual(["observed"]);
+    expect(dispatches).toBe(1);
+  });
+});
+
+describe("transport boundary validation", () => {
+  it("rejects malformed responses rather than accepting an uncorrelated reply", async () => {
+    const client = await fixture((_r, s) => s.end('{"id":42,"ok":true,"result":"wrong"}\n'));
+    await expect(client.call("list_windows", {})).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+  });
+  it("rejects an oversized request before dispatch", async () => {
+    let called = false;
+    const client = await fixture((_r, s) => {
+      called = true;
+      s.end('{"id":1,"ok":true,"result":null}\n');
+    });
+    await expect(
+      client.call("list_windows", { text: "x".repeat(8 * 1024 * 1024) }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(called).toBe(false);
+  });
+});
+
+it("settles after cleanup acknowledgement even when the original connection cannot deliver its reply", async () => {
+  let began!: () => void;
+  const started = new Promise<void>((resolve) => {
+    began = resolve;
+  });
+  const client = await fixture((r, socket) => {
+    if (r.method === "operation_cancel")
+      socket.end(
+        JSON.stringify({
+          id: 1,
+          ok: true,
+          result: { cleanup_complete: true, epoch: 1, dispatch_status: "possibly_sent" },
+        }) + "\n",
+      );
+    else began();
+  });
+  const controller = new AbortController();
+  const result = client.call("drag", {}, { signal: controller.signal, session: "s" }).then(
+    () => "succeeded",
+    (error: { code: string }) => error.code,
+  );
+  await started;
+  controller.abort();
+  expect(
+    await Promise.race([
+      result,
+      new Promise((resolve) => setTimeout(() => resolve("pending"), 100)),
+    ]),
+  ).toBe("cancelled");
+});
+
+it("preserves Unicode when a native UTF-8 response splits inside an emoji", async () => {
+  const client = await fixture((_r, socket) => {
+    const bytes = Buffer.from(JSON.stringify({ id: 1, ok: true, result: "中文🌟" }) + "\n");
+    const split = bytes.indexOf(Buffer.from("🌟")) + 1;
+    socket.write(bytes.subarray(0, split));
+    setTimeout(() => socket.end(bytes.subarray(split)), 5);
+  });
+  expect(await client.call("list_windows", {})).toBe("中文🌟");
+});

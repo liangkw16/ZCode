@@ -36,10 +36,10 @@
 
 **Interfaces:** Produces zcode-cua IPC3 request/response types, manifest arrays, build metadata, `build --arch arm64|x64` and `build:native`. Existing 12 exports remain renderer-safe or Node-only as declared.
 
-- [ ] Write source-build regression assertions for no placeholder capability, 12 exports, 14 tools, 43 legacy methods, source manifest and native build entry; run and observe failure.
-- [ ] Register managed CUA module, document ownership and implement contracts and asynchronous build scripts. Emit JS/declarations to dist; compile only repository native source with xcrun. Keep existing pure export paths.
-- [ ] Build TypeScript and arm64 Helper; run CUA contract suite and architecture check. Cross-compile x64 without claiming Intel runtime coverage.
-- [ ] Commit this slice and record exact command/results in the ledger.
+- [x] Write source-build regression assertions for no placeholder capability, 12 exports, 14 tools, 43 legacy methods, source manifest and native build entry; run and observe failure.
+- [x] Register managed CUA module, document ownership and implement contracts and asynchronous build scripts. Emit JS/declarations to dist; compile only repository native source with xcrun. Keep existing pure export paths.
+- [x] Build TypeScript and arm64 Helper; run CUA contract suite and architecture check. Cross-compile x64 without claiming Intel runtime coverage.
+- [x] Commit this slice and record exact command/results in the ledger.
 
 ### Task 2: Native service, lease, control and cancellation
 
@@ -47,10 +47,10 @@
 
 **Interfaces:** `callBrokerMethod({socketPath,method,params,timeoutMs})`, `createProductCuaHelperHost(options)`, IPC handshake carrying version/build/generation/process/signing identity. Control methods `operation_cancel`, `operation_status`, `session_release` are not model tools.
 
-- [ ] Write transport tests for version mismatch, malformed/oversize JSON, deadline, disconnect without replay, cancellation cleanup acknowledgement and same-session continuation; observe failure.
-- [ ] Implement live Cocoa main loop, private socket and verified peers; one cross-connection mutation scheduler and independent control path. Persist exact owner lease and input-safety record; never reclaim a live foreign owner by timeout.
-- [ ] Implement operation states, receipts, cancellation tokens, cleanup fence, scoped session release and bounded failure recovery. Health includes main-run-loop roundtrip.
-- [ ] Run transport suite and source-built native lifecycle fixture (including control while stalled). Commit and ledger.
+- [x] Write transport tests for version mismatch, malformed/oversize JSON, deadline, disconnect without replay, cancellation cleanup acknowledgement and same-session continuation; observe failure.
+- [x] Implement live Cocoa main loop, private socket and verified peers; one cross-connection mutation scheduler and independent control path. Persist exact owner lease and input-safety record; never reclaim a live foreign owner by timeout.
+- [x] Implement operation states, receipts, cancellation tokens, cleanup fence, scoped session release and bounded failure recovery. Health includes main-run-loop roundtrip.
+- [x] Run transport suite and source-built native lifecycle fixture (including control while stalled). Commit and ledger.
 
 ### Task 3: AX, capture, input and presentation
 

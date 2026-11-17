@@ -31,7 +31,12 @@ const run = (cmd, args) =>
 const sourceDir = resolve(root, "native/macos");
 const sources = (await readdir(sourceDir)).filter((n) => n.endsWith(".mm")).sort();
 if (!sources.length) throw new Error("No native source files");
-const sourceHashes = {};
+const { BROKER_METHODS } = await import("../src/contract/manifest.ts");
+const sourceHashes = {
+  "src/contract/manifest.ts": createHash("sha256")
+    .update(await readFile(resolve(root, "src/contract/manifest.ts")))
+    .digest("hex"),
+};
 for (const name of (await readdir(sourceDir)).sort()) {
   if (!/\.(mm|h|cc)$/.test(name)) continue;
   sourceHashes[`native/macos/${name}`] = createHash("sha256")
@@ -57,7 +62,7 @@ const frameworks = [
   "Carbon",
   "IOKit",
 ];
-await run("xcrun", [
+const compilerOutput = await run("xcrun", [
   "clang++",
   "-std=c++17",
   "-fobjc-arc",
@@ -71,11 +76,13 @@ await run("xcrun", [
   "-Wextra",
   "-Werror=return-type",
   `-DKCODE_BUILD_ID="${buildId}"`,
+  `-DKCODE_BROKER_METHODS=${BROKER_METHODS.map((method) => `@"${method}"`).join(",")}`,
   ...sources.map((n) => resolve(sourceDir, n)),
   ...frameworks.flatMap((f) => ["-framework", f]),
   "-o",
   executable,
 ]);
+if (compilerOutput) process.stderr.write(compilerOutput + "\n");
 const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>dev.zcode.cua-helper.kcode</string>
 <key>CFBundleName</key><string>KCode Computer Use</string>

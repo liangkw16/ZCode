@@ -5,7 +5,13 @@ import { isCuaPermissionStatusAvailable } from "../broker-ports.js";
 
 describe("Computer Use placeholder", () => {
   it("正常权限结果不要求 available 标记，不可用和无效结果不能冒充权限真值", () => {
-    expect(isCuaPermissionStatusAvailable({ grantOwner: null, accessibility: "granted", screenRecording: "denied" })).toBe(true);
+    expect(
+      isCuaPermissionStatusAvailable({
+        grantOwner: null,
+        accessibility: "granted",
+        screenRecording: "denied",
+      }),
+    ).toBe(true);
     expect(isCuaPermissionStatusAvailable({ available: false, reason: "unavailable" })).toBe(false);
     expect(isCuaPermissionStatusAvailable({} as never)).toBe(false);
   });

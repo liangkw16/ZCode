@@ -9,20 +9,11 @@ export interface NativeRequest {
   id: number;
   method: string;
   params: Record<string, unknown>;
-  kcode?: {
-    capability: string;
-    generation: string;
-    session: string;
-    epoch: number;
-    operationId: string;
-  };
-  capability?: string;
-  context?: { session: string; epoch: number; generation: string; operationId: string };
 }
 export interface NativeError {
   code: string;
   message: string;
-  dispatchStatus?: string;
+  details?: Record<string, unknown>;
 }
 export interface NativeResponse {
   id: number;

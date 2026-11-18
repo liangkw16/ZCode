@@ -126,16 +126,17 @@ test(
     };
     const run = () =>
       runtime.execute({
-        toolName: "list_apps",
+        // 此用例验证传输入口，不验证 GUI。M2 锁屏时 list_apps 正确拒绝，不能误报为未启动。
+        // 源码 request_access 只读取权限事实，不调用系统授权弹窗；真实 list/AX/截图另做验收。
+        toolName: "request_access",
         arguments: {},
         context: { sessionId: "cold-runtime", workspaceKey: dir, runtimeScope: "main" },
       });
     try {
-      assert.notEqual(
-        (await run()).isError,
-        true,
-        "Injected transport prevented lazy Helper startup",
-      );
+      const first = await run();
+      assert.notEqual(first.isError, true, "Injected transport prevented lazy Helper startup");
+      assert.equal(first.structuredContent.status.grant_owner, "dev.zcode.cua-helper.kcode");
+      assert.equal(first.structuredContent.status.prompted, false);
       pid = await queryPid();
       const previous = pid;
       process.kill(pid, "SIGKILL");

@@ -105,6 +105,7 @@ export interface CuaProductHelperHost {
   readonly running: boolean;
   readonly socketPath: string | null;
   readonly pluginAuthority: string | null;
+  readonly reservedTransport?: CuaHelperTransportHandle;
   start(): Promise<CuaHelperHandle>;
   stop(): Promise<void>;
   restart(): Promise<CuaHelperHandle>;
@@ -244,5 +245,5 @@ export declare function resolveCuaHelperInstallRoot(env: NodeJS.ProcessEnv): str
 export declare function standaloneHelperCandidatePaths(env?: NodeJS.ProcessEnv): string[];
 export declare function injectPermissionBrokerAgentMcpServers<T>(
   servers: T[] | undefined,
-  options: unknown,
+  options: { socketPath: string; pluginAuthority?: string | null },
 ): T[] | undefined;

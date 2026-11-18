@@ -215,6 +215,8 @@ sequenceDiagram
 
 Agent 注入的 socket 地址只标识传输入口，不表示 Helper 已经存活。`node_repl` 在清理启动环境前复制 CUA 环境；产品 runtime 对匹配该环境的传输入口，在每次新工具调用前通过同一个 package lifecycle adapter 确认 Helper 可用，使用已验证的随包源码 Helper。显式注入的测试/外部 broker 地址仍由调用者管理。退出、启动和显式重启 Promise 必须串行收敛；停止结束后不能被此前的重启重新写回 running。死亡后的新调用可以建立新 generation，原调用及 mutation 均不自动重放。
 
+保留公开的 Agent MCP 注入契约：输入使用协议的 `{name,value}[]` 环境变量，不能展开成数字属性对象。只有 `name=node_repl`、官方 computer-use plugin ID 和当前 Host 的非空 opaque authority 三者匹配，才注入 socket/refresh marker，并替换 `--` 之前的唯一 `--permission-broker-socket` 参数；`--` 之后的用户参数保持原样。该边界不根据名字或命令子串授予权限。普通 MCP、Browser Use 和未匹配 authority 的共享 host 原样保留；已退役的独立 CUA MCP 不启动。无匹配候选时不启动 Helper，注入不修改调用者的配置。回归覆盖环境数组、重复参数、空 socket、错误 authority 与普通 MCP；真实模型的新会话接入与既有会话配置刷新分别取证。
+
 ```mermaid
 sequenceDiagram
   participant R as runtime 新工具调用

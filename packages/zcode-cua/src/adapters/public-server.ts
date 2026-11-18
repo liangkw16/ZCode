@@ -81,11 +81,55 @@ export class CuaProductHelperWorkspaceRegistry {
 export const isOfficialCuaPluginEnabledForWorkspace = (options: { env?: NodeJS.ProcessEnv } = {}) =>
   !["0", "off", "false"].includes(options.env?.ZCODE_CUA_PRODUCT_HELPER?.toLowerCase() ?? "");
 export function isPotentialZCodeCuaAgentMcpServer(server: unknown) {
-  if (!server || typeof server !== "object") return false;
-  const s = server as Record<string, unknown>;
+  const s = stdioServer(server);
+  if (!s) return false;
   return (
-    (typeof s.command === "string" && /zcode-cua/.test(s.command)) ||
-    (Array.isArray(s.args) && s.args.some((a) => typeof a === "string" && /zcode-cua/.test(a)))
+    isOfficialSharedHost(s) ||
+    s.name === "computer-use" ||
+    /(?:^|[/@])zcode-cua(?:$|[/@.])/.test(String(s.command)) ||
+    (Array.isArray(s.args) &&
+      s.args.some((a) => typeof a === "string" && /(?:^|[/@])zcode-cua(?:$|[/@.])/.test(a)))
+  );
+}
+type StdioServer = Record<string, unknown> & { command: string };
+type EnvPair = { name: string; value: string };
+function stdioServer(server: unknown): StdioServer | undefined {
+  return server &&
+    typeof server === "object" &&
+    "command" in server &&
+    typeof server.command === "string"
+    ? (server as StdioServer)
+    : undefined;
+}
+function envPairs(server: StdioServer): EnvPair[] {
+  return Array.isArray(server.env)
+    ? server.env.filter(
+        (e): e is EnvPair =>
+          e !== null &&
+          typeof e === "object" &&
+          typeof e.name === "string" &&
+          typeof e.value === "string",
+      )
+    : [];
+}
+function isOfficialSharedHost(server: StdioServer): boolean {
+  return (
+    server.name === "node_repl" &&
+    envPairs(server).some(
+      (e) => e.name === "ZCODE_PLUGIN_ID" && e.value === "computer-use@zcode-plugins-official",
+    )
+  );
+}
+function isAuthorizedSharedHost(
+  server: unknown,
+  authority: string | null | undefined,
+): server is StdioServer {
+  const s = stdioServer(server);
+  return Boolean(
+    s &&
+    authority?.trim() &&
+    isOfficialSharedHost(s) &&
+    envPairs(s).some((e) => e.name === "ZCODE_CUA_PLUGIN_AUTHORITY" && e.value === authority),
   );
 }
 export function createCuaProductMcpServerResolver(
@@ -99,20 +143,16 @@ export function createCuaProductMcpServerResolver(
   }
   return {
     async resolveMcpServers<T>(servers: T[] | undefined) {
-      if (!servers?.some(isPotentialZCodeCuaAgentMcpServer)) return servers;
-      const handle = await host.start();
-      return servers.map((s) =>
-        isPotentialZCodeCuaAgentMcpServer(s)
-          ? {
-              ...s,
-              env: {
-                ...(s as any).env,
-                ZCODE_CUA_PERMISSION_BROKER_SOCKET: handle.socketPath,
-                ZCODE_CUA_PLUGIN_AUTHORITY: handle.pluginAuthority,
-              },
-            }
-          : s,
+      if (!servers) return servers;
+      // 已退役的独立 MCP 不能因命令名含 zcode-cua 获得 transport；只接受当前 Host 签发的共享宿主。
+      const kept = servers.filter(
+        (s) => stdioServer(s)?.name === "node_repl" || !isPotentialZCodeCuaAgentMcpServer(s),
       );
+      const candidates = kept.length === servers.length ? servers : kept;
+      const authority = host.pluginAuthority ?? host.reservedTransport?.pluginAuthority;
+      if (!candidates.some((s) => isAuthorizedSharedHost(s, authority))) return candidates;
+      const handle = await host.start();
+      return injectPermissionBrokerAgentMcpServers(candidates, handle);
     },
     restart,
     async restartAfterPermissionGrant() {
@@ -147,7 +187,54 @@ export const isScreenCaptureProbeSuccess = (probe: { ok: boolean } | undefined) 
 export async function reapOrphanedHelpers(_options?: unknown) {}
 export function injectPermissionBrokerAgentMcpServers<T>(
   servers: T[] | undefined,
-  _options: unknown,
+  options: { socketPath: string; pluginAuthority?: string | null },
 ) {
-  return servers;
+  if (!servers || !options.pluginAuthority?.trim()) return servers;
+  // 协议 env 是 name/value 数组；对象展开会丢失凭据。authority 匹配必须先于任何注入或启动。
+  let changed = false;
+  const result = servers.map((server) => {
+    if (!isAuthorizedSharedHost(server, options.pluginAuthority)) return server;
+    if (!options.socketPath.trim())
+      throw new Error("CUA injection requires a non-empty socketPath");
+    const args = Array.isArray(server.args)
+      ? server.args.filter((a): a is string => typeof a === "string")
+      : [];
+    const delimiter = args.indexOf("--");
+    const prefix = delimiter < 0 ? args : args.slice(0, delimiter);
+    const kept: string[] = [];
+    for (let i = 0; i < prefix.length; i++) {
+      const arg = prefix[i];
+      if (arg === "--permission-broker-socket") {
+        if (prefix[i + 1] && !prefix[i + 1].startsWith("--")) i++;
+      } else if (!arg.startsWith("--permission-broker-socket=")) kept.push(arg);
+    }
+    const env = envPairs(server)
+      .filter(
+        (e) =>
+          ![
+            "ZCODE_CUA_PERMISSION_BROKER_SOCKET",
+            "ZCODE_CUA_PERMISSION_BROKER_REFRESH_MARKER",
+          ].includes(e.name),
+      )
+      .map((e) => ({ ...e }));
+    env.push(
+      { name: "ZCODE_CUA_PERMISSION_BROKER_SOCKET", value: options.socketPath },
+      {
+        name: "ZCODE_CUA_PERMISSION_BROKER_REFRESH_MARKER",
+        value: cuaBrokerRefreshMarkerPath(options.socketPath),
+      },
+    );
+    changed = true;
+    return {
+      ...server,
+      args: [
+        ...kept,
+        "--permission-broker-socket",
+        options.socketPath,
+        ...(delimiter < 0 ? [] : args.slice(delimiter)),
+      ],
+      env,
+    } as T;
+  });
+  return changed ? result : servers;
 }

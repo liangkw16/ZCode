@@ -4,6 +4,9 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <cassert>
 #include <cstring>
+
+extern void KCUAWaitForCaptureCompletion(dispatch_semaphore_t, void (^)(void))
+    __attribute__((weak_import));
 #import <objc/runtime.h>
 
 void KCUACheck(const KCUAOp &) {}
@@ -81,5 +84,24 @@ int main() {
     assert(rgba[0] == 11 && rgba[4] == 12 && rgba[8] == 21 && rgba[12] == 22);
     CFRelease(bytes);
     puts("capture callback publishes owned crop without encoding");
+
+    assert(KCUAWaitForCaptureCompletion &&
+           "Single-shot capture lacks a completion fence");
+    auto ready = dispatch_semaphore_create(0);
+    __block BOOL finished = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150000000),
+                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                     finished = YES;
+                     dispatch_semaphore_signal(ready);
+                   });
+    @try {
+      KCUAWaitForCaptureCompletion(ready, ^{
+        KCUAFail(@"cancelled", @"test cancellation");
+      });
+      assert(false && "Cancelled capture returned a frame");
+    } @catch (NSException *error) {
+      assert([error.name isEqual:@"cancelled"] && finished);
+    }
+    puts("single-shot cancellation waits for the framework callback");
   }
 }

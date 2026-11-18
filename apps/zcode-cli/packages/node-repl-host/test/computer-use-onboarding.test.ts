@@ -79,6 +79,16 @@ async function makeTarget(platform: NodeJS.Platform) {
 }
 
 describe("computer-use observation return values", () => {
+  it("retrieves fresh usable element indices without making screen capture a prerequisite", async () => {
+    const { target, call } = await makeTarget("darwin");
+    await expect(target.elements()).resolves.toEqual([{ index: 1 }]);
+    expect(call).toHaveBeenCalledExactlyOnceWith("get_app_state", {
+      app_ref: { pid: 123, bundle_id: "com.google.Chrome", window_id: 42 },
+      tree_shown_to_model: true,
+      include_screenshot: false,
+    });
+  });
+
   it("returns tree text directly and the combined tree in state", async () => {
     // 真机模型误读 .content 造成反复空匹配；锁定既有 SDK 返回契约，文档示例直接解析字符串。
     const { target } = await makeTarget("darwin");

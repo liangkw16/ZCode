@@ -303,6 +303,8 @@ state_id、元素索引和 frame_id 继续绑定会话、目标、观察版本�
 
 ScreenCaptureKit 回调只核对裁切范围并复制所需像素。原生截图操作等待 stream 停止确认，再做 PNG/JPEG 编码；编码开始前和每次压缩尝试之间检查取消，编码结束后再次核对桌面与目标。合成帧回归验证回调不调用编码器，并验证系统复用像素缓冲后，已复制帧仍保持原内容。
 
+M2 的日志显示，在窗口流启动后约 40 毫秒请求停止会收到 `SCStreamErrorAttemptToStopStreamState`（`-3808`），且对象析构时框架仍报告流在运行。macOS 14 及以上的普通窗口截图使用 `SCScreenshotManager` 的单帧请求。截图完成回调是该路径的清理栅栏；取消等待有界的回调收敛，丢弃其图像。macOS 13 保留 `SCStream`，收到启动完成回调后才能停止。任一路径都要求窗口身份、图像尺寸和当前桌面匹配。`elements()` 只获取可见 AX 索引，不请求截图，便于截图不可用时继续进行 AX 操作。
+
 ```mermaid
 sequenceDiagram
     participant S as ScreenCaptureKit

@@ -1129,10 +1129,14 @@ export async function setupComputerUseRuntime({ globals }) {
         //
         // diff 基线问题不受影响：binding.treeSeen 仍清空（treeSeen 管的是 emit
         // 展示面的整树承诺，与记账正交），下一次 getAXState 照旧强制整树。
-        const fresh = appStateOf(
-          "get_app_state",
-          await call("get_app_state", { app_ref: appRef, tree_shown_to_model: true }),
-        );
+        // 真机 AX 索引查询曾触发默认截图，截图失败时误报整棵 AX 树不可用。
+        const result = await call("get_app_state", {
+          app_ref: appRef,
+          tree_shown_to_model: true,
+          include_screenshot: false,
+        });
+        assertOk("get_app_state", result);
+        const fresh = appStateOf("get_app_state", result);
         binding.stateId = fresh.state_id;
         binding.elements = fresh.elements;
         binding.treeSeen = false;

@@ -154,6 +154,132 @@ static NSString *displayTopology(void) {
                                                      error:nil]
           encoding:NSUTF8StringEncoding];
 }
+// ScreenCaptureKit 的单帧请求没有取消 API，只有回调能确认框架工作已结束。
+void KCUAWaitForCaptureCompletion(dispatch_semaphore_t ready,
+                                  void (^check)(void)) {
+  @try {
+    while (dispatch_semaphore_wait(
+               ready, dispatch_time(DISPATCH_TIME_NOW, 20000000)) != 0)
+      check();
+  } @catch (NSException *error) {
+    if (dispatch_semaphore_wait(
+            ready, dispatch_time(DISPATCH_TIME_NOW, 3000000000)) != 0)
+      KCUAFail(@"cleanup_incomplete",
+               @"ScreenCaptureKit did not finish after interruption");
+    @throw;
+  }
+  check();
+}
+
+API_AVAILABLE(macos(14.0))
+static id captureSingleFrame(SCContentFilter *filter,
+                             SCStreamConfiguration *configuration,
+                             void (^check)(void)) {
+  dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+  __block id snapshot;
+  __block NSError *failure;
+  [SCScreenshotManager
+      captureImageWithFilter:filter
+               configuration:configuration
+           completionHandler:^(CGImageRef image, NSError *error) {
+             failure = error;
+             if (image)
+               snapshot = CFBridgingRelease(CGImageRetain(image));
+             dispatch_semaphore_signal(ready);
+           }];
+  KCUAWaitForCaptureCompletion(ready, check);
+  if (failure || !snapshot)
+    KCUAFail(@"element_unavailable",
+             @"ScreenCaptureKit returned no single-frame raster",
+             failure
+                 ? @{@"platform_error_code" : @(failure.code)}
+                 : nil);
+  return snapshot;
+}
+
+static bool rasterIsUniform(CGImageRef image) {
+  uint8_t pixels[16 * 16 * 4] = {};
+  CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
+  CGContextRef context = CGBitmapContextCreate(
+      pixels, 16, 16, 8, 16 * 4, colors,
+      kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+  CGColorSpaceRelease(colors);
+  if (!context)
+    KCUAFail(@"element_unavailable", @"Cannot inspect captured pixels");
+  CGContextSetInterpolationQuality(context, kCGInterpolationNone);
+  CGContextDrawImage(context, CGRectMake(0, 0, 16, 16), image);
+  CGContextRelease(context);
+  for (size_t i = 4; i < sizeof(pixels); i += 4)
+    if (std::memcmp(pixels, pixels + i, 4) != 0)
+      return false;
+  return true;
+}
+
+static KCUAFrameOutput *
+captureLegacyStream(SCContentFilter *filter,
+                    SCStreamConfiguration *configuration, void (^check)(void)) {
+  KCUAFrameOutput *output = [KCUAFrameOutput new];
+  SCStream *stream = [[SCStream alloc] initWithFilter:filter
+                                        configuration:configuration
+                                             delegate:output];
+  NSError *addError;
+  if (![stream addStreamOutput:output
+                          type:SCStreamOutputTypeScreen
+            sampleHandlerQueue:dispatch_get_global_queue(
+                                   QOS_CLASS_USER_INITIATED, 0)
+                         error:&addError])
+    KCUAFail(@"element_unavailable",
+             @"Could not attach the ScreenCaptureKit frame output");
+  dispatch_semaphore_t started = dispatch_semaphore_create(0);
+  __block NSError *startError;
+  [stream startCaptureWithCompletionHandler:^(NSError *error) {
+    startError = error;
+    dispatch_semaphore_signal(started);
+  }];
+  NSException *failure;
+  @try {
+    KCUAWaitForCaptureCompletion(started, check);
+    if (startError)
+      KCUAFail(
+          @"element_unavailable", @"ScreenCaptureKit stream failed to start",
+          @{@"platform_error_code" : @(startError.code)});
+    while (dispatch_semaphore_wait(
+               output.ready, dispatch_time(DISPATCH_TIME_NOW, 20000000)) != 0) {
+      check();
+    }
+    if (output.failure || !output.raster)
+      KCUAFail(@"element_unavailable",
+               @"ScreenCaptureKit returned no usable pixels");
+  } @catch (NSException *error) {
+    if ([error.name isEqual:@"cleanup_incomplete"] || startError)
+      @throw;
+    failure = error;
+  }
+  // 失败或取消后拒绝晚到帧，停止确认仍由下面的 completion handler 提供。
+  @synchronized(output) {
+    output.finished = YES;
+  }
+  // 取消回执等待 stop 的真实完成；停止超时会阻止后续输入并交给原生恢复
+  // watchdog。
+  dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
+  __block NSError *stopError;
+  [stream stopCaptureWithCompletionHandler:^(NSError *error) {
+    stopError = error;
+    dispatch_semaphore_signal(stopped);
+  }];
+  if (dispatch_semaphore_wait(
+          stopped, dispatch_time(DISPATCH_TIME_NOW, 3000000000)) != 0 ||
+      stopError)
+    KCUAFail(@"cleanup_incomplete",
+             @"ScreenCaptureKit stream cleanup could not be confirmed",
+             stopError
+                 ? @{@"platform_error_code" : @(stopError.code)}
+                 : nil);
+  if (failure)
+    @throw failure;
+  return output;
+}
+
 NSDictionary *KCUACapture(const KCUATargetRef &target, const KCUAOp &op) {
   KCUACheck(op);
   KCUAValidateTarget(target);
@@ -225,64 +351,32 @@ NSDictionary *KCUACapture(const KCUATargetRef &target, const KCUAOp &op) {
     configuration.ignoreShadowsSingleWindow = YES;
     configuration.preservesAspectRatio = NO;
   }
-  KCUAFrameOutput *output = [KCUAFrameOutput new];
-  SCStream *stream = [[SCStream alloc] initWithFilter:filter
-                                        configuration:configuration
-                                             delegate:output];
-  NSError *addError;
-  if (![stream addStreamOutput:output
-                          type:SCStreamOutputTypeScreen
-            sampleHandlerQueue:dispatch_get_global_queue(
-                                   QOS_CLASS_USER_INITIATED, 0)
-                         error:&addError])
-    KCUAFail(@"element_unavailable",
-             @"Could not attach the ScreenCaptureKit frame output");
-  [stream startCaptureWithCompletionHandler:^(NSError *error) {
-    if (error)
-      [output stream:stream didStopWithError:error];
-  }];
-  NSException *failure;
-  @try {
-    while (dispatch_semaphore_wait(
-               output.ready, dispatch_time(DISPATCH_TIME_NOW, 20000000)) != 0) {
-      KCUACheck(op);
-      KCUARequireDesktop();
-      if (std::chrono::steady_clock::now() >= deadline)
-        KCUAFail(@"timeout", @"ScreenCaptureKit frame deadline exceeded");
-    }
-    if (output.failure || !output.raster)
-      KCUAFail(@"element_unavailable",
-               @"ScreenCaptureKit returned no usable pixels");
-  } @catch (NSException *error) {
-    failure = error;
-  }
-  // 失败或取消后拒绝晚到帧，停止确认仍由下面的 completion handler 提供。
-  @synchronized(output) {
-    output.finished = YES;
-  }
-  // 取消回执等待 stop 的真实完成；停止超时会阻止后续输入并交给原生恢复
-  // watchdog。
-  dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
-  __block NSError *stopError;
-  [stream stopCaptureWithCompletionHandler:^(NSError *error) {
-    stopError = error;
-    dispatch_semaphore_signal(stopped);
-  }];
-  if (dispatch_semaphore_wait(
-          stopped, dispatch_time(DISPATCH_TIME_NOW, 3000000000)) != 0 ||
-      stopError)
-    KCUAFail(@"cleanup_incomplete",
-             @"ScreenCaptureKit stream cleanup could not be confirmed");
-  if (failure)
-    @throw failure;
   void (^checkpoint)(void) = ^{
     KCUACheck(op);
     if (std::chrono::steady_clock::now() >= deadline)
       KCUAFail(@"timeout", @"ScreenCaptureKit capture deadline exceeded");
   };
+  void (^captureCheck)(void) = ^{
+    checkpoint();
+    KCUARequireDesktop();
+  };
+  captureCheck();
+  id snapshot;
+  bool blank;
+  // M2 上短命 SCStream 收到 -3808 后析构仍在运行。单帧由系统持有结束时序，
+  // 只在 macOS 13 保留需要自行等待 start/stop 的兼容路径。
+  if (@available(macOS 14.0, *)) {
+    snapshot = captureSingleFrame(filter, configuration, captureCheck);
+    blank = rasterIsUniform((__bridge CGImageRef)snapshot);
+  } else {
+    KCUAFrameOutput *output =
+        captureLegacyStream(filter, configuration, captureCheck);
+    snapshot = output.raster;
+    blank = output.blank;
+  }
   checkpoint();
   KCUAValidateTarget(target);
-  CGImageRef raster = (__bridge CGImageRef)output.raster;
+  CGImageRef raster = (__bridge CGImageRef)snapshot;
   NSUInteger rasterWidth = CGImageGetWidth(raster),
              rasterHeight = CGImageGetHeight(raster);
   CGRect now = KCUAAXBounds(target->window);
@@ -316,7 +410,7 @@ NSDictionary *KCUACapture(const KCUATargetRef &target, const KCUAOp &op) {
       @"width" : encoded[@"width"],
       @"height" : encoded[@"height"]
     },
-    @"screenshot_blank" : @(output.blank),
+    @"screenshot_blank" : @(blank),
     @"screenshot_bounds" : bounds,
     @"coordinate_contract" : @"frame_pixel_projection_v1",
     @"pointer" : bounds,

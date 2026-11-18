@@ -484,9 +484,9 @@ export const OFFICIAL_PLUGIN_DEFINITIONS: readonly OfficialPluginDefinition[] = 
     // Dev/desktop 会把最小 Sharp 闭包 stage 到这里；官方 cache 必须继续携带 node_modules，
     // 否则 seed 原子替换后首次截图才会报 Cannot find module 'sharp'。
     runtimeTopLevelPaths: ["node_modules"],
-    // 这里的 version 追踪上游 zcode-cua runtime 版本，使插件 UI 展示、缓存路径、
-    // marketplace 条目都对齐；具体版本由原子 producer bump 工作流维护。
-    version: "0.6.5",
+    // 桌面只按发布版本刷新文件缓存。SDK 改动时同步推进包版本、插件清单和这里，
+    // 避免已安装的旧缓存继续调用已修改的观察接口。
+    version: "0.6.9",
   },
   {
     // ZCode Sites（技术方案 4）：Skill 指导 Agent 把项目改造并打包成 runner 可直接运行的产物包，

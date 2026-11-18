@@ -245,6 +245,17 @@ describe("bundled official plugin cache resilience", () => {
     await Promise.all(cleanups.splice(0).map((root) => rm(root, { force: true, recursive: true })));
   });
 
+  it("publishes computer-use under the SDK release version", async () => {
+    const sdkRoot = new URL("../../zcode-cua-plugin/", import.meta.url);
+    const [pkg, manifest] = await Promise.all(
+      ["package.json", ".zcode-plugin/plugin.json"].map(async (path) =>
+        JSON.parse(await readFile(new URL(path, sdkRoot), "utf8")),
+      ),
+    );
+    expect(manifest.version).toBe(pkg.version);
+    expect(CUA_DEFINITION.version).toBe(pkg.version);
+  });
+
   it.each([false, true])("keeps SEA payload hash validation (corrupt: %s)", async (corrupt) => {
     const storageRoot = await createStorageRoot(cleanups);
     const payloads: Record<string, string> = {

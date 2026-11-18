@@ -305,6 +305,8 @@ ScreenCaptureKit 回调只核对裁切范围并复制所需像素。原生截图
 
 M2 的日志显示，在窗口流启动后约 40 毫秒请求停止会收到 `SCStreamErrorAttemptToStopStreamState`（`-3808`），且对象析构时框架仍报告流在运行。macOS 14 及以上的普通窗口截图使用 `SCScreenshotManager` 的单帧请求。截图完成回调是该路径的清理栅栏；取消等待有界的回调收敛，丢弃其图像。macOS 13 保留 `SCStream`，收到启动完成回调后才能停止。任一路径都要求窗口身份、图像尺寸和当前桌面匹配。`elements()` 只获取可见 AX 索引，不请求截图，便于截图不可用时继续进行 AX 操作。
 
+桌面内置插件的发布版本由官方插件定义确定，SDK 的包与插件清单使用同一版本。SDK 行为改动随版本推进。冷启动时官方插件 seed 将新包原子发布到该版本的缓存目录，新任务从新目录加载 SDK。验收覆盖已有旧版本缓存的升级，比较新缓存的 SDK 与安装包内同文件的摘要。
+
 ```mermaid
 sequenceDiagram
     participant S as ScreenCaptureKit

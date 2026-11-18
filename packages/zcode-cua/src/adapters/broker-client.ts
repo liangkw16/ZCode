@@ -21,6 +21,7 @@ interface Auth {
     generation: string;
     capability: string;
     cleanupFence: boolean;
+    pixelsOnly?: boolean;
     pid?: number;
     cancellationEpoch?: number;
   };
@@ -144,11 +145,15 @@ function exchange<T>(
             return;
           }
           authenticated = true;
+          const nativeParams = { ...params };
+          // 只在响应本次握手的 Helper 支持时发送。旧 v3 Helper 仍接收原参数。
+          if (method === "capture_app" && auth.kcode?.pixelsOnly !== true)
+            delete nativeParams.pixels_only;
           const payload = JSON.stringify({
             id: 1,
             method,
             params: {
-              ...params,
+              ...nativeParams,
               ...(options.operation ? { kcode_operation: options.operation } : {}),
             },
           });
@@ -264,9 +269,11 @@ export function createBrokerClient(options: {
         let result: { cleanup_complete?: boolean; epoch?: number; dispatch_status?: string } = {};
         for (;;) {
           if (processEnded(pendingPid)) {
-            if (callOptions.session) requireObservation.add(callOptions.session);
-            result = { cleanup_complete: true, dispatch_status: "possibly_sent" };
-            break;
+            // 进程退出只证明旧 Helper 停止执行，窗口的 up 可能要由下一代恢复。
+            throw new NativeBrokerError(
+              "helper_exited",
+              "Helper exited before scoped input release was confirmed",
+            );
           }
           const remaining = deadline - Date.now();
           if (remaining <= 0)

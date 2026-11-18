@@ -37,6 +37,87 @@ int main(int argc, const char *argv[]) {
     assert(mkdtemp(dir));
     NSString *path = [NSString stringWithUTF8String:dir];
     KCUACoordinatorStart(path, [path stringByAppendingPathComponent:@"socket"]);
+    if (argc > 1 && strcmp(argv[1], "--capacity") == 0) {
+      std::atomic<bool> closed{false};
+      for (int sessionIndex = 0; sessionIndex < 16; sessionIndex++) {
+        @autoreleasepool {
+          NSString *session =
+              [NSString stringWithFormat:@"session-%d", sessionIndex];
+          for (int operationIndex = 0; operationIndex < 2048;
+               operationIndex++) {
+            @autoreleasepool {
+              auto result = KCUASubmit(
+                  @"list_windows", @{}, @"peer", @{
+                    @"session" : session,
+                    @"operationId" : @(operationIndex).stringValue
+                  },
+                  &closed);
+              assert([result[@"ok"] boolValue]);
+            }
+          }
+          auto release = KCUAControl(@"session_release", @{}, @"peer",
+                                     @{@"session" : session});
+          assert([release[@"result"][@"cleanup_complete"] boolValue]);
+          assert(KCUASessionHasDrained(@"peer", session));
+          assert(!KCUASessionHasDrained(@"other-peer", session));
+        }
+      }
+      assert(KCUAActiveOperationCount() == 0);
+      auto next = KCUASubmit(
+          @"list_windows", @{}, @"peer",
+          @{@"session" : @"fresh", @"operationId" : @"observe"}, &closed);
+      assert([next[@"ok"] boolValue] &&
+             "closed sessions must release operation capacity");
+      NSDictionary *old = @{@"session" : @"session-0", @"operationId" : @"0"};
+      auto replay = KCUASubmit(@"fixture_count", @{}, @"peer", old, &closed);
+      assert([replay[@"error"][@"code"] isEqual:@"control_stopped"]);
+      for (NSString *method in @[ @"operation_cancel", @"operation_status" ]) {
+        auto late =
+            KCUAControl(method, @{@"operation_id" : @"0"}, @"peer", old);
+        assert([late[@"result"][@"cleanup_complete"] boolValue]);
+        assert(![late[@"result"][@"found"] boolValue]);
+        assert([late[@"result"][@"dispatch_status"] isEqual:@"possibly_sent"]);
+      }
+      assert(dispatchCount == 0);
+      KCUACoordinatorStop();
+      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+      puts("32768 operations reclaimed with closed sessions fenced");
+      return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--release-drain") == 0) {
+      NSDictionary *context =
+          @{@"session" : @"draining", @"operationId" : @"hold"};
+      std::atomic<bool> closed{false};
+      std::thread execute([&] {
+        @autoreleasepool {
+          KCUASubmit(@"fixture_hold", @{}, @"peer", context, &closed);
+        }
+      });
+      while (!dispatchCount)
+        std::this_thread::yield();
+      std::thread release([&] {
+        @autoreleasepool {
+          auto result = KCUAControl(@"session_release", @{}, @"peer", context);
+          assert([result[@"result"][@"cleanup_complete"] boolValue]);
+        }
+      });
+      while (KCUASessionEpoch(@"peer", @"draining") == 0)
+        std::this_thread::yield();
+      assert(!KCUASessionHasDrained(@"peer", @"draining"));
+      auto late =
+          KCUAControl(@"operation_cancel", @{@"operation_id" : @"not-accepted"},
+                      @"peer", context);
+      assert(![late[@"result"][@"cleanup_complete"] boolValue] &&
+             "an unknown operation must not fabricate cleanup during drain");
+      assert(![late[@"result"][@"found"] boolValue]);
+      release.join();
+      execute.join();
+      assert(dispatchCount == 1);
+      KCUACoordinatorStop();
+      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+      puts("late cancellation respects the session drain");
+      return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--peer-death") == 0) {
       pid_t owner = fork();
       if (owner == 0) {

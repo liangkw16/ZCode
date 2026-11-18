@@ -9,19 +9,23 @@
 #include <unistd.h>
 #include <vector>
 
+enum class HoldPhase { Prepared, Held, Releasing, Released };
 struct HeldInput {
   KCUATargetRef target;
   CGKeyCode key;
   CGEventFlags flags;
   bool mouse;
   CGMouseButton button;
-  CGPoint point;
+  CGPoint windowPoint;
+  NSInteger clickCount = 1;
+  HoldPhase phase = HoldPhase::Prepared;
   bool dispatched = false;
 };
 static std::vector<HeldInput> holds;
 static NSArray *savedClipboard;
 static NSInteger ownedClipboardCount = -1;
 static NSString *safetyPath;
+static bool recoveryPending = false;
 static std::map<std::string, bool> activationPolicy;
 @interface KCUAPasteProvider : NSObject <NSPasteboardItemDataProvider>
 @property(atomic, strong) NSDictionary<NSPasteboardType, NSData *> *payload;
@@ -41,28 +45,60 @@ static std::map<std::string, bool> activationPolicy;
   }
 }
 @end
+static void clearJournal(void) {
+  if (unlink(safetyPath.fileSystemRepresentation) != 0 && errno != ENOENT)
+    KCUAFail(@"cleanup_incomplete", @"Cannot clear input-safety record");
+}
+static void writeJournal(NSDictionary *journal) {
+  NSData *data = [NSPropertyListSerialization
+      dataWithPropertyList:journal
+                    format:NSPropertyListBinaryFormat_v1_0
+                   options:0
+                     error:nil];
+  NSString *temporary =
+      [safetyPath stringByAppendingFormat:@".%@.tmp", [NSUUID UUID].UUIDString];
+  int fd = open(temporary.fileSystemRepresentation,
+                O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    KCUAFail(@"cleanup_incomplete", @"Cannot create input-safety record");
+  ssize_t bytes = write(fd, data.bytes, data.length);
+  int synced = fsync(fd);
+  close(fd);
+  if (!data || bytes != (ssize_t)data.length || synced != 0 ||
+      rename(temporary.fileSystemRepresentation,
+             safetyPath.fileSystemRepresentation) != 0) {
+    unlink(temporary.fileSystemRepresentation);
+    KCUAFail(@"cleanup_incomplete", @"Cannot persist input-safety record");
+  }
+}
 void KCUAPersistInputSafety(void) {
-  if (!safetyPath)
+  if (!safetyPath || recoveryPending)
     return;
   NSDictionary *focus = KCUAScopedFocusRecoveryRecord();
-  if (holds.empty() && !savedClipboard && !focus.count) {
-    unlink(safetyPath.fileSystemRepresentation);
-    return;
-  }
   NSMutableArray *records = [NSMutableArray array];
-  for (const auto &hold : holds)
+  for (const auto &hold : holds) {
+    if (hold.phase == HoldPhase::Released)
+      continue;
     [records addObject:@{
       @"pid" : @(hold.target->pid),
       @"birth" : hold.target->birth,
+      @"window_id" : @(hold.target->windowId),
       @"key" : @(hold.key),
       @"flags" : @(hold.flags),
       @"mouse" : @(hold.mouse),
       @"button" : @(hold.button),
-      @"x" : @(hold.point.x),
-      @"y" : @(hold.point.y)
+      @"x" : @(hold.windowPoint.x),
+      @"y" : @(hold.windowPoint.y),
+      @"click_count" : @(hold.clickCount),
+      @"phase" : @((int)hold.phase)
     }];
-  NSDictionary *journal = @{
-    @"schema" : @1,
+  }
+  if (!records.count && !savedClipboard && !focus.count) {
+    clearJournal();
+    return;
+  }
+  writeJournal(@{
+    @"schema" : @2,
     @"helper_pid" : @(getpid()),
     @"helper_birth" : KCUAProcessBirth(getpid()),
     @"holds" : records,
@@ -70,27 +106,7 @@ void KCUAPersistInputSafety(void) {
     @"clipboard_count" : @(ownedClipboardCount),
     @"synthetic_focus" : focus,
     @"helper_generation" : KCUAGeneration() ?: @""
-  };
-  NSData *data = [NSPropertyListSerialization
-      dataWithPropertyList:journal
-                    format:NSPropertyListBinaryFormat_v1_0
-                   options:0
-                     error:nil];
-  NSString *temporary =
-      [safetyPath stringByAppendingFormat:@".%d.tmp", getpid()];
-  int fd = open(temporary.fileSystemRepresentation,
-                O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
-  if (fd < 0)
-    KCUAFail(@"cleanup_incomplete", @"Cannot create input-safety record");
-  ssize_t bytes = write(fd, data.bytes, data.length);
-  fsync(fd);
-  close(fd);
-  if (bytes != (ssize_t)data.length ||
-      rename(temporary.fileSystemRepresentation,
-             safetyPath.fileSystemRepresentation) != 0) {
-    unlink(temporary.fileSystemRepresentation);
-    KCUAFail(@"cleanup_incomplete", @"Cannot persist input-safety record");
-  }
+  });
 }
 static void restoreClipboard(NSArray *saved, NSInteger ownerCount) {
   NSPasteboard *board = NSPasteboard.generalPasteboard;
@@ -107,12 +123,57 @@ static void restoreClipboard(NSArray *saved, NSInteger ownerCount) {
   if (items.count)
     [board writeObjects:items];
 }
+static void releaseToWindow(const HeldInput &hold, bool normal,
+                            void (^markReleasing)(void)) {
+  auto target = KCUAResolveInputReleaseTarget(
+      hold.target->pid, hold.target->birth, hold.target->windowId);
+  if (!target)
+    return;
+  if (hold.phase == HoldPhase::Releasing)
+    KCUAFail(@"cleanup_incomplete",
+             @"Input release was interrupted; original window is still open");
+  CGEventRef event = nullptr;
+  if (hold.mouse) {
+    CGPoint point = CGPointMake(target->bounds.origin.x + hold.windowPoint.x,
+                                target->bounds.origin.y + hold.windowPoint.y);
+    CGEventType up = hold.button == kCGMouseButtonLeft ? kCGEventLeftMouseUp
+                     : hold.button == kCGMouseButtonRight
+                         ? kCGEventRightMouseUp
+                         : kCGEventOtherMouseUp;
+    event = CGEventCreateMouseEvent(nullptr, up, point, hold.button);
+    if (event)
+      CGEventSetIntegerValueField(event, kCGMouseEventClickState,
+                                  hold.clickCount);
+  } else {
+    event = CGEventCreateKeyboardEvent(nullptr, hold.key, false);
+  }
+  if (!event)
+    KCUAFail(@"cleanup_incomplete", @"Cannot construct a scoped input release");
+  @try {
+    CGEventSetFlags(event, normal && hold.mouse ? hold.flags : 0);
+    KCUAStampWindowEvent(event, target);
+    markReleasing();
+    CGEventPostToPid(target->pid, event);
+  } @finally {
+    CFRelease(event);
+  }
+}
 void KCUAInputInitialize(NSString *runtimeDir) {
   safetyPath =
       [runtimeDir stringByAppendingPathComponent:@"input-safety.plist"];
-  struct stat st;
-  if (lstat(safetyPath.fileSystemRepresentation, &st) != 0)
+  // 健康和预检先上线，恢复事件由调度器取得租约后的首条输入触发。
+  recoveryPending = true;
+}
+static void recoverInputSafety(void) {
+  if (!recoveryPending)
     return;
+  struct stat st;
+  if (lstat(safetyPath.fileSystemRepresentation, &st) != 0) {
+    if (errno != ENOENT)
+      KCUAFail(@"cleanup_incomplete", @"Cannot inspect input recovery record");
+    recoveryPending = false;
+    return;
+  }
   if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode) || st.st_uid != getuid() ||
       (st.st_mode & 0077) || st.st_size > 10 * 1024 * 1024)
     KCUAFail(@"not_authorized", @"Unsafe input recovery record");
@@ -130,40 +191,55 @@ void KCUAInputInitialize(NSString *runtimeDir) {
                                                  format:nil
                                                   error:nil];
   if (![record isKindOfClass:NSDictionary.class] ||
-      [record[@"schema"] intValue] != 1)
+      ![@[ @1, @2 ] containsObject:record[@"schema"] ?: NSNull.null] ||
+      ![record[@"holds"] isKindOfClass:NSArray.class])
     KCUAFail(@"cleanup_incomplete", @"Input recovery record is malformed");
   pid_t previous = [record[@"helper_pid"] intValue];
   NSString *birth = KCUAProcessBirth(previous);
   if (birth && [birth isEqual:record[@"helper_birth"]])
     KCUAFail(@"controller_busy", @"Previous native input owner is still alive");
-  for (NSDictionary *hold in record[@"holds"]) {
-    pid_t pid = [hold[@"pid"] intValue];
-    if (![hold[@"birth"] isEqual:KCUAProcessBirth(pid)])
-      continue;
-    CGEventRef event;
-    if ([hold[@"mouse"] boolValue]) {
-      CGMouseButton button = (CGMouseButton)[hold[@"button"] unsignedIntValue];
-      event = CGEventCreateMouseEvent(
-          nullptr,
-          button == kCGMouseButtonLeft    ? kCGEventLeftMouseUp
-          : button == kCGMouseButtonRight ? kCGEventRightMouseUp
-                                          : kCGEventOtherMouseUp,
-          CGPointMake([hold[@"x"] doubleValue], [hold[@"y"] doubleValue]),
-          button);
-    } else
-      event = CGEventCreateKeyboardEvent(
-          nullptr, (CGKeyCode)[hold[@"key"] unsignedIntValue], false);
-    if (event) {
-      CGEventSetFlags(event,
-                      (CGEventFlags)[hold[@"flags"] unsignedLongLongValue]);
-      CGEventPostToPid(pid, event);
-      CFRelease(event);
+  NSMutableDictionary *journal = [record mutableCopy];
+  NSMutableArray *remaining = [record[@"holds"] mutableCopy];
+  journal[@"holds"] = remaining;
+  while (remaining.count) {
+    NSDictionary *entry = remaining.lastObject;
+    if (![entry isKindOfClass:NSDictionary.class] ||
+        ![entry[@"birth"] isKindOfClass:NSString.class])
+      KCUAFail(@"cleanup_incomplete", @"Invalid saved input target");
+    bool legacy = [record[@"schema"] intValue] == 1;
+    id phase = entry[@"phase"];
+    if (!legacy && ![@[ @0, @1, @2 ] containsObject:phase ?: NSNull.null])
+      KCUAFail(@"cleanup_incomplete", @"Invalid saved input phase");
+    if (legacy || [phase intValue] != (int)HoldPhase::Prepared) {
+      auto target = std::make_shared<KCUATarget>();
+      target->pid = [entry[@"pid"] intValue];
+      target->birth = entry[@"birth"];
+      target->windowId = [entry[@"window_id"] unsignedIntValue];
+      HeldInput hold{
+          target,
+          (CGKeyCode)[entry[@"key"] unsignedIntValue],
+          (CGEventFlags)[entry[@"flags"] unsignedLongLongValue],
+          [entry[@"mouse"] boolValue] == YES,
+          (CGMouseButton)[entry[@"button"] unsignedIntValue],
+          CGPointMake([entry[@"x"] doubleValue], [entry[@"y"] doubleValue]),
+          [entry[@"click_count"] integerValue],
+          legacy ? HoldPhase::Held : (HoldPhase)[phase intValue]};
+      releaseToWindow(hold, false, ^{
+        NSMutableDictionary *releasing = [entry mutableCopy];
+        releasing[@"phase"] = @((int)HoldPhase::Releasing);
+        [remaining replaceObjectAtIndex:remaining.count - 1
+                             withObject:releasing];
+        writeJournal(journal);
+      });
     }
+    [remaining removeLastObject];
+    writeJournal(journal);
   }
   KCUARecoverScopedFocus(record[@"synthetic_focus"]);
   restoreClipboard(record[@"clipboard"],
                    [record[@"clipboard_count"] integerValue]);
-  unlink(safetyPath.fileSystemRepresentation);
+  clearJournal();
+  recoveryPending = false;
 }
 static void post(CGEventRef event, const KCUATargetRef &target,
                  const KCUAOp &op) {
@@ -175,20 +251,24 @@ static void post(CGEventRef event, const KCUATargetRef &target,
     KCUAValidateTarget(target, true);
     KCUABeginScopedFocus(target, op);
     KCUAStampWindowEvent(event, target);
-    CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer,
-                                target->windowId);
-    CGEventSetIntegerValueField(
-        event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent,
-        target->windowId);
-    CGEventType kind = CGEventGetType(event);
-    if (!holds.empty() &&
-        (kind == kCGEventKeyDown || kind == kCGEventLeftMouseDown ||
-         kind == kCGEventRightMouseDown || kind == kCGEventOtherMouseDown))
-      holds.back().dispatched = true;
+    if (!holds.empty()) {
+      auto &hold = holds.back();
+      hold.phase = HoldPhase::Held;
+      if (hold.mouse) {
+        CGPoint point = CGEventGetLocation(event);
+        hold.windowPoint = CGPointMake(point.x - target->bounds.origin.x,
+                                       point.y - target->bounds.origin.y);
+      }
+      KCUAPersistInputSafety();
+    }
     if (CGEventGetType(event) != kCGEventKeyDown &&
         CGEventGetType(event) != kCGEventKeyUp &&
         CGEventGetType(event) != kCGEventFlagsChanged)
       KCUAGhostPoint(CGEventGetLocation(event));
+    KCUACheck(op);
+    KCUARequireDesktop();
+    if (!holds.empty())
+      holds.back().dispatched = true;
     op->dispatched = true;
     CGEventPostToPid(target->pid, event);
   } @finally {
@@ -204,61 +284,38 @@ static void keyDown(const KCUATargetRef &target, KCUAKeyChord chord,
   CGEventSetFlags(event, chord.flags);
   post(event, target, op);
 }
-static void keyUp(const KCUATargetRef &target, KCUAKeyChord chord) {
-  if (![target->birth isEqual:KCUAProcessBirth(target->pid)])
-    return;
-  CGEventRef event = CGEventCreateKeyboardEvent(nullptr, chord.key, false);
-  if (event) {
-    CGEventSetFlags(event, 0);
-    CGEventPostToPid(target->pid, event);
-    CFRelease(event);
+static void releaseLastInput(bool normal) {
+  auto *hold = &holds.back();
+  if (hold->dispatched && hold->phase != HoldPhase::Released) {
+    releaseToWindow(*hold, normal, ^{
+      hold->phase = HoldPhase::Releasing;
+      @try {
+        KCUAPersistInputSafety();
+      } @catch (NSException *error) {
+        hold->phase = HoldPhase::Held;
+        @throw;
+      }
+    });
   }
-  for (auto it = holds.begin(); it != holds.end(); ++it)
-    if (!it->mouse && it->target == target && it->key == chord.key) {
-      holds.erase(it);
-      break;
-    }
+  hold->phase = HoldPhase::Released;
   KCUAPersistInputSafety();
+  holds.pop_back();
 }
 void KCUAInputCleanup(const KCUAOp &op) {
-  (void)op;
-  for (auto it = holds.rbegin(); it != holds.rend(); ++it) {
-    auto &hold = *it;
-    if (!hold.dispatched)
-      continue;
-    if (![hold.target->birth isEqual:KCUAProcessBirth(hold.target->pid)])
-      continue;
-    CGEventRef event;
-    if (hold.mouse)
-      event = CGEventCreateMouseEvent(
-          nullptr,
-          hold.button == kCGMouseButtonLeft    ? kCGEventLeftMouseUp
-          : hold.button == kCGMouseButtonRight ? kCGEventRightMouseUp
-                                               : kCGEventOtherMouseUp,
-          hold.point, hold.button);
-    else
-      event = CGEventCreateKeyboardEvent(nullptr, hold.key, false);
-    if (event) {
-      CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer,
-                                  hold.target->windowId);
-      CGEventSetIntegerValueField(
-          event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent,
-          hold.target->windowId);
-      CGEventSetFlags(event, 0);
-      CGEventPostToPid(hold.target->pid, event);
-      CFRelease(event);
-    }
-  }
-  holds.clear();
   @try {
-    KCUAEndScopedFocus();
+    while (!holds.empty())
+      releaseLastInput(false);
   } @finally {
-    restoreClipboard(savedClipboard, ownedClipboardCount);
-    savedClipboard = nil;
-    ownedClipboardCount = -1;
-    KCUAPersistInputSafety();
-    if (op->cancelled)
-      KCUAGhostHide();
+    @try {
+      KCUAEndScopedFocus();
+    } @finally {
+      restoreClipboard(savedClipboard, ownedClipboardCount);
+      savedClipboard = nil;
+      ownedClipboardCount = -1;
+      KCUAPersistInputSafety();
+      if (op->cancelled)
+        KCUAGhostHide();
+    }
   }
 }
 static void paste(const KCUATargetRef &target, NSString *text, NSString *format,
@@ -310,7 +367,7 @@ static void paste(const KCUATargetRef &target, NSString *text, NSString *format,
   provider.dispatched = YES;
   KCUAKeyChord chord = KCUAParseKeyChord(@"cmd+v");
   keyDown(target, chord, op);
-  keyUp(target, chord);
+  releaseLastInput(true);
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (!provider.provided) {
     KCUACheck(op);
@@ -355,6 +412,7 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
     return @YES;
   }
   KCUARequireAccessibility();
+  recoverInputSafety();
   KCUATargetRef target;
   AXUIElementRef element = nullptr;
   if ([method hasPrefix:@"element_"])
@@ -530,7 +588,7 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
       KCUAValidateTarget(target);
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    keyUp(target, chord);
+    releaseLastInput(true);
   } else if ([method isEqual:@"scroll"]) {
     CGPoint point = pointParam(params[@"point"], target->bounds);
     NSString *direction = params[@"direction"] ?: @"down";
@@ -574,9 +632,6 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
     CGEventType down = button == kCGMouseButtonLeft    ? kCGEventLeftMouseDown
                        : button == kCGMouseButtonRight ? kCGEventRightMouseDown
                                                        : kCGEventOtherMouseDown;
-    CGEventType up = button == kCGMouseButtonLeft    ? kCGEventLeftMouseUp
-                     : button == kCGMouseButtonRight ? kCGEventRightMouseUp
-                                                     : kCGEventOtherMouseUp;
     CGEventFlags pointerFlags = 0;
     if (params[@"modifiers"]) {
       NSString *modifiers =
@@ -594,7 +649,8 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
     if (clicks < 1 || clicks > 3)
       KCUAFail(@"invalid_request", @"Click count must be 1..3");
     for (NSInteger count = 1; count <= clicks; count++) {
-      holds.push_back({target, 0, pointerFlags, true, button, from});
+      holds.push_back(
+          {target, 0, pointerFlags, true, button, CGPointZero, count});
       KCUAPersistInputSafety();
       CGEventRef event = CGEventCreateMouseEvent(nullptr, down, from, button);
       CGEventSetFlags(event, pointerFlags);
@@ -604,7 +660,6 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
         for (int step = 1; step <= 40; step++) {
           CGPoint next = CGPointMake(from.x + (to.x - from.x) * step / 40,
                                      from.y + (to.y - from.y) * step / 40);
-          holds.back().point = next;
           CGEventRef dragged = CGEventCreateMouseEvent(
               nullptr,
               button == kCGMouseButtonLeft    ? kCGEventLeftMouseDragged
@@ -615,12 +670,7 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
           post(dragged, target, op);
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-      event = CGEventCreateMouseEvent(nullptr, up, to, button);
-      CGEventSetFlags(event, pointerFlags);
-      CGEventSetIntegerValueField(event, kCGMouseEventClickState, count);
-      post(event, target, op);
-      holds.pop_back();
-      KCUAPersistInputSafety();
+      releaseLastInput(true);
     }
   } else
     KCUAFail(@"method_not_found", @"Unknown native input method");

@@ -24,6 +24,8 @@ KCUATargetRef KCUAResolveTarget(NSDictionary *reference, const KCUAOp &op,
                                 bool allowLaunch);
 void KCUAValidateTarget(const KCUATargetRef &target,
                         bool requireSameGeometry = false);
+KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
+                                            CGWindowID window);
 id KCUAObservation(NSString *method, NSDictionary *params, const KCUAOp &op);
 AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &op,
                                   KCUATargetRef *target);

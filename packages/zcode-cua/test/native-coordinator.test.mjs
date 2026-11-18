@@ -35,6 +35,8 @@ test(
         ["--peer-death", /dead peer scope drained and lease released/],
         ["--lease-reclaim", /dead lease reclaimer recovered/],
         ["--lease-release", /last scope releases physical controller lease/],
+        ["--capacity", /32768 operations reclaimed with closed sessions fenced/],
+        ["--release-drain", /late cancellation respects the session drain/],
       ];
       const leaseResults = await Promise.allSettled(
         leaseModes.map(async ([mode, expected]) =>

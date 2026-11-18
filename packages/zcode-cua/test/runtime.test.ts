@@ -15,7 +15,12 @@ const context = {
   workspacePath: "/work",
   workspaceIdentity: "one",
 };
-async function fixture(options: { screenshot?: boolean; hold?: string; pressable?: boolean } = {}) {
+async function fixture(options: {
+  screenshot?: boolean;
+  pixelsOnly?: boolean;
+  hold?: string;
+  pressable?: boolean;
+} = {}) {
   const dir = await mkdtemp(join(tmpdir(), "kcua-rt-"));
   const socketPath = join(dir, "broker.sock");
   const calls: any[] = [];
@@ -45,6 +50,7 @@ async function fixture(options: { screenshot?: boolean; hold?: string; pressable
                   generation,
                   capability: "private",
                   cleanupFence: true,
+                  pixelsOnly: options.pixelsOnly,
                   cancellationEpoch: epoch,
                 },
               },
@@ -80,7 +86,7 @@ async function fixture(options: { screenshot?: boolean; hold?: string; pressable
             ? {
                 app: { pid: 700, bundle_id: "dev.fixture", name: "Fixture" },
                 window: { window_id: 10, bounds: { x: -100, y: 20, width: 200, height: 100 } },
-                elements: [
+                elements: r.params.pixels_only ? [] : [
                   {
                     native: "token1",
                     actions: options.pressable === false ? [] : ["AXPress"],
@@ -138,6 +144,28 @@ async function fixture(options: { screenshot?: boolean; hold?: string; pressable
     failObservation: () => (failObservation = true),
   };
 }
+it.each([true, false])(
+  "negotiates pixels-only Capture without evicting AX state (support %s)",
+  async (pixelsOnly) => {
+    const f = await fixture({ screenshot: true, pixelsOnly });
+    const app = { pid: 700 };
+    await f.run("get_app_state", { app_ref: app, include_screenshot: false });
+    const raster = await f.run("get_app_state", {
+      app_ref: app, include_screenshot: true, tree_shown_to_model: false,
+    });
+    expect(raster.isError).not.toBe(true);
+    expect(raster.content.filter((item) => item.type === "image")).toHaveLength(1);
+    expect(f.calls.at(-1).params.pixels_only).toBe(pixelsOnly ? true : undefined);
+    expect(raster.structuredContent?.elements).toHaveLength(pixelsOnly ? 0 : 1);
+    const action = await f.run("set_value", {
+      app_ref: app, target: { type: "element", index: 0 }, value: "after screenshot",
+    });
+    expect(action.isError).not.toBe(true);
+    expect(f.calls.at(-1).params.native).toBe("token1");
+    await f.run("get_app_state", { app_ref: app, include_screenshot: true });
+    expect(f.calls.at(-1).params.pixels_only).toBeUndefined();
+  },
+);
 it("returns full state and preserves observed indices across fresh hidden SDK bindings", async () => {
   const f = await fixture();
   const state = await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });

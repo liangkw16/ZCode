@@ -1,9 +1,11 @@
 #import "automation.h"
 #import "text-contract.h"
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <dlfcn.h>
 #include <map>
+#include <signal.h>
 #include <vector>
 
 id KCUAAXAttribute(AXUIElementRef element, CFStringRef attribute) {
@@ -46,6 +48,47 @@ static NSDictionary *infoForWindow(CGWindowID window, pid_t pid) {
         [entry[(__bridge NSString *)kCGWindowOwnerPID] intValue] == pid)
       return entry;
   return nil;
+}
+KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
+                                            CGWindowID window) {
+  if (pid <= 1 || !birth.length)
+    KCUAFail(@"cleanup_incomplete", @"Invalid original input process identity");
+  NSString *current = KCUAProcessBirth(pid);
+  if (current ? ![birth isEqual:current]
+              : (kill(pid, 0) != 0 && errno == ESRCH))
+    return {};
+  // 释放也要证明窗口仍属于按下时的进程。锁屏时仅允许这条已知目标的清理路径。
+  NSString *desktop = KCUADesktopAvailability();
+  if (!current || !window || !AXIsProcessTrusted() ||
+      (![desktop isEqual:@"unlocked"] && ![desktop isEqual:@"locked"]))
+    KCUAFail(@"cleanup_incomplete", @"Cannot verify the original input target");
+  NSArray *windows = windowInfo();
+  if (!windows)
+    KCUAFail(@"cleanup_incomplete", @"Cannot verify the original window");
+  for (NSDictionary *entry in windows) {
+    if ([entry[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] !=
+        window)
+      continue;
+    if ([entry[(__bridge NSString *)kCGWindowOwnerPID] intValue] != pid)
+      return {};
+    CGRect bounds = CGRectZero;
+    if (!CGRectMakeWithDictionaryRepresentation(
+            (__bridge CFDictionaryRef)
+                entry[(__bridge NSString *)kCGWindowBounds],
+            &bounds) ||
+        CGRectIsEmpty(bounds))
+      KCUAFail(@"cleanup_incomplete",
+               @"Original window geometry is unavailable");
+    if (![birth isEqual:KCUAProcessBirth(pid)])
+      return {};
+    auto target = std::make_shared<KCUATarget>();
+    target->pid = pid;
+    target->birth = birth;
+    target->windowId = window;
+    target->bounds = bounds;
+    return target;
+  }
+  return {};
 }
 static CGWindowID windowNumber(AXUIElementRef window, pid_t pid) {
   // 仅此处隔离系统未公开的 AX→WindowServer
@@ -408,6 +451,85 @@ AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &op,
   *target = record->target;
   return record->element;
 }
+// 只取像素的请求无需遍历子树，也不能变更已展示的索引。
+static NSArray *observeElements(const KCUATargetRef &target,
+                                NSDictionary *params, const KCUAOp &op,
+                                bool *truncated) {
+  for (auto it = elements.begin(); it != elements.end();) {
+    auto &r = it->second;
+    if ([r->peer isEqual:op->peer] && [r->session isEqual:op->session] &&
+        r->target->pid == target->pid &&
+        r->target->windowId == target->windowId &&
+        ([params[@"tree_shown_to_model"] boolValue] ||
+         params[@"tree_shown_to_model"] == nil || !r->visible))
+      it = elements.erase(it);
+    else
+      ++it;
+  }
+  if (elements.size() > 16384) {
+    // 观察索引也由串行 worker 回收。仅复用已排空会话的容量，
+    // 保留其他窗口、其他 Host 已见 token 的有效期。
+    std::map<std::pair<std::string, std::string>, bool> drained;
+    for (auto it = elements.begin(); it != elements.end();) {
+      const auto &record = it->second;
+      const auto scope =
+          std::make_pair(std::string(record->peer.UTF8String),
+                         std::string(record->session.UTF8String));
+      auto found = drained.find(scope);
+      if (found == drained.end())
+        found = drained
+                    .emplace(scope, KCUASessionHasDrained(record->peer,
+                                                          record->session))
+                    .first;
+      if (found->second)
+        it = elements.erase(it);
+      else
+        ++it;
+    }
+    if (elements.size() > 16384)
+      KCUAFail(@"broker_unavailable",
+               @"Native observation registry capacity reached");
+  }
+  NSMutableArray *flat = [NSMutableArray array];
+  struct Pending {
+    __strong id item;
+    NSUInteger depth;
+  };
+  std::vector<Pending> pending;
+  pending.push_back({(__bridge id)target->window, 0});
+  size_t payloadBytes = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!pending.empty() && flat.count < 2048 &&
+         std::chrono::steady_clock::now() < deadline) {
+    KCUACheck(op);
+    auto node = pending.back();
+    pending.pop_back();
+    AXUIElementRef item = (__bridge AXUIElementRef)node.item;
+    NSDictionary *description =
+        describeElement(item, target, op, node.depth,
+                        params[@"tree_shown_to_model"] == nil ||
+                            [params[@"tree_shown_to_model"] boolValue]);
+    if (description) {
+      payloadBytes += [NSJSONSerialization dataWithJSONObject:description
+                                                      options:0
+                                                        error:nil]
+                          .length;
+      if (payloadBytes > 1024 * 1024)
+        break;
+      [flat addObject:description];
+    }
+    if (node.depth >= 40)
+      continue;
+    NSArray *children = KCUAAXAttribute(item, kAXChildrenAttribute);
+    if (![children isKindOfClass:NSArray.class])
+      continue;
+    for (NSInteger index = (NSInteger)children.count - 1;
+         index >= 0 && pending.size() < 4096; index--)
+      pending.push_back({children[(NSUInteger)index], node.depth + 1});
+  }
+  *truncated = !pending.empty();
+  return flat;
+}
 id KCUAObservation(NSString *method, NSDictionary *params, const KCUAOp &op) {
   KCUACheck(op);
   KCUARequireDesktop();
@@ -499,57 +621,14 @@ id KCUAObservation(NSString *method, NSDictionary *params, const KCUAOp &op) {
   }
   if (![method isEqual:@"capture_app"])
     KCUAFail(@"method_not_found", @"Unknown observation method");
-  for (auto it = elements.begin(); it != elements.end();) {
-    auto &r = it->second;
-    if ([r->peer isEqual:op->peer] && [r->session isEqual:op->session] &&
-        r->target->pid == target->pid &&
-        r->target->windowId == target->windowId &&
-        ([params[@"tree_shown_to_model"] boolValue] ||
-         params[@"tree_shown_to_model"] == nil || !r->visible))
-      it = elements.erase(it);
-    else
-      ++it;
-  }
-  if (elements.size() > 16384)
-    KCUAFail(@"broker_unavailable",
-             @"Native observation registry capacity reached");
-  NSMutableArray *flat = [NSMutableArray array];
-  struct Pending {
-    __strong id item;
-    NSUInteger depth;
-  };
-  std::vector<Pending> pending;
-  pending.push_back({(__bridge id)target->window, 0});
-  size_t payloadBytes = 0;
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!pending.empty() && flat.count < 2048 &&
-         std::chrono::steady_clock::now() < deadline) {
-    KCUACheck(op);
-    auto node = pending.back();
-    pending.pop_back();
-    AXUIElementRef item = (__bridge AXUIElementRef)node.item;
-    NSDictionary *description =
-        describeElement(item, target, op, node.depth,
-                        params[@"tree_shown_to_model"] == nil ||
-                            [params[@"tree_shown_to_model"] boolValue]);
-    if (description) {
-      payloadBytes += [NSJSONSerialization dataWithJSONObject:description
-                                                      options:0
-                                                        error:nil]
-                          .length;
-      if (payloadBytes > 1024 * 1024)
-        break;
-      [flat addObject:description];
-    }
-    if (node.depth >= 40)
-      continue;
-    NSArray *children = KCUAAXAttribute(item, kAXChildrenAttribute);
-    if (![children isKindOfClass:NSArray.class])
-      continue;
-    for (NSInteger index = (NSInteger)children.count - 1;
-         index >= 0 && pending.size() < 4096; index--)
-      pending.push_back({children[(NSUInteger)index], node.depth + 1});
-  }
+  bool truncated = false;
+  bool includeScreenshot = params[@"include_screenshot"] == nil ||
+                           [params[@"include_screenshot"] boolValue];
+  bool pixelsOnly = includeScreenshot &&
+                    [params[@"pixels_only"] isEqual:@YES] &&
+                    [params[@"tree_shown_to_model"] isEqual:@NO];
+  NSArray *flat =
+      pixelsOnly ? @[] : observeElements(target, params, op, &truncated);
   KCUAValidateTarget(target);
   NSMutableDictionary *snapshot = [@{
     @"app" : target->app,
@@ -564,12 +643,11 @@ id KCUAObservation(NSString *method, NSDictionary *params, const KCUAOp &op) {
     @"elements" : flat,
     @"state_id" : [NSUUID UUID].UUIDString,
     @"snapshot_mode" : @"full",
-    @"truncated" : @(!pending.empty()),
+    @"truncated" : @(truncated),
     @"screenshot" : [NSNull null],
     @"screenshot_blank" : @NO
   } mutableCopy];
-  if (params[@"include_screenshot"] == nil ||
-      [params[@"include_screenshot"] boolValue]) {
+  if (includeScreenshot) {
     @try {
       NSDictionary *capture = KCUACapture(target, op);
       [snapshot addEntriesFromDictionary:capture];

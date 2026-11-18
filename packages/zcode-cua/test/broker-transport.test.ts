@@ -3,6 +3,8 @@ import { createServer, type Server, type Socket } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createBrokerClient } from "../src/adapters/broker-client.js";
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -144,6 +146,45 @@ describe("zcode-cua compatible transport", () => {
     expect(dispatches).toBe(1);
     expect(await client.call("list_windows", {})).toEqual(["observed"]);
     expect(dispatches).toBe(1);
+  });
+  it("requires a fresh observation after Helper death without claiming input was released", async () => {
+    const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+    const exited = once(helper, "exit");
+    cleanup.push(async () => {
+      helper.kill();
+      await exited;
+    });
+    let generation = "g1";
+    let notifyDispatched!: (socket: Socket) => void;
+    const dispatched = new Promise<Socket>((resolve) => { notifyDispatched = resolve; });
+    let mutations = 0;
+    const client = await fixture((request, socket) => {
+      if (request.method === "drag") {
+        mutations++;
+        if (mutations === 1) {
+          notifyDispatched(socket);
+          return;
+        }
+      }
+      socket.end(JSON.stringify({ id: 1, ok: true, result: { accepted: true } }) + "\n");
+    }, { pid: () => helper.pid!, generation: () => generation });
+    const action = client.call("drag", {}, { session: "fixture" });
+    const checked = expect(action).rejects.toMatchObject({
+      code: "cleanup_incomplete",
+      details: { dispatch_status: "possibly_sent", cause_code: "helper_exited" },
+    });
+    const socket = await dispatched;
+    helper.kill();
+    await exited;
+    socket.destroy();
+    await checked;
+    generation = "g2";
+    await expect(client.call("drag", {}, { session: "fixture" })).rejects.toMatchObject({
+      code: "stale_state",
+    });
+    await client.call("capture_app", {}, { session: "fixture" });
+    await client.call("drag", {}, { session: "fixture" });
+    expect(mutations).toBe(2);
   });
 });
 

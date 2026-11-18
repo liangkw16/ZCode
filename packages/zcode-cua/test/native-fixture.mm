@@ -2,8 +2,44 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+@interface KCUAFixtureWindow : NSWindow
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *inputEvents;
+@property(nonatomic, copy) void (^onDown)(void);
+@end
+@implementation KCUAFixtureWindow
+- (void)sendEvent:(NSEvent *)event {
+  NSString *kind;
+  switch (event.type) {
+  case NSEventTypeKeyDown:
+    kind = @"keyDown";
+    break;
+  case NSEventTypeKeyUp:
+    kind = @"keyUp";
+    break;
+  case NSEventTypeLeftMouseDown:
+    kind = @"mouseDown";
+    break;
+  case NSEventTypeLeftMouseUp:
+    kind = @"mouseUp";
+    break;
+  default:
+    break;
+  }
+  if (kind && self.inputEvents.count < 128)
+    [self.inputEvents
+        addObject:@{@"type" : kind, @"window" : @(self.windowNumber)}];
+  if (self.onDown && (event.type == NSEventTypeKeyDown ||
+                      event.type == NSEventTypeLeftMouseDown)) {
+    auto notify = self.onDown;
+    self.onDown = nil;
+    dispatch_async(dispatch_get_main_queue(), notify);
+  }
+  [super sendEvent:event];
+}
+@end
 @interface KCUAFixture : NSObject <NSApplicationDelegate>
-@property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) KCUAFixtureWindow *window;
+@property(nonatomic, strong) KCUAFixtureWindow *second;
 @property(nonatomic, strong) NSTextField *text;
 @property(nonatomic, strong) NSButton *check;
 @property(nonatomic, strong) NSScrollView *scroll;
@@ -12,13 +48,14 @@
 @implementation KCUAFixture
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   (void)notification;
-  self.window = [[NSWindow alloc]
+  self.window = [[KCUAFixtureWindow alloc]
       initWithContentRect:NSMakeRect(140, 140, 700, 580)
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                           NSWindowStyleMaskResizable
                   backing:NSBackingStoreBuffered
                     defer:NO];
   self.window.title = @"KCode CUA Native Fixture";
+  self.window.inputEvents = [NSMutableArray array];
   NSView *view = self.window.contentView;
   NSTextField *label =
       [NSTextField labelWithString:@"KCode source native acceptance"];
@@ -55,6 +92,20 @@
   submit.frame = NSMakeRect(24, 24, 180, 32);
   submit.accessibilityIdentifier = @"fixture-submit";
   [view addSubview:submit];
+  if ([NSProcessInfo.processInfo.arguments containsObject:@"--dual-window"]) {
+    self.second = [[KCUAFixtureWindow alloc]
+        initWithContentRect:NSMakeRect(855, 190, 300, 320)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    self.second.title = @"KCode CUA Sibling Fixture";
+    self.second.inputEvents = [NSMutableArray array];
+    [self.second orderFront:nil];
+    __weak KCUAFixtureWindow *sibling = self.second;
+    self.window.onDown = ^{
+      [sibling makeKeyAndOrderFront:nil];
+    };
+  }
   [self.window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
   [self startOracle];
@@ -91,7 +142,12 @@
             @"checked" : @(self.check.state == NSControlStateValueOn),
             @"scroll_y" : @(self.scroll.contentView.bounds.origin.y),
             @"submissions" : @(self.submissions),
-            @"pid" : @(getpid())
+            @"pid" : @(getpid()),
+            @"window" : @(self.window.windowNumber),
+            @"input_events" : self.window.inputEvents,
+            @"sibling_window" : @(self.second.windowNumber),
+            @"sibling_key" : @(self.second.isKeyWindow),
+            @"sibling_input_events" : self.second.inputEvents ?: @[]
           }
                                                  options:0
                                                    error:nil];

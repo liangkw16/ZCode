@@ -17,7 +17,8 @@ static std::mutex queueMutex;
 static std::condition_variable queueChanged;
 static std::deque<KCUAOp> queue;
 static std::map<std::string, KCUAOp> operations;
-static std::set<std::string> releasedSessions;
+// false 表示已封口仍在排空，true 表示可以清除操作明细。
+static std::map<std::string, bool> closedSessions;
 static std::map<std::string, KCUAOp> activeScopes;
 static std::map<std::string, uint64_t> sessionEpochs;
 static std::thread worker;
@@ -465,7 +466,7 @@ NSDictionary *KCUASubmit(NSString *method, NSDictionary *params, NSString *peer,
       return KCUAError(
           @"broker_unavailable", @"Native cleanup recovery is in progress",
           @{@"action_sent" : @NO});
-    if (stopping || releasedSessions.count(
+    if (stopping || closedSessions.count(
                         sessionKey(peer, context[@"session"] ?: @"legacy")))
       return KCUAError(
           @"control_stopped", @"CUA session is closed",
@@ -512,16 +513,42 @@ NSDictionary *KCUASubmit(NSString *method, NSDictionary *params, NSString *peer,
   }
   return response;
 }
+static NSDictionary *controlReply(NSString *method, bool complete, bool found,
+                                  bool sent, uint64_t epoch) {
+  NSMutableDictionary *result = [@{
+    @"cleanup_complete" : @(complete),
+    @"found" : @(found),
+    @"dispatch_status" : sent ? @"possibly_sent" : @"not_sent",
+    @"generation" : generation,
+    @"epoch" : @(epoch)
+  } mutableCopy];
+  if ([method isEqual:@"controller_stop"])
+    result[@"stopped"] = @(complete);
+  if ([method isEqual:@"cancel_input_holds"])
+    result[@"released"] = @(complete);
+  return KCUAOK(result);
+}
 NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
                           NSString *peer, NSDictionary *context) {
   std::vector<KCUAOp> selected;
+  NSString *session = context[@"session"] ?: @"legacy";
+  const auto key = sessionKey(peer, session);
+  const bool releasing = [method isEqual:@"session_release"];
+  const bool cancelling = [method isEqual:@"operation_cancel"];
+  const bool status = [method isEqual:@"operation_status"];
+  bool readClosed = false;
   {
     std::lock_guard<std::mutex> lock(queueMutex);
-    NSString *session = context[@"session"] ?: @"legacy";
-    const bool allPeer = [context[@"all_peer_scopes"] boolValue];
+    const auto closed = closedSessions.find(key);
+    readClosed = closed != closedSessions.end() && (cancelling || status);
+    if (closed != closedSessions.end() && closed->second &&
+        (readClosed || releasing))
+      return controlReply(method, true, false, true, sessionEpochs[key]);
+    const bool allPeer =
+        !releasing && !readClosed && [context[@"all_peer_scopes"] boolValue];
     const bool scopeControl =
-        [@[ @"session_release", @"controller_stop", @"cancel_input_holds" ]
-            containsObject:method];
+        releasing ||
+        [@[ @"controller_stop", @"cancel_input_holds" ] containsObject:method];
     if ([method isEqual:@"controller_stop"]) {
       for (auto it = activeScopes.begin(); it != activeScopes.end();)
         if ([it->second->peer isEqual:peer] &&
@@ -530,15 +557,15 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
         else
           ++it;
     }
-    if ([method isEqual:@"session_release"]) {
-      releasedSessions.insert(sessionKey(peer, session));
-      activeScopes.erase(sessionKey(peer, session));
+    if (releasing) {
+      closedSessions.try_emplace(key, false);
+      activeScopes.erase(key);
     }
     NSString *opId = scopeControl
                          ? nil
                          : (params[@"operation_id"] ?: context[@"operationId"]);
-    if (![method isEqual:@"operation_status"]) {
-      auto &epoch = sessionEpochs[sessionKey(peer, session)];
+    if (!status && !readClosed) {
+      auto &epoch = sessionEpochs[key];
       epoch = std::max(epoch,
                        (uint64_t)[context[@"epoch"] unsignedLongLongValue] + 1);
       if (allPeer) {
@@ -551,35 +578,35 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
           }
       }
     }
-    if ([method isEqual:@"operation_cancel"] && opId) {
+    if (cancelling && opId && !readClosed) {
       NSMutableDictionary *target = [context mutableCopy];
       target[@"operationId"] = opId;
       auto op = getOperation(nil, @{}, peer, target);
-      cancelOperation(op);
       if (!op->method) {
+        op->cancelled = true;
         op->response = KCUAError(
             @"cancelled", @"Cancelled before admission",
             @{@"action_sent" : @NO});
         op->cleanupComplete = true;
         op->settled = true;
-      }
+      } else
+        cancelOperation(op);
     }
     for (auto &entry : operations)
       if ([entry.second->peer isEqual:peer] &&
           (allPeer || [entry.second->session isEqual:session]) &&
           (!opId || [entry.second->operationId isEqual:opId])) {
         selected.push_back(entry.second);
-        if (![method isEqual:@"operation_status"])
+        if (!status && !readClosed)
           cancelOperation(entry.second);
       }
   }
-  bool complete = ![method isEqual:@"operation_status"] || !selected.empty(),
-       sent = false;
+  bool complete = (!status && !readClosed) || !selected.empty(), sent = false;
   const auto cleanupDeadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(3);
   for (auto &op : selected) {
     std::unique_lock<std::mutex> lock(op->mutex);
-    if (![method isEqual:@"operation_status"])
+    if (!status && !readClosed)
       op->changed.wait_until(lock, cleanupDeadline,
                              [&] { return op->settled.load(); });
     complete &= op->settled.load() && op->cleanupComplete.load();
@@ -588,23 +615,25 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
   uint64_t currentEpoch;
   {
     std::lock_guard<std::mutex> lock(queueMutex);
-    currentEpoch =
-        sessionEpochs[sessionKey(peer, context[@"session"] ?: @"legacy")];
+    currentEpoch = sessionEpochs[key];
+    if (releasing && complete) {
+      // 所有旧请求已清理，迟到控制消息只读封口状态，不再创建操作。
+      closedSessions[key] = true;
+      for (auto it = operations.begin(); it != operations.end();) {
+        if ([it->second->peer isEqual:peer] &&
+            [it->second->session isEqual:session])
+          it = operations.erase(it);
+        else
+          ++it;
+      }
+    }
+    // 另一个 release 可能已完成排空；未知旧动作只能保守报告其派发结果。
+    if (readClosed && selected.empty() && closedSessions.at(key))
+      return controlReply(method, true, false, true, currentEpoch);
     if (complete)
       releaseLeaseIfIdle();
   }
-  NSMutableDictionary *result = [@{
-    @"cleanup_complete" : @(complete),
-    @"found" : @(!selected.empty()),
-    @"dispatch_status" : sent ? @"possibly_sent" : @"not_sent",
-    @"generation" : generation,
-    @"epoch" : @(currentEpoch)
-  } mutableCopy];
-  if ([method isEqual:@"controller_stop"])
-    result[@"stopped"] = @(complete);
-  if ([method isEqual:@"cancel_input_holds"])
-    result[@"released"] = @(complete);
-  return KCUAOK(result);
+  return controlReply(method, complete, !selected.empty(), sent, currentEpoch);
 }
 void KCUACancelPeer(NSString *peer) {
   std::lock_guard<std::mutex> lock(queueMutex);
@@ -629,6 +658,11 @@ uint64_t KCUADesktopEpoch(void) { return desktopEpoch.load(); }
 uint64_t KCUASessionEpoch(NSString *peer, NSString *session) {
   std::lock_guard<std::mutex> lock(queueMutex);
   return sessionEpochs[sessionKey(peer, session ?: @"legacy")];
+}
+bool KCUASessionHasDrained(NSString *peer, NSString *session) {
+  std::lock_guard<std::mutex> lock(queueMutex);
+  auto closed = closedSessions.find(sessionKey(peer, session));
+  return closed != closedSessions.end() && closed->second;
 }
 void KCUANotifyDesktopUnavailable(void) {
   std::lock_guard<std::mutex> lock(queueMutex);

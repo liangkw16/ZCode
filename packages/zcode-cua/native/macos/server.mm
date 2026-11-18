@@ -273,6 +273,7 @@ static void handleConnection(int fd) {
                     @"generation" : KCUAGeneration(),
                     @"capability" : capability,
                     @"cleanupFence" : @YES,
+                    @"pixelsOnly" : @YES,
                     @"cancellationEpoch" : @(
                         KCUASessionEpoch(peer, [params[@"session_id"]
                                                    isKindOfClass:NSString.class]

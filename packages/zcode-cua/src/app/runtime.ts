@@ -128,6 +128,9 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         include_screenshot: args.include_screenshot ?? true,
         force_full: true,
         tree_shown_to_model: args.tree_shown_to_model !== false,
+        ...(args.tree_shown_to_model === false && args.include_screenshot === true
+          ? { pixels_only: true }
+          : {}),
         ...(context?.turnId
           ? { pip_session_context: { session_id: context.sessionId, turn_id: context.turnId } }
           : {}),

@@ -67,6 +67,7 @@ void KCUAPresentationInitialize(bool enabled);
 void KCUANotifyDesktopUnavailable(void);
 uint64_t KCUADesktopEpoch(void);
 uint64_t KCUASessionEpoch(NSString *peer, NSString *session);
+bool KCUASessionHasDrained(NSString *peer, NSString *session);
 void KCUAStartAvailabilityTracking(void);
 void KCUAStopAvailabilityTracking(void);
 

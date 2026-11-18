@@ -82,9 +82,12 @@ void KCUAEndScopedFocus(void) {
   // 用户在动作期间主动切到目标应用时，不发送失活通知覆盖用户的新选择。
   if (!focusWasForeground &&
       NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier !=
-          target->pid &&
-      [target->birth isEqual:KCUAProcessBirth(target->pid)])
-    focusRecord(target, false);
+          target->pid) {
+    auto verified = KCUAResolveInputReleaseTarget(target->pid, target->birth,
+                                                  target->windowId);
+    if (verified)
+      focusRecord(verified, false);
+  }
   focusTarget.reset();
   KCUAPersistInputSafety();
 }
@@ -122,12 +125,10 @@ void KCUARecoverScopedFocus(NSDictionary *record) {
   if (![record isKindOfClass:NSDictionary.class] || !record.count)
     return;
   pid_t pid = [record[@"pid"] intValue];
-  if (![record[@"birth"] isEqual:KCUAProcessBirth(pid)] ||
-      NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == pid)
+  if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == pid)
     return;
-  auto target = std::make_shared<KCUATarget>();
-  target->pid = pid;
-  target->birth = record[@"birth"];
-  target->windowId = [record[@"window_id"] unsignedIntValue];
-  focusRecord(target, false);
+  auto target = KCUAResolveInputReleaseTarget(
+      pid, record[@"birth"], [record[@"window_id"] unsignedIntValue]);
+  if (target)
+    focusRecord(target, false);
 }

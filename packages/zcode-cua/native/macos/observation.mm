@@ -90,15 +90,41 @@ KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
   }
   return {};
 }
-static CGWindowID windowNumber(AXUIElementRef window, pid_t pid) {
-  // 仅此处隔离系统未公开的 AX→WindowServer
-  // 映射；不可用时只接受唯一的公开几何匹配。
+static CGWindowID mappedWindowNumber(AXUIElementRef window, pid_t pid) {
+  // 仅此处隔离系统未公开的 AX→WindowServer 映射。
   using GetWindow = AXError (*)(AXUIElementRef, CGWindowID *);
   static auto function =
       reinterpret_cast<GetWindow>(dlsym(RTLD_DEFAULT, "_AXUIElementGetWindow"));
   CGWindowID number = 0;
   if (function && function(window, &number) == kAXErrorSuccess && number &&
       infoForWindow(number, pid))
+    return number;
+  return 0;
+}
+void KCUARequireInputKeyWindow(const KCUATargetRef &target, bool releasing) {
+  // AppKit 会把键盘事件路由给当前 key window。M2 上即使写了窗口字段，
+  // 兄弟窗口仍可能收到 up。清理时不用依赖已取消操作的 AX 读取包装。
+  AXUIElementRef app = AXUIElementCreateApplication(target->pid);
+  AXUIElementSetMessagingTimeout(app, 0.25);
+  CFTypeRef focused = nullptr;
+  AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, &focused);
+  CFRelease(app);
+  bool matches = false;
+  if (focused && CFGetTypeID(focused) == AXUIElementGetTypeID()) {
+    matches = (target->window && CFEqual(target->window, focused)) ||
+              mappedWindowNumber((AXUIElementRef)focused, target->pid) ==
+                  target->windowId;
+  }
+  if (focused)
+    CFRelease(focused);
+  if (!matches)
+    KCUAFail(
+        releasing ? @"cleanup_incomplete" : @"foreground_required",
+        @"Focus the original window before sending keyboard input",
+        @{@"action_sent" : @NO});
+}
+static CGWindowID windowNumber(AXUIElementRef window, pid_t pid) {
+  if (CGWindowID number = mappedWindowNumber(window, pid))
     return number;
   CGRect bounds = KCUAAXBounds(window);
   CGWindowID candidate = 0;

@@ -16,6 +16,7 @@ static KCUAOp cancelOnDown;
 static bool targetGone = false;
 static CGRect currentBounds;
 static CGEventType crashAt = kCGEventNull;
+static bool siblingHasKeyboardFocus = false;
 
 extern "C" void CGEventPostToPid(pid_t pid, CGEventRef event) {
   auto type = CGEventGetType(event);
@@ -46,6 +47,11 @@ KCUATargetRef KCUAResolveTarget(NSDictionary *, const KCUAOp &, bool) {
   return original;
 }
 void KCUAValidateTarget(const KCUATargetRef &, bool) {}
+void KCUARequireInputKeyWindow(const KCUATargetRef &, bool releasing) {
+  if (siblingHasKeyboardFocus)
+    KCUAFail(releasing ? @"cleanup_incomplete" : @"foreground_required",
+             @"fixture sibling has keyboard focus");
+}
 KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
                                             CGWindowID window) {
   assert(pid == original->pid && [birth isEqual:original->birth]);
@@ -133,6 +139,25 @@ int main(int argc, const char **argv) {
     }
     auto op = operation();
     KCUAInput(@"press_key", @{@"text" : @"a"}, op);
+    KCUAInputCleanup(op);
+    verifyPair(kCGEventKeyDown, kCGEventKeyUp);
+
+    op = cancelOnDown = operation();
+    @try {
+      KCUAInput(@"hold_key", @{@"text" : @"a", @"duration" : @1}, op);
+      assert(false);
+    } @catch (NSException *error) {
+      assert([error.name isEqual:@"cancelled"]);
+    }
+    siblingHasKeyboardFocus = true;
+    @try {
+      KCUAInputCleanup(op);
+      assert(false && "release must wait while a sibling has keyboard focus");
+    } @catch (NSException *error) {
+      assert([error.name isEqual:@"cleanup_incomplete"]);
+    }
+    assert(deliveries.size() == 1 && deliveries[0].type == kCGEventKeyDown);
+    siblingHasKeyboardFocus = false;
     KCUAInputCleanup(op);
     verifyPair(kCGEventKeyDown, kCGEventKeyUp);
 

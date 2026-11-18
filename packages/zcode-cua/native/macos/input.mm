@@ -124,7 +124,7 @@ static void restoreClipboard(NSArray *saved, NSInteger ownerCount) {
     [board writeObjects:items];
 }
 static void releaseToWindow(const HeldInput &hold, bool normal,
-                            void (^markReleasing)(void)) {
+                            void (^recordPhase)(HoldPhase)) {
   auto target = KCUAResolveInputReleaseTarget(
       hold.target->pid, hold.target->birth, hold.target->windowId);
   if (!target)
@@ -132,6 +132,8 @@ static void releaseToWindow(const HeldInput &hold, bool normal,
   if (hold.phase == HoldPhase::Releasing)
     KCUAFail(@"cleanup_incomplete",
              @"Input release was interrupted; original window is still open");
+  if (!hold.mouse)
+    KCUARequireInputKeyWindow(target, true);
   CGEventRef event = nullptr;
   if (hold.mouse) {
     CGPoint point = CGPointMake(target->bounds.origin.x + hold.windowPoint.x,
@@ -152,7 +154,15 @@ static void releaseToWindow(const HeldInput &hold, bool normal,
   @try {
     CGEventSetFlags(event, normal && hold.mouse ? hold.flags : 0);
     KCUAStampWindowEvent(event, target);
-    markReleasing();
+    recordPhase(HoldPhase::Releasing);
+    @try {
+      if (!hold.mouse)
+        KCUARequireInputKeyWindow(target, true);
+    } @catch (NSException *error) {
+      // 此处尚未投递 up，焦点在写盘期间改变时保留待恢复状态。
+      recordPhase(HoldPhase::Held);
+      @throw;
+    }
     CGEventPostToPid(target->pid, event);
   } @finally {
     CFRelease(event);
@@ -224,9 +234,9 @@ static void recoverInputSafety(void) {
           CGPointMake([entry[@"x"] doubleValue], [entry[@"y"] doubleValue]),
           [entry[@"click_count"] integerValue],
           legacy ? HoldPhase::Held : (HoldPhase)[phase intValue]};
-      releaseToWindow(hold, false, ^{
+      releaseToWindow(hold, false, ^(HoldPhase phase) {
         NSMutableDictionary *releasing = [entry mutableCopy];
-        releasing[@"phase"] = @((int)HoldPhase::Releasing);
+        releasing[@"phase"] = @((int)phase);
         [remaining replaceObjectAtIndex:remaining.count - 1
                              withObject:releasing];
         writeJournal(journal);
@@ -267,6 +277,8 @@ static void post(CGEventRef event, const KCUATargetRef &target,
       KCUAGhostPoint(CGEventGetLocation(event));
     KCUACheck(op);
     KCUARequireDesktop();
+    if (CGEventGetType(event) == kCGEventKeyDown)
+      KCUARequireInputKeyWindow(target, false);
     if (!holds.empty())
       holds.back().dispatched = true;
     op->dispatched = true;
@@ -287,12 +299,13 @@ static void keyDown(const KCUATargetRef &target, KCUAKeyChord chord,
 static void releaseLastInput(bool normal) {
   auto *hold = &holds.back();
   if (hold->dispatched && hold->phase != HoldPhase::Released) {
-    releaseToWindow(*hold, normal, ^{
-      hold->phase = HoldPhase::Releasing;
+    releaseToWindow(*hold, normal, ^(HoldPhase phase) {
+      auto previous = hold->phase;
+      hold->phase = phase;
       @try {
         KCUAPersistInputSafety();
       } @catch (NSException *error) {
-        hold->phase = HoldPhase::Held;
+        hold->phase = previous;
         @throw;
       }
     });

@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 @interface KCUAFixtureWindow : NSWindow
@@ -44,6 +45,7 @@
 @property(nonatomic, strong) NSButton *check;
 @property(nonatomic, strong) NSScrollView *scroll;
 @property(nonatomic) NSUInteger submissions;
+@property(nonatomic, strong) dispatch_source_t focusOriginal;
 @end
 @implementation KCUAFixture
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -101,10 +103,22 @@
     self.second.title = @"KCode CUA Sibling Fixture";
     self.second.inputEvents = [NSMutableArray array];
     [self.second orderFront:nil];
-    __weak KCUAFixtureWindow *sibling = self.second;
-    self.window.onDown = ^{
-      [sibling makeKeyAndOrderFront:nil];
-    };
+    if ([NSProcessInfo.processInfo.arguments
+            containsObject:@"--switch-sibling"]) {
+      __weak KCUAFixtureWindow *sibling = self.second;
+      self.window.onDown = ^{
+        [sibling makeKeyAndOrderFront:nil];
+      };
+    }
+    // 只用于夹具验收。双窗测试脚本可让同一应用回到原窗口再验证恢复。
+    signal(SIGUSR1, SIG_IGN);
+    self.focusOriginal = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, dispatch_get_main_queue());
+    __weak KCUAFixtureWindow *original = self.window;
+    dispatch_source_set_event_handler(self.focusOriginal, ^{
+      [original makeKeyAndOrderFront:nil];
+    });
+    dispatch_resume(self.focusOriginal);
   }
   [self.window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];

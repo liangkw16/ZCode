@@ -330,6 +330,7 @@ const UPSTREAM_PROVIDER_SPEC = "./test/e2e/infrastructure/smoke/upstream-provide
 const PLUGIN_NO_GIT_GITHUB_ARCHIVE_SPEC = "plugin-no-git-github-archive.test.ts";
 const GIT_COMMIT_DIALOG_UI_FLOW_SPEC = "git-commit-dialog-ui-flow.test.ts";
 const OAUTH_CREDENTIAL_RECOVERY_SPEC = "oauth-credential-recovery.test.ts";
+const API_KEY_LOGIN_COLD_START_SPEC = "api-key-login-cold-start.test.ts";
 const JWT_EXPIRY_REAUTHENTICATION_SPEC = "jwt-expiry-reauthentication.test.ts";
 const SUBAGENT_CODING_PLAN_LOGIN_CATALOG_STALE_SPEC =
   "subagent-coding-plan-login-catalog-stale.test.ts";
@@ -3558,7 +3559,9 @@ function seedE2EStartupState(specs: string[] = []) {
     E2E_APP_SETTINGS_FILE,
     JSON.stringify(
       {
-        providerFamilyDomain: shouldUseBigmodelAuth ? "bigmodel" : "zai",
+        ...(workerSpecsContain(specs, API_KEY_LOGIN_COLD_START_SPEC)
+          ? {}
+          : { providerFamilyDomain: shouldUseBigmodelAuth ? "bigmodel" : "zai" }),
         providerFamilyDomainMigrated: true,
         providerFamilyDomainUpdatedAt: now,
         ...(modelProviderRegressionFixture
@@ -4433,7 +4436,11 @@ This child must fail before sending a provider request when the Team scope is un
 }
 
 async function seedUpstreamE2EModelConfig(specs: string[] = []) {
-  if (isOAuthCredentialRecoverySpec(specs) || usesProviderReadinessColdStartFixture(specs)) {
+  if (
+    isOAuthCredentialRecoverySpec(specs) ||
+    usesProviderReadinessColdStartFixture(specs) ||
+    workerSpecsContain(specs, API_KEY_LOGIN_COLD_START_SPEC)
+  ) {
     // Bugfix: OAuth 凭据恢复及 provider-readiness 冷启动 fixture 必须保持
     // 无可用本地模型配置，避免默认 上游 回放 provider 绕过登录/执行门禁。
     return;

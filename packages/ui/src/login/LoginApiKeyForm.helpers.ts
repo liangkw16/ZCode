@@ -32,7 +32,7 @@ export function resolveLoginApiKeyProviderFamilyDomain(
   return choice;
 }
 
-export function buildLoginApiKeySkipSettings(
+export function buildLoginApiKeyFamilySettings(
   choice: ApiKeyProviderChoice,
   now: number,
 ): Pick<

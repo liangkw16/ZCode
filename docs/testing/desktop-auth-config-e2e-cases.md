@@ -971,3 +971,11 @@ macOS 运行 1/1 通过：`desktop-e2e-20261112045322400-p11467-319ab851ac3b0783
 按 `docs/ui/login-page.md` 的布局回归矩阵执行 `auth-config/login/manual-review/pending/login-page-layout.test.ts`。覆盖双主题、双语言、桌面/窄屏/短窗口，普通登录及 API Key 表单均需保持可达，协议不得覆盖卡片。自动验证：4 个场景通过，每个覆盖 3 个视口 × 2 种表单状态，共 24 组布局；证据 `desktop-e2e-20261102064239878-p81237-668713e65a2f83e6/login-layout/`。同批 OAuth 的旧夹具断言失败另行修复并复测，不能把整批称为通过。截图已核对，仍为 pending，未人工转正；不代表实体手机验收。
 
 2026-11-02 集成回归：`desktop-e2e-20261102064547327-p86051-5e9d7540540ab92a` 共 14/14，通过 OAuth 10 项（包含时钟回拨/前跳/过期 init）、位置与冷缓存 Token 恢复 2 项、远控启动恢复 1 项、中国区桌面与独立浏览器手机配对 1 项。旧时钟夹具补齐关联账号身份并改为断言当前主会话；未改弱化过期校验。前一批 `desktop-e2e-20261102064239878-p81237-668713e65a2f83e6` 的 3 项损坏凭据恢复和 4 项布局用例通过；该批旧时钟夹具失败已由后续 14/14 覆盖。全部为隔离数据、本地服务及浏览器尺寸仿真，不等同于实体手机、生产后端或真实套餐验收。
+
+## API Key 首次配置后冷启动
+
+`auth-config/login/manual-review/pending/api-key-login-cold-start.test.ts` 使用没有可用模型和 Provider 运行域的隔离桌面 profile。通过欢迎页 API Key 表单选择 BigModel，填写合成测试 Key 并继续。退出并重新启动同一 profile，确认工作区直接打开，原 Personal Provider 仍有可选模型。此场景只检查配置持久化与启动门禁，使用的 Key 不发起模型请求。
+
+旧代码对照 `desktop-e2e-20261118034200287-p88220-3e97b49fc14fc9ed` 在运行域落盘断言处失败，未进入重启步骤。修复后 `desktop-e2e-20261118034435509-p99941-932a6d94986430df` 通过，含同一 profile 的进程重启和模型选择复核。用例保持 pending。
+
+共用设置路径的“暂时跳过”回归 `provider-readiness-agent-startup.test.ts` 继续通过（`desktop-e2e-20261118034650562-p10994-534c3acaf2a2f90b`）。

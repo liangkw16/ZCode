@@ -46,6 +46,7 @@
 @property(nonatomic, strong) NSScrollView *scroll;
 @property(nonatomic) NSUInteger submissions;
 @property(nonatomic, strong) dispatch_source_t focusOriginal;
+@property(nonatomic, strong) dispatch_source_t focusSibling;
 @end
 @implementation KCUAFixture
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -119,6 +120,15 @@
       [original makeKeyAndOrderFront:nil];
     });
     dispatch_resume(self.focusOriginal);
+    signal(SIGUSR2, SIG_IGN);
+    self.focusSibling = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR2, 0, dispatch_get_main_queue());
+    __weak KCUAFixtureWindow *sibling = self.second;
+    dispatch_source_set_event_handler(self.focusSibling, ^{
+      [NSApp activateIgnoringOtherApps:YES];
+      [sibling makeKeyAndOrderFront:nil];
+    });
+    dispatch_resume(self.focusSibling);
   }
   [self.window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
@@ -158,6 +168,7 @@
             @"submissions" : @(self.submissions),
             @"pid" : @(getpid()),
             @"window" : @(self.window.windowNumber),
+              @"primary_key" : @(self.window.isKeyWindow),
             @"input_events" : self.window.inputEvents,
             @"sibling_window" : @(self.second.windowNumber),
             @"sibling_key" : @(self.second.isKeyWindow),

@@ -5,8 +5,10 @@
 #ifndef KCODE_INLINE_FRAME_BYTES
 #error Build must supply the canonical inline raster budget
 #endif
-NSDictionary *KCUAEncodeRaster(NSData *png, NSUInteger width,
-                               NSUInteger height) {
+NSDictionary *KCUAEncodeRaster(NSData *png, NSUInteger width, NSUInteger height,
+                               void (^checkpoint)(void)) {
+  if (checkpoint)
+    checkpoint();
   if (!png.length || !width || !height)
     KCUAFail(@"element_unavailable", @"Capture raster is empty");
   if (png.length <= KCODE_INLINE_FRAME_BYTES)
@@ -23,6 +25,8 @@ NSDictionary *KCUAEncodeRaster(NSData *png, NSUInteger width,
              @"Capture raster header differs from its surface dimensions");
   CGImageRef original = source.CGImage;
   for (NSUInteger bound : {1280u, 960u, 720u, 512u}) {
+    if (checkpoint)
+      checkpoint();
     double ratio = std::min(1.0, (double)bound / std::max(width, height));
     NSUInteger w = MAX((NSUInteger)1, (NSUInteger)floor(width * ratio)),
                h = MAX((NSUInteger)1, (NSUInteger)floor(height * ratio));
@@ -43,6 +47,8 @@ NSDictionary *KCUAEncodeRaster(NSData *png, NSUInteger width,
         [[NSBitmapImageRep alloc] initWithCGImage:resized];
     CGImageRelease(resized);
     for (double quality : {0.85, 0.65, 0.45, 0.25, 0.1}) {
+      if (checkpoint)
+        checkpoint();
       NSData *bytes =
           [bitmap representationUsingType:NSBitmapImageFileTypeJPEG
                                properties:@{

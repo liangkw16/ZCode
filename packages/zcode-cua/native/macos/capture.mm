@@ -5,16 +5,63 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+
+static CGImageRef copyRaster(CVPixelBufferRef buffer, CGRect crop,
+                             BOOL *blank) {
+  size_t width = (size_t)crop.size.width, height = (size_t)crop.size.height;
+  if (width > 8192 || height > 8192 || width * height > 16 * 1024 * 1024 ||
+      CVPixelBufferGetPixelFormatType(buffer) != kCVPixelFormatType_32BGRA ||
+      CVPixelBufferIsPlanar(buffer))
+    return nullptr;
+  size_t rowBytes = width * 4;
+  NSMutableData *data = [NSMutableData dataWithLength:rowBytes * height];
+  auto *pixels = static_cast<uint8_t *>(data.mutableBytes);
+  if (!pixels || CVPixelBufferLockBaseAddress(
+                     buffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+    return nullptr;
+  const auto *source =
+      static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(buffer));
+  size_t stride = CVPixelBufferGetBytesPerRow(buffer);
+  if (!source || stride < CVPixelBufferGetWidth(buffer) * 4) {
+    CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    return nullptr;
+  }
+  source += (size_t)crop.origin.y * stride + (size_t)crop.origin.x * 4;
+  for (size_t y = 0; y < height; ++y)
+    std::memcpy(pixels + y * rowBytes, source + y * stride, rowBytes);
+  CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+
+  *blank = YES;
+  for (size_t y = 0; y < height && *blank; y += MAX((size_t)1, height / 12))
+    for (size_t x = 0; x < width; x += MAX((size_t)1, width / 12)) {
+      const uint8_t *pixel = pixels + y * rowBytes + x * 4;
+      if (std::memcmp(pixel, pixels, 3) != 0) {
+        *blank = NO;
+        break;
+      }
+    }
+
+  CGDataProviderRef provider =
+      CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+  if (!provider)
+    return nullptr;
+  CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
+  CGImageRef image = CGImageCreate(
+      width, height, 8, 32, rowBytes, colors,
+      kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little, provider,
+      nullptr, false, kCGRenderingIntentDefault);
+  CGColorSpaceRelease(colors);
+  CGDataProviderRelease(provider);
+  return image;
+}
 
 @interface KCUAFrameOutput : NSObject <SCStreamOutput, SCStreamDelegate>
 @property(nonatomic) dispatch_semaphore_t ready;
-@property(nonatomic, strong) NSData *png;
+@property(nonatomic, strong) id raster;
 @property(nonatomic, strong) NSError *failure;
-@property(nonatomic) NSUInteger width;
-@property(nonatomic) NSUInteger height;
 @property(nonatomic) BOOL finished;
 @property(nonatomic) BOOL blank;
-@property(nonatomic) CGRect contentRect;
 @end
 @implementation KCUAFrameOutput
 - (instancetype)init {
@@ -51,35 +98,8 @@
     CVPixelBufferRef buffer = CMSampleBufferGetImageBuffer(sample);
     if (!buffer)
       return;
-    CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
     size_t width = CVPixelBufferGetWidth(buffer),
            height = CVPixelBufferGetHeight(buffer);
-    const uint8_t *pixels =
-        (const uint8_t *)CVPixelBufferGetBaseAddress(buffer);
-    size_t stride = CVPixelBufferGetBytesPerRow(buffer);
-    bool uniform = true;
-    for (size_t y = 0; y < height && uniform; y += MAX((size_t)1, height / 12))
-      for (size_t x = 0; x < width; x += MAX((size_t)1, width / 12)) {
-        const uint8_t *pixel = pixels + y * stride + x * 4;
-        if (pixel[0] != pixels[0] || pixel[1] != pixels[1] ||
-            pixel[2] != pixels[2]) {
-          uniform = false;
-          break;
-        }
-      }
-    _blank = uniform;
-    CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(
-        CVPixelBufferGetBaseAddress(buffer), width, height, 8,
-        CVPixelBufferGetBytesPerRow(buffer), colors,
-        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
-    CGImageRef image = context ? CGBitmapContextCreateImage(context) : nullptr;
-    if (context)
-      CGContextRelease(context);
-    CGColorSpaceRelease(colors);
-    CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
-    if (!image)
-      return;
     CGRect content = CGRectZero;
     if ([info[SCStreamFrameInfoContentRect] isKindOfClass:NSDictionary.class])
       CGRectMakeWithDictionaryRepresentation(
@@ -92,12 +112,7 @@
         CGRectMake(content.origin.x * scale, content.origin.y * scale,
                    content.size.width * scale, content.size.height * scale));
     CGRect full = CGRectMake(0, 0, width, height);
-    CGImageRef raster = nullptr;
-    if (!CGRectIsEmpty(crop) && CGRectContainsRect(full, crop)) {
-      raster = CGImageCreateWithImageInRect(image, crop);
-      _contentRect = content;
-    } else {
-      CGImageRelease(image);
+    if (CGRectIsEmpty(crop) || !CGRectContainsRect(full, crop)) {
       _failure =
           [NSError errorWithDomain:@"KCodeCUA"
                               code:1
@@ -108,19 +123,12 @@
       _finished = YES;
       dispatch_semaphore_signal(_ready);
       return;
-      _contentRect =
-          CGRectMake(0, 0, (double)width / scale, (double)height / scale);
     }
-    CGImageRelease(image);
+    // 框架可复用 sample buffer。回调只复制像素，避免编码阻塞停止采集。
+    CGImageRef raster = copyRaster(buffer, crop, &_blank);
     if (!raster)
       return;
-    NSBitmapImageRep *bitmap =
-        [[NSBitmapImageRep alloc] initWithCGImage:raster];
-    _width = CGImageGetWidth(raster);
-    _height = CGImageGetHeight(raster);
-    _png = [bitmap representationUsingType:NSBitmapImageFileTypePNG
-                                properties:@{}];
-    CGImageRelease(raster);
+    _raster = CFBridgingRelease(raster);
     _finished = YES;
     dispatch_semaphore_signal(_ready);
   }
@@ -242,11 +250,15 @@ NSDictionary *KCUACapture(const KCUATargetRef &target, const KCUAOp &op) {
       if (std::chrono::steady_clock::now() >= deadline)
         KCUAFail(@"timeout", @"ScreenCaptureKit frame deadline exceeded");
     }
-    if (output.failure || !output.png.length)
+    if (output.failure || !output.raster)
       KCUAFail(@"element_unavailable",
                @"ScreenCaptureKit returned no usable pixels");
   } @catch (NSException *error) {
     failure = error;
+  }
+  // 失败或取消后拒绝晚到帧，停止确认仍由下面的 completion handler 提供。
+  @synchronized(output) {
+    output.finished = YES;
   }
   // 取消回执等待 stop 的真实完成；停止超时会阻止后续输入并交给原生恢复
   // watchdog。
@@ -261,22 +273,35 @@ NSDictionary *KCUACapture(const KCUATargetRef &target, const KCUAOp &op) {
       stopError)
     KCUAFail(@"cleanup_incomplete",
              @"ScreenCaptureKit stream cleanup could not be confirmed");
-  @synchronized(output) {
-    output.finished = YES;
-  }
   if (failure)
     @throw failure;
-  KCUACheck(op);
+  void (^checkpoint)(void) = ^{
+    KCUACheck(op);
+    if (std::chrono::steady_clock::now() >= deadline)
+      KCUAFail(@"timeout", @"ScreenCaptureKit capture deadline exceeded");
+  };
+  checkpoint();
   KCUAValidateTarget(target);
+  CGImageRef raster = (__bridge CGImageRef)output.raster;
+  NSUInteger rasterWidth = CGImageGetWidth(raster),
+             rasterHeight = CGImageGetHeight(raster);
   CGRect now = KCUAAXBounds(target->window);
   if (!CGRectEqualToRect(now, target->bounds) ||
       ![topology isEqual:displayTopology()] ||
-      fabs((double)output.width / scale - now.size.width) > 1 ||
-      fabs((double)output.height / scale - now.size.height) > 1)
+      fabs((double)rasterWidth / scale - now.size.width) > 1 ||
+      fabs((double)rasterHeight / scale - now.size.height) > 1)
     KCUAFail(@"element_unavailable",
              @"Captured raster geometry or display topology changed");
+  NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithCGImage:raster];
+  NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG
+                                     properties:@{}];
   NSDictionary *encoded =
-      KCUAEncodeRaster(output.png, output.width, output.height);
+      KCUAEncodeRaster(png, rasterWidth, rasterHeight, checkpoint);
+  checkpoint();
+  KCUAValidateTarget(target, true);
+  if (![topology isEqual:displayTopology()])
+    KCUAFail(@"element_unavailable",
+             @"Display topology changed during encoding");
   NSDictionary *bounds = @{
     @"x" : @(now.origin.x),
     @"y" : @(now.origin.y),

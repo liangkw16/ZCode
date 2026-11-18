@@ -37,3 +37,35 @@ test(
     }
   },
 );
+
+test(
+  "capture callback publishes an owned crop before encoding or buffer reuse",
+  { skip: process.platform !== "darwin" },
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kcua-capture-frame-"));
+    const root = resolve(import.meta.dirname, "..");
+    const binary = join(dir, "capture-frame");
+    try {
+      await exec("xcrun", [
+        "clang++",
+        "-std=c++17",
+        "-fobjc-arc",
+        "-fblocks",
+        "-DKCODE_INLINE_FRAME_BYTES=153600",
+        join(root, "native/macos/capture.mm"),
+        join(root, "native/macos/raster-encoding.mm"),
+        join(root, "native/macos/protocol-error.mm"),
+        join(root, "test/capture-frame-native.mm"),
+        ...["Cocoa", "CoreGraphics", "CoreMedia", "CoreVideo", "ScreenCaptureKit"].flatMap(
+          (name) => ["-framework", name],
+        ),
+        "-o",
+        binary,
+      ]);
+      const { stdout } = await exec(binary, { timeout: 10000 });
+      assert.match(stdout, /capture callback publishes owned crop without encoding/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);

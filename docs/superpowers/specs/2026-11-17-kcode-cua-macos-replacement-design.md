@@ -301,6 +301,22 @@ state_id、元素索引和 frame_id 继续绑定会话、目标、观察版本�
 
 只捕获已验证的目标 SCWindow/附属表面，区分窗口 point、显示器 point、像素、backing scale 与裁切原点；多屏/Retina/负坐标均测试。Host 只对 native 证明的 exact raster 签发既有 frame credential，变换图像必须重建匹配凭据，禁止给任意 image 加 official 标记。
 
+ScreenCaptureKit 回调只核对裁切范围并复制所需像素。原生截图操作等待 stream 停止确认，再做 PNG/JPEG 编码；编码开始前和每次压缩尝试之间检查取消，编码结束后再次核对桌面与目标。合成帧回归验证回调不调用编码器，并验证系统复用像素缓冲后，已复制帧仍保持原内容。
+
+```mermaid
+sequenceDiagram
+    participant S as ScreenCaptureKit
+    participant W as Helper 截图操作
+    participant E as 栅格编码
+    S->>W: 已裁切独立像素
+    W->>S: 停止采集并等待确认
+    S-->>W: 停止已确认
+    W->>W: 检查取消和目标
+    W->>E: 编码期间检查取消
+    E-->>W: 最终帧
+    W->>W: 复核后返回像素
+```
+
 保留官方 image/image_ref 邻接、完整性和 one-raster 规则；通用 node_repl、Browser Use 或旧 transcript 不能获得新帧 authority。SDK 不向 Worker 暴露内部帧 credential，也不重复 emit 同一栅格。
 
 ### 9.3 输入、焦点与背景操作

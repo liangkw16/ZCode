@@ -39,10 +39,21 @@ int main(void) {
       }
       large.bitmapData[i * 4 + 3] = 255;
     }
-    NSDictionary *encoded =
-        KCUAEncodeRaster([large representationUsingType:NSBitmapImageFileTypePNG
-                                             properties:@{}],
-                         width, height);
+    NSData *largePNG =
+        [large representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    __block NSUInteger checkpoints = 0;
+    @try {
+      KCUAEncodeRaster(largePNG, width, height, ^{
+        if (++checkpoints == 3)
+          @throw [NSException exceptionWithName:@"fixture_cancelled"
+                                         reason:nil
+                                       userInfo:nil];
+      });
+      assert(false && "Raster encoding ignored cancellation during fallback");
+    } @catch (NSException *error) {
+      assert([error.name isEqual:@"fixture_cancelled"] && checkpoints == 3);
+    }
+    NSDictionary *encoded = KCUAEncodeRaster(largePNG, width, height);
     NSData *bytes = encoded[@"bytes"];
     assert([bytes base64EncodedStringWithOptions:0].length <= 204800);
     NSBitmapImageRep *decoded = [NSBitmapImageRep imageRepWithData:bytes];

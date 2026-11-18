@@ -131,7 +131,8 @@ static void releaseToWindow(const HeldInput &hold, bool normal,
     return;
   if (hold.phase == HoldPhase::Releasing)
     KCUAFail(@"cleanup_incomplete",
-             @"Input release was interrupted; original window is still open");
+             @"The previous release may have been delivered. Close the original window, then observe again.",
+             @{@"reason_code" : @"input_recovery_release_uncertain"});
   if (!hold.mouse)
     KCUARequireInputKeyWindow(target, true);
   CGEventRef event = nullptr;
@@ -234,13 +235,27 @@ static void recoverInputSafety(void) {
           CGPointMake([entry[@"x"] doubleValue], [entry[@"y"] doubleValue]),
           [entry[@"click_count"] integerValue],
           legacy ? HoldPhase::Held : (HoldPhase)[phase intValue]};
-      releaseToWindow(hold, false, ^(HoldPhase phase) {
-        NSMutableDictionary *releasing = [entry mutableCopy];
-        releasing[@"phase"] = @((int)phase);
-        [remaining replaceObjectAtIndex:remaining.count - 1
-                             withObject:releasing];
-        writeJournal(journal);
-      });
+      @try {
+        releaseToWindow(hold, false, ^(HoldPhase phase) {
+          NSMutableDictionary *releasing = [entry mutableCopy];
+          releasing[@"phase"] = @((int)phase);
+          [remaining replaceObjectAtIndex:remaining.count - 1
+                               withObject:releasing];
+          writeJournal(journal);
+        });
+      } @catch (NSException *error) {
+        NSString *reason = error.userInfo[@"reason_code"];
+        if ([error.name isEqual:@"cleanup_incomplete"] &&
+            [@[ @"input_recovery_focus_required", @"input_recovery_release_uncertain",
+                @"input_recovery_target_unverified" ] containsObject:reason ?: @""]) {
+          // 旧动作仍待清理，本次新动作尚未开始。保留日志与观察服务，避免每次写入都触发换代。
+          KCUAFail(@"action_unavailable", error.reason, @{
+            @"reason_code" : reason, @"action_sent" : @NO,
+            @"dispatch_status" : @"not_sent"
+          });
+        }
+        @throw;
+      }
     }
     [remaining removeLastObject];
     writeJournal(journal);

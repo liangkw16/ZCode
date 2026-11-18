@@ -27,7 +27,8 @@ async function fixture(options: {
   const sockets = new Set<Socket>();
   let generation = "g1",
     epoch = 0,
-    failObservation = false;
+    failObservation = false,
+    rasterFailure: "blank" | "capture_error" | undefined;
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.on("error", () => {});
@@ -109,7 +110,11 @@ async function fixture(options: {
                 : r.method === "session_release"
                   ? { cleanup_complete: true }
                   : { action_sent: true, dispatch_status: "accepted" };
-        if (r.method === "capture_app" && options.screenshot && r.params.include_screenshot) {
+        if (r.method === "capture_app" && r.params.include_screenshot && rasterFailure) {
+          Object.assign(result, rasterFailure === "blank"
+            ? { screenshot_blank: true }
+            : { screenshot_error: { code: "capture_unavailable" } });
+        } else if (r.method === "capture_app" && options.screenshot && r.params.include_screenshot) {
           Object.assign(result, {
             screenshot: {
               format: "png",
@@ -142,6 +147,7 @@ async function fixture(options: {
     setGeneration: (g: string) => (generation = g),
     setEpoch: (e: number) => (epoch = e),
     failObservation: () => (failObservation = true),
+    setRasterFailure: (failure?: "blank" | "capture_error") => (rasterFailure = failure),
   };
 }
 it.each([true, false])(
@@ -430,6 +436,40 @@ it("allows an implicit latest-frame coordinate across fresh SDK cells", async ()
     ).isError,
   ).not.toBe(true);
 });
+it.each(["blank", "capture_error", "request_error", "after_input"] as const)(
+  "revokes both explicit and implicit old coordinates after %s",
+  async (scenario) => {
+    const f = await fixture({ screenshot: true, pixelsOnly: true });
+    const app_ref = { pid: 700 };
+    const first = await f.run("get_app_state", { app_ref });
+    const frame_id = JSON.parse((first.content.at(-1) as any).text).image_ref.frame_id;
+    const pixel = { type: "coordinate", x: 0, y: 0 };
+    if (scenario === "after_input") {
+      expect((await f.run("left_click", { app_ref, target: pixel })).isError).not.toBe(true);
+    } else {
+      if (scenario === "request_error") f.failObservation();
+      else f.setRasterFailure(scenario);
+      const failed = await f.run("get_app_state", {
+        app_ref, include_screenshot: true, tree_shown_to_model: false,
+      });
+      expect(failed.content.some((item) => item.type === "image")).toBe(false);
+    }
+    const clickCount = f.calls.filter((c) => c.method === "click").length;
+    for (const target of [pixel, { ...pixel, frame_id }]) {
+      const result = await f.run("left_click", { app_ref, target });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: "stale_state" },
+        action_receipt: { dispatch_status: "not_sent" },
+      });
+    }
+    expect(f.calls.filter((c) => c.method === "click")).toHaveLength(clickCount);
+    if (scenario !== "request_error") {
+      f.setRasterFailure();
+      await f.run("get_app_state", { app_ref, include_screenshot: true, tree_shown_to_model: false });
+      expect((await f.run("left_click", { app_ref, target: pixel })).isError).not.toBe(true);
+    }
+  },
+);
 it("supports the existing SDK in two fresh workers using the same Host observations", async () => {
   const f = await fixture();
   const { setupComputerUseRuntime } =

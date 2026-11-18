@@ -36,6 +36,7 @@ test(
         ["--lease-reclaim", /dead lease reclaimer recovered/],
         ["--lease-release", /last scope releases physical controller lease/],
         ["--capacity", /32768 operations reclaimed with closed sessions fenced/],
+        ["--single-session-capacity", /single live session capacity reached and released without replay/],
         ["--release-drain", /late cancellation respects the session drain/],
       ];
       const leaseResults = await Promise.allSettled(

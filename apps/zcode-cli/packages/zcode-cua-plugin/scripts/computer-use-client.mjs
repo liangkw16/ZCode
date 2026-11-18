@@ -232,21 +232,21 @@ function frameIdOf(result) {
   return undefined;
 }
 
-function brokerErrorCodeOf(result) {
+function brokerErrorOf(result) {
   for (const text of textBlocks(result)) {
     const parsed = parseJsonRecord(text);
-    const code = parsed?.code ?? parsed?.error?.code;
-    if (typeof code === "string") return code;
+    if (typeof parsed?.code === "string") return parsed;
+    if (typeof parsed?.error?.code === "string") return parsed.error;
   }
-  const receipt = receiptOf(result);
-  return typeof receipt.code === "string" ? receipt.code : undefined;
+  return receiptOf(result);
 }
 
 function messageOf(result, fallback) {
   const texts = textBlocks(result);
   for (const text of texts) {
     const parsed = parseJsonRecord(text);
-    if (typeof parsed?.message === "string" && parsed.message) return parsed.message;
+    const message = parsed?.message ?? parsed?.error?.message;
+    if (typeof message === "string" && message) return message;
   }
   const plain = texts.find((text) => text && !parseJsonRecord(text));
   return plain ?? texts[0] ?? fallback;
@@ -296,13 +296,20 @@ function assertOk(methodName, result) {
   const dispatch = receipt.dispatch_status;
   const actionSent = receipt.action_sent === true;
   if (!isError && dispatch !== "possibly_sent") return receipt;
-  const brokerCode = brokerErrorCodeOf(result);
+  const brokerError = brokerErrorOf(result);
+  const brokerCode = brokerError.code;
+  const reasonCode = brokerError.details?.reason_code;
   const code = isError ? (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL") : "TIMEOUT";
   throw new ComputerUseError(messageOf(result, `${methodName} failed`), {
     code,
     actionSent: actionSent || dispatch === "possibly_sent",
     dispatchStatus: dispatch,
-    details: { method: methodName, ...(brokerCode ? { brokerCode } : {}) },
+    details: {
+      method: methodName,
+      ...(typeof brokerCode === "string" ? { brokerCode } : {}),
+      ...(["input_recovery_focus_required", "input_recovery_release_uncertain",
+        "input_recovery_target_unverified"].includes(reasonCode) ? { reasonCode } : {}),
+    },
   });
 }
 
@@ -630,6 +637,7 @@ function createTarget(ctx, binding) {
     // 「也不能把自己算成基线」。同一个道理对 producer 侧的位移台账成立：没展示给模型的树
     // 不能被算作「模型看到过的」，否则索引位移校验变成当前树跟当前树自比（2026-09-15 探针实测）。
     if (yieldsTree !== true) args.tree_shown_to_model = false;
+    if (includeScreenshot) binding.frameId = undefined;
     const result = await call("get_app_state", args);
     assertOk("get_app_state", result);
     const state = appStateOf("get_app_state", result);
@@ -641,6 +649,8 @@ function createTarget(ctx, binding) {
   };
 
   const act = async (methodName, args) => {
+    // native 写入可能改变像素，后续坐标以 Host 新签发的帧为准。
+    binding.frameId = undefined;
     const result = await call(methodName, args);
     assertOk(methodName, result);
     // 这里原先动作后无条件 `binding.stateId = undefined`，逼下一次索引解析先重新观察。

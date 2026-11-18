@@ -25,14 +25,19 @@ test("normal and cancelled input release stay bound to the original window", {
     const { stdout } = await exec(binary, { timeout: 10000 });
     assert.match(stdout, /targeted normal and cancelled release passed/);
     await assert.rejects(exec(binary, ["crash-down", dir]), { code: 75 });
+    const held = await readFile(join(dir, "input-safety.plist"));
+    assert.match((await exec(binary, ["wait-for-focus", dir])).stdout, /waits without dispatching/);
+    assert.deepEqual(await readFile(join(dir, "input-safety.plist")), held);
     const recovered = await exec(binary, ["recover", dir]);
     assert.match(recovered.stdout, /original window before new input/);
     await assert.rejects(readFile(join(dir, "input-safety.plist")), { code: "ENOENT" });
     await assert.rejects(exec(binary, ["crash-up", dir]), { code: 75 });
     const previous = await readFile(join(dir, "input-safety.plist"));
     const unresolved = await exec(binary, ["unresolved", dir]);
-    assert.match(unresolved.stdout, /stayed unresolved/);
+    assert.match(unresolved.stdout, /waits without dispatching/);
     assert.deepEqual(await readFile(join(dir, "input-safety.plist")), previous);
+    await exec(binary, ["original-closed", dir]);
+    await assert.rejects(readFile(join(dir, "input-safety.plist")), { code: "ENOENT" });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

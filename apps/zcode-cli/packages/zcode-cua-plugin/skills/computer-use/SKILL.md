@@ -214,6 +214,10 @@ accessibility results.
 Act on the current raster when the target is clear; if it is too small or ambiguous,
 re-observe rather than guessing at geometry.
 
+After input or an unsuccessful screenshot request, get a new screenshot before
+another pixel action. An AX-only read does not refresh the pixels. Use a current
+element index when its role and name identify the target.
+
 A pointer action accepted with no change usually means the app acted where the real
 pointer sits: repeating it will not help — use an element index or the keyboard.
 
@@ -221,6 +225,11 @@ A coordinate refusal may name an unexpected owner, or say the frame is stale —
 window moved, resized or was replaced. Observe again for a current raster, or act on
 an element index, which does not depend on window geometry. Never move, resize or
 close a window to make a coordinate land.
+
+If input recovery asks for the original window, tell the user which recovery is
+required and wait. After they restore the window's focus or close it as requested,
+re-observe before continuing. Read back the outcome of interrupted actions before
+deciding what remains to be done.
 
 ## Keyboard
 

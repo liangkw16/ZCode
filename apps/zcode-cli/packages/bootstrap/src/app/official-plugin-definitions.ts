@@ -486,7 +486,7 @@ export const OFFICIAL_PLUGIN_DEFINITIONS: readonly OfficialPluginDefinition[] = 
     runtimeTopLevelPaths: ["node_modules"],
     // 桌面只按发布版本刷新文件缓存。SDK 改动时同步推进包版本、插件清单和这里，
     // 避免已安装的旧缓存继续调用已修改的观察接口。
-    version: "0.6.9",
+    version: "0.6.10",
   },
   {
     // ZCode Sites（技术方案 4）：Skill 指导 Agent 把项目改造并打包成 runner 可直接运行的产物包，

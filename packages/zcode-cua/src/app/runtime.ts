@@ -36,6 +36,8 @@ interface Session {
     generation?: string;
     epoch: number;
   };
+  frameRequest?: object;
+  activeInputs: number;
   generation?: string;
   epoch: number;
 }
@@ -71,7 +73,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
   const getSession = (key: string) => {
     let s = sessions.get(key);
     if (!s) {
-      s = { stopped: false, observations: [], epoch: 0 };
+      s = { stopped: false, observations: [], activeInputs: 0, epoch: 0 };
       sessions.set(key, s);
     }
     return s;
@@ -108,6 +110,13 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
     signal?: AbortSignal,
     context?: ComputerUseRuntimeContext,
   ) {
+    const includesPixels = args.include_screenshot ?? true;
+    const frameRequest = includesPixels && s.activeInputs === 0 ? {} : undefined;
+    if (includesPixels) {
+      // 新的取图请求一旦开始就撤销旧坐标。空白、失败或迟到的旧响应不能恢复它。
+      s.frame = undefined;
+      s.frameRequest = frameRequest;
+    }
     // 隐藏绑定只验证已有缓存；无缓存时直接 capture_app，保留显式 getApp 拉起应用的能力。
     const cachedState = () =>
       s.observations.find(
@@ -125,7 +134,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       "capture_app",
       {
         app_ref: args.app_ref,
-        include_screenshot: args.include_screenshot ?? true,
+        include_screenshot: includesPixels,
         force_full: true,
         tree_shown_to_model: args.tree_shown_to_model !== false,
         ...(args.tree_shown_to_model === false && args.include_screenshot === true
@@ -189,7 +198,8 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
     const content: any[] = [{ type: "text", text: state.text }];
     let meta: Bag | undefined;
     const raster = raw.screenshot;
-    if (raster?.data && !raw.screenshot_blank) {
+    if (raster?.data && !raw.screenshot_blank && frameRequest &&
+        s.frameRequest === frameRequest && !s.stopped) {
       const bytes = decodeFrameBase64(raster.data),
         identity = bytes && readRasterEnvelopeIdentity(bytes);
       const mime =
@@ -245,12 +255,16 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           sha256: sha256Hex(bytes),
         },
       };
-    } else if (raw.screenshot_error || raw.screenshot_blank)
+    } else if (includesPixels)
       content.push({
         type: "text",
         text: raw.screenshot_blank
           ? "Screenshot unavailable: uniform frame."
-          : `Screenshot unavailable: ${raw.screenshot_error.code}.`,
+          : raw.screenshot_error
+            ? `Screenshot unavailable: ${raw.screenshot_error.code}.`
+            : raster?.data
+              ? "Screenshot unavailable: observation was superseded or input was in progress."
+              : "Screenshot unavailable: no raster returned.",
       });
     return ok(state, content, meta);
   }
@@ -419,7 +433,16 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         method = "paste";
         params = { ...params, text: args.text, format: args.format ?? "text" };
       }
-      const action = await native(method, params, key, s, input.signal);
+      // 动作可能改变像素内容，即使窗口几何未变。拖动起终点已在同一帧完成校验。
+      s.frame = undefined;
+      s.frameRequest = undefined;
+      s.activeInputs++;
+      let action;
+      try {
+        action = await native(method, params, key, s, input.signal);
+      } finally {
+        s.activeInputs--;
+      }
       const receipt = {
         schema_version: "zcode-cua-action-receipt-v1",
         action_sent: action?.action_sent === true,

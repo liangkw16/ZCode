@@ -61,10 +61,12 @@ KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
   NSString *desktop = KCUADesktopAvailability();
   if (!current || !window || !AXIsProcessTrusted() ||
       (![desktop isEqual:@"unlocked"] && ![desktop isEqual:@"locked"]))
-    KCUAFail(@"cleanup_incomplete", @"Cannot verify the original input target");
+    KCUAFail(@"cleanup_incomplete", @"Cannot verify the original input target",
+             @{@"reason_code" : @"input_recovery_target_unverified"});
   NSArray *windows = windowInfo();
   if (!windows)
-    KCUAFail(@"cleanup_incomplete", @"Cannot verify the original window");
+    KCUAFail(@"cleanup_incomplete", @"Cannot verify the original window",
+             @{@"reason_code" : @"input_recovery_target_unverified"});
   for (NSDictionary *entry in windows) {
     if ([entry[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] !=
         window)
@@ -78,9 +80,16 @@ KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
             &bounds) ||
         CGRectIsEmpty(bounds))
       KCUAFail(@"cleanup_incomplete",
-               @"Original window geometry is unavailable");
-    if (![birth isEqual:KCUAProcessBirth(pid)])
+               @"Original window geometry is unavailable",
+               @{@"reason_code" : @"input_recovery_target_unverified"});
+    NSString *verifiedBirth = KCUAProcessBirth(pid);
+    if (verifiedBirth ? ![birth isEqual:verifiedBirth]
+                      : (kill(pid, 0) != 0 && errno == ESRCH))
       return {};
+    // 出生身份暂不可读时保留旧日志，只有确认目标消失才能结束恢复。
+    if (!verifiedBirth)
+      KCUAFail(@"cleanup_incomplete", @"Cannot verify the original process identity",
+               @{@"reason_code" : @"input_recovery_target_unverified"});
     auto target = std::make_shared<KCUATarget>();
     target->pid = pid;
     target->birth = birth;
@@ -121,7 +130,8 @@ void KCUARequireInputKeyWindow(const KCUATargetRef &target, bool releasing) {
     KCUAFail(
         releasing ? @"cleanup_incomplete" : @"foreground_required",
         @"Focus the original window before sending keyboard input",
-        @{@"action_sent" : @NO});
+        releasing ? @{@"action_sent" : @NO, @"reason_code" : @"input_recovery_focus_required"}
+                  : @{@"action_sent" : @NO});
 }
 static CGWindowID windowNumber(AXUIElementRef window, pid_t pid) {
   if (CGWindowID number = mappedWindowNumber(window, pid))

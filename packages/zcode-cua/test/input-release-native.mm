@@ -50,14 +50,17 @@ void KCUAValidateTarget(const KCUATargetRef &, bool) {}
 void KCUARequireInputKeyWindow(const KCUATargetRef &, bool releasing) {
   if (siblingHasKeyboardFocus)
     KCUAFail(releasing ? @"cleanup_incomplete" : @"foreground_required",
-             @"fixture sibling has keyboard focus");
+             @"fixture sibling has keyboard focus",
+             releasing ? @{@"reason_code" : @"input_recovery_focus_required"} : nil);
 }
 KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
                                             CGWindowID window) {
   assert(pid == original->pid && [birth isEqual:original->birth]);
   assert(window == original->windowId);
-  if (targetGone)
+  if (targetGone) {
+    targetGone = false;
     return {};
+  }
   auto verified = std::make_shared<KCUATarget>();
   verified->pid = pid;
   verified->birth = birth;
@@ -116,16 +119,29 @@ int main(int argc, const char **argv) {
       if (!strcmp(argv[1], "crash-up"))
         crashAt = kCGEventKeyUp;
       auto input = operation();
-      if (!strcmp(argv[1], "unresolved")) {
-        @try {
-          KCUAInput(@"press_key", @{@"text" : @"b"}, input);
-          assert(false);
-        } @catch (NSException *error) {
-          assert([error.name isEqual:@"cleanup_incomplete"]);
+      siblingHasKeyboardFocus = !strcmp(argv[1], "wait-for-focus");
+      if (siblingHasKeyboardFocus || !strcmp(argv[1], "unresolved")) {
+        for (NSString *peer in @[ @"first-peer", @"second-peer" ]) {
+          input->peer = peer;
+          @try {
+            KCUAInput(@"press_key", @{@"text" : @"b"}, input);
+            assert(false);
+          } @catch (NSException *error) {
+            assert([error.name isEqual:@"action_unavailable"]);
+            assert([error.userInfo[@"dispatch_status"] isEqual:@"not_sent"]);
+            assert([error.userInfo[@"reason_code"] isEqual:siblingHasKeyboardFocus
+                     ? @"input_recovery_focus_required" : @"input_recovery_release_uncertain"]);
+          }
+          KCUAInputCleanup(input);
         }
-        KCUAInputCleanup(input);
         assert(deliveries.empty());
-        puts("interrupted release stayed unresolved");
+        puts("input recovery waits without dispatching");
+        return 0;
+      }
+      if (!strcmp(argv[1], "original-closed")) {
+        targetGone = true;
+        KCUAInput(@"press_key", @{@"text" : @"b"}, input);
+        verifyPair(kCGEventKeyDown, kCGEventKeyUp);
         return 0;
       }
       KCUAInput(@"press_key", @{@"text" : @"b"}, input);

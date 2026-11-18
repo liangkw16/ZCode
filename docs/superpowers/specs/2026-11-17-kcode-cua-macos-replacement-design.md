@@ -207,6 +207,8 @@ sequenceDiagram
 
 M2 双窗夹具显示 macOS 可把带目标窗口标记的键盘 up 路由给同进程当前的兄弟窗口。键盘按下和释放还需复核应用实际键盘焦点属于原窗口。若焦点转移，按下返回 `foreground_required`，已持有键的释放留在日志中并返回 `cleanup_incomplete`。原窗口重新成为应用的键盘焦点后，由恢复路径先释放、再接收新输入。原窗口关闭时可收敛该条记录。图形验收同时记录目标与兄弟窗口收到的事件。
 
+旧输入日志等待原窗口回焦、等待未决释放的窗口关闭，或暂时无法核实原目标时，由持有 lease 的 Helper 拒绝当前新输入。使用 IPC v3 既有 `action_unavailable` 错误，附加 `details.reason_code` 及当前请求的 `not_sent`，保留旧日志和旧请求的 `possibly_sent`。新请求已排空，Helper 保持同一 generation，其他 Host 可继续观察和查询。只有新输入真正进入原生工作后无法清理，或日志读写无法安全完成等故障，才进入进程恢复。出生身份查询失败只表示未知，须确认原进程或窗口已消失后才能移除该条记录。
+
 ```mermaid
 sequenceDiagram
   participant L as Helper 控制租约
@@ -222,6 +224,8 @@ sequenceDiagram
 
 Helper 的操作记录由调度器按 peer 和 session 所有。会话释放先封住新请求，再取消并排空已接受请求。清理全部确认后回收操作明细并保留已关闭状态和 epoch；迟到的取消或状态请求只查询。仍在排空时返回当前清理事实，排空后对未知动作保守报告可能曾派发。任何旧操作都禁止重新入队。真机长期验证超过此前每代 32,768 条操作上限，并在其他会话仍活跃时检验隔离。
 
+单个持续打开的会话单独验收 32,768 条操作压力。保留既有容量边界与幂等键，满额时确认下一条新操作被拒、控制查询仍可用、会话释放后新会话在同一 generation 可用，并验证迟到旧请求不会重新执行。
+
 主线程健康探针必须经过实际 AppKit run-loop round-trip；后台 socket 能回复不代表 GUI 响应。冷启动、取消恢复和截图超时回归均观察该 round-trip、系统 sample/spindump 与线程等待。诊断失败不增加“再等一会儿”的无限分支。
 
 ### 7.3 共享 Helper 的故障恢复例外
@@ -229,6 +233,25 @@ Helper 的操作记录由调度器按 peer 和 session 所有。会话释放先�
 设计者选择保留一个共享 Helper 和一个全局输入 scheduler，不为每个会话启动独立原生控制进程。因此，“普通取消/关闭不影响其他会话”不等于“共享原生进程故障时其他会话仍能继续输入”。
 
 当 §7.2 的 drain deadline 耗尽，必须先冻结该 Helper 上所有 mutation，通知所有已认证 client 进入 recovery，等待正在执行工作的清理/终止；即使仍有其他合法 client，也允许回收这个已不可信的自有 Helper。其他 Host 的逻辑 session、任务与用户草稿保持，不重放其输入；他们的 native refs、模型 state/frame、readiness 随新 generation 一起失效，重新观察后才能恢复。受到影响的调用返回明确 helper recovery/possibly_sent 结果，不能假报正常完成，也不能把不同 session 的派发状态混在一起。
+
+Host 的 Broker adapter 按逻辑会话拥有写入栅栏。检测到 generation 改变时，已知会话全部进入待观察状态；观察或控制请求可以发现变代。只有该会话在当前 generation、epoch 与栅栏版本下收到供调用者使用的 AX 树或成功栅格，才解除栅栏。其他会话的观察、SDK 的隐藏绑定、无图的纯截图、列窗、拒绝写入和旧响应均不能解除栅栏。旧输入日志等待恢复的拒绝也为对应会话设置观察要求。
+
+```mermaid
+sequenceDiagram
+  participant H as Host Broker adapter
+  participant N as Helper 和持久输入日志
+  H->>N: 认证并核对 generation
+  Note over H: 变代后各既有会话等待新观察
+  H->>N: 原会话重新观察后请求新写入
+  N->>N: 持 lease 核对旧日志中的原目标
+  alt 等待原窗口恢复
+    N-->>H: 当前写入 not_sent 与恢复原因
+    Note over H,N: 保留观察服务与旧输入记录
+  else 清理条件已满足
+    N->>N: 收敛旧日志后校验并执行新操作
+    N-->>H: 当前操作的派发回执
+  end
+```
 
 恢复只能有一个发起者。Helper 能响应时由控制队列签发带旧 generation 的 recoveryId；Helper 不可响应时，package lifecycle adapter 在同一私有 reclaim 互斥边界下取得恢复权，验证并等待旧进程退出。其他 Host 等待新的 lease/generation，不各自 kill/spawn；恢复锁不是第二份 controller lease。正常取消、client 退出、锁屏或权限拒绝本身均不触发全局重启。
 
@@ -315,6 +338,8 @@ stateDiagram-v2
 应用身份包含 bundle ID、PID 和进程启动身份；窗口同时验证 window ID、所属应用、几何和附属表面。保留 actual window 与 presentation window 的区别，弹窗/菜单不凭主窗口旧 ID 直接操作。AX tree 保留角色、动作、值、可编辑/可选信息，限制节点、文本与遍历时间；不使用单一目标 App 的 AX 缺失结果证明系统权限失败。
 
 state_id、元素索引和 frame_id 继续绑定会话、目标、观察版本和栅格；模型未见过的树不进入展示索引台账。发生输入、窗口变化、取消、解锁或 generation 变化时按契约失效；关闭隐式观察不能放松 freshness。跨 cell 可以保留 Host 的状态，但必须满足原有 freshness，不能信任 Worker 自带的缓存。
+
+Host runtime 维护会话最新像素帧。开始新的像素观察时立即撤销旧帧；无图、空白、失败和乱序旧响应均不能恢复它。将写请求交给 native 前撤销像素帧，写请求尚在途时的截图不可获得坐标权限；下一次有效像素观察恢复坐标操作。一次拖动的起点与终点在同一写请求内校验。纯 AX 观察继续复用有效的像素帧，纯截图不会撤销上次有效 AX 索引。IPC v3 保留显式和隐式帧绑定，过期时均返回 `stale_state`，动作回执为 `not_sent`。
 
 ### 9.2 截图与帧凭据
 

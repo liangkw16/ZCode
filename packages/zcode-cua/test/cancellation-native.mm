@@ -37,6 +37,41 @@ int main(int argc, const char *argv[]) {
     assert(mkdtemp(dir));
     NSString *path = [NSString stringWithUTF8String:dir];
     KCUACoordinatorStart(path, [path stringByAppendingPathComponent:@"socket"]);
+    if (argc > 1 && strcmp(argv[1], "--single-session-capacity") == 0) {
+      std::atomic<bool> closed{false};
+      NSString *session = @"persistent-session";
+      NSDictionary *first = @{@"session" : session, @"operationId" : @"first"};
+      assert([KCUASubmit(@"fixture_count", @{}, @"peer", first, &closed)[@"ok"] boolValue]);
+      for (int index = 1; index < 32768; index++) {
+        @autoreleasepool {
+          auto result = KCUASubmit(@"list_windows", @{}, @"peer", @{
+            @"session" : session, @"operationId" : @(index).stringValue
+          }, &closed);
+          assert([result[@"ok"] boolValue]);
+        }
+      }
+      @try {
+        KCUASubmit(@"fixture_count", @{}, @"peer", @{
+          @"session" : session, @"operationId" : @"overflow"
+        }, &closed);
+        assert(false && "the next new operation must be rejected");
+      } @catch (NSException *error) {
+        assert([error.name isEqual:@"broker_unavailable"]);
+      }
+      assert([KCUASubmit(@"fixture_count", @{}, @"peer", first, &closed)[@"ok"] boolValue]);
+      auto status = KCUAControl(@"operation_status", @{@"operation_id" : @"first"}, @"peer", first);
+      assert([status[@"result"][@"cleanup_complete"] boolValue]);
+      assert(dispatchCount == 1);
+      assert([KCUAControl(@"session_release", @{}, @"peer", first)[@"result"][@"cleanup_complete"] boolValue]);
+      auto replay = KCUASubmit(@"fixture_count", @{}, @"peer", first, &closed);
+      assert([replay[@"error"][@"code"] isEqual:@"control_stopped"]);
+      assert([KCUASubmit(@"list_windows", @{}, @"peer", @{@"session" : @"fresh"}, &closed)[@"ok"] boolValue]);
+      assert(dispatchCount == 1);
+      KCUACoordinatorStop();
+      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+      puts("single live session capacity reached and released without replay");
+      return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--capacity") == 0) {
       std::atomic<bool> closed{false};
       for (int sessionIndex = 0; sessionIndex < 16; sessionIndex++) {

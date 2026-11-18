@@ -189,6 +189,15 @@ const OBSERVATIONS = new Set([
   "is_focus_steal_prevented",
   "pip_is_running",
 ]);
+const INPUT_RECOVERY_REASONS = new Set([
+  "input_recovery_focus_required",
+  "input_recovery_release_uncertain",
+  "input_recovery_target_unverified",
+]);
+const needsObservation = () => new NativeBrokerError(
+  "stale_state", "Helper recovery requires a fresh observation before input",
+  { action_sent: false, dispatch_status: "not_sent" },
+);
 export function createBrokerClient(options: {
   socketPath: string;
   timeoutMs?: number;
@@ -199,7 +208,8 @@ export function createBrokerClient(options: {
   const active = new Set<Promise<unknown>>();
   const controllers = new Set<AbortController>();
   const frozenSessions = new Map<string, number | undefined>();
-  const requireObservation = new Set<string>();
+  const observationFences = new Map<string, { pending: boolean }>();
+  const fenceObservation = (session: string) => observationFences.set(session, { pending: true });
   let helperPid: number | undefined;
   const processEnded = (pid: number | undefined) => {
     if (!pid || !Number.isSafeInteger(pid) || pid <= 1) return false;
@@ -222,6 +232,8 @@ export function createBrokerClient(options: {
     } = {},
   ): Promise<T> {
     const control = [...CONTROL_METHODS, "controller_stop", "cancel_input_holds"].includes(method);
+    const session = callOptions.session;
+    const mutation = !OBSERVATIONS.has(method) && !control;
     if (closed) throw new NativeBrokerError("broker_unavailable", "CUA client is closed");
     if (callOptions.signal?.aborted)
       throw new NativeBrokerError("cancelled", "CUA request cancelled before dispatch", {
@@ -231,25 +243,17 @@ export function createBrokerClient(options: {
     if (callOptions.session && frozenSessions.has(callOptions.session)) {
       if (processEnded(frozenSessions.get(callOptions.session))) {
         frozenSessions.delete(callOptions.session);
-        requireObservation.add(callOptions.session);
-      } else if (!OBSERVATIONS.has(method) && !control)
+        fenceObservation(callOptions.session);
+      } else if (mutation)
         throw new NativeBrokerError(
           "broker_unavailable",
           "Native cleanup could not be confirmed; mutation is frozen",
           { action_sent: false, dispatch_status: "not_sent" },
         );
     }
-    if (
-      callOptions.session &&
-      requireObservation.has(callOptions.session) &&
-      !OBSERVATIONS.has(method) &&
-      !control
-    )
-      throw new NativeBrokerError(
-        "stale_state",
-        "Helper recovery requires a fresh observation before input",
-        { action_sent: false, dispatch_status: "not_sent" },
-      );
+    if (session && mutation && observationFences.get(session)?.pending) throw needsObservation();
+    const generationAtStart = generation;
+    let observationFence: ReturnType<typeof observationFences.get>;
     const local = new AbortController();
     controllers.add(local);
     const abortLocal = () => local.abort();
@@ -263,6 +267,7 @@ export function createBrokerClient(options: {
       // 中断只能在原生清理回执后结束；关闭 socket 并不能证明 AX/输入已停止。
       const pendingOperation = operation;
       const pendingPid = helperPid;
+      if (session) fenceObservation(session);
       cleanup = (async () => {
         const deadline = Date.now() + 8000;
         let controlMethod = "operation_cancel";
@@ -300,9 +305,11 @@ export function createBrokerClient(options: {
                 },
               },
             );
-            if (callOptions.session) requireObservation.add(callOptions.session);
-            if (callOptions.session && typeof result.epoch === "number")
-              sessionEpochs.set(callOptions.session, result.epoch);
+            if (session && generation === pendingOperation.generation) {
+              fenceObservation(session);
+              if (typeof result.epoch === "number")
+                sessionEpochs.set(session, Math.max(sessionEpochs.get(session) ?? 0, result.epoch));
+            }
             if (result.cleanup_complete === true) break;
           } catch (error) {
             if (
@@ -343,41 +350,31 @@ export function createBrokerClient(options: {
         role: options.role,
         beforeDispatch(auth) {
           const nextGeneration = auth.kcode?.generation;
-          const changed = generation !== undefined && generation !== nextGeneration;
-          if (changed) sessionEpochs.clear();
+          // 并发握手的旧响应不能把已观察到的 generation 改回去。
+          if (generation !== generationAtStart && nextGeneration !== generation) throw needsObservation();
+          if (generation !== undefined && generation !== nextGeneration) {
+            for (const knownSession of sessionEpochs.keys()) fenceObservation(knownSession);
+            if (session) fenceObservation(session);
+            sessionEpochs.clear();
+          }
           generation = nextGeneration;
           helperPid = auth.kcode?.pid;
-          if (changed && !OBSERVATIONS.has(method) && !control)
-            throw new NativeBrokerError(
-              "stale_state",
-              "Native Helper generation changed; observe before input",
-              { action_sent: false, dispatch_status: "not_sent" },
-            );
-          if (callOptions.session) {
-            const floor = auth.kcode?.cancellationEpoch;
-            const known = sessionEpochs.get(callOptions.session);
-            if (typeof floor === "number" && Number.isSafeInteger(floor) && floor >= 0) {
-              sessionEpochs.set(callOptions.session, Math.max(known ?? 0, floor));
-              if (known !== undefined && floor > known) {
-                requireObservation.add(callOptions.session);
-                if (!OBSERVATIONS.has(method) && !control)
-                  throw new NativeBrokerError(
-                    "stale_state",
-                    "Desktop availability or cancellation epoch changed; observe again",
-                    { action_sent: false, dispatch_status: "not_sent" },
-                  );
-              }
-            }
+          if (session) {
             if (!auth.kcode?.cleanupFence)
-              throw new NativeBrokerError(
-                "version_mismatch",
-                "Helper lacks negotiated cleanup fence",
-              );
+              throw new NativeBrokerError("version_mismatch", "Helper lacks negotiated cleanup fence");
+            const floor = auth.kcode?.cancellationEpoch;
+            const known = sessionEpochs.get(session);
+            const epoch = typeof floor === "number" && Number.isSafeInteger(floor) && floor >= 0
+              ? Math.max(known ?? 0, floor) : known ?? 0;
+            sessionEpochs.set(session, epoch);
+            if (known !== undefined && epoch > known) fenceObservation(session);
+            observationFence = observationFences.get(session);
+            if (mutation && observationFence?.pending) throw needsObservation();
             operation = {
               capability: auth.kcode.capability,
               generation: auth.kcode.generation,
-              session: callOptions.session,
-              epoch: Math.max(callOptions.epoch ?? 0, sessionEpochs.get(callOptions.session) ?? 0),
+              session,
+              epoch: Math.max(callOptions.epoch ?? 0, epoch),
               operationId: randomUUID(),
             };
           }
@@ -398,10 +395,23 @@ export function createBrokerClient(options: {
           dispatch_status: OBSERVATIONS.has(method) ? "not_sent" : "possibly_sent",
         });
       }
-      if (callOptions.session && ["capture_app"].includes(method))
-        requireObservation.delete(callOptions.session);
+      if (session && method === "capture_app") {
+        // 一个 session 的新观察仅能解除派发该观察时的那道栅栏。
+        if (operation?.generation !== generation || operation?.epoch !== sessionEpochs.get(session) ||
+            observationFence !== observationFences.get(session)) throw needsObservation();
+        const capture = result as { screenshot?: { data?: string }; screenshot_blank?: boolean } | null;
+        const hasPixels = params.include_screenshot === true &&
+          !!capture?.screenshot?.data && !capture.screenshot_blank;
+        // 隐藏的 getApp 绑定和无图的纯截图没有观察内容，不能在恢复后解锁写入。
+        if (observationFence && (params.tree_shown_to_model !== false || hasPixels))
+          observationFence.pending = false;
+      }
       return result;
     } catch (error) {
+      if (session && mutation && operation?.generation === generation &&
+          error instanceof NativeBrokerError && error.code === "action_unavailable" &&
+          error.details.dispatch_status === "not_sent" && typeof error.details.reason_code === "string" &&
+          INPUT_RECOVERY_REASONS.has(error.details.reason_code)) fenceObservation(session);
       if (
         !control &&
         sent &&
@@ -465,7 +475,7 @@ export function createBrokerClient(options: {
           if (callOptions?.session && typeof result.epoch === "number")
             sessionEpochs.set(callOptions.session, result.epoch);
           if (result.cleanup_complete === true) {
-            if (callOptions?.session) requireObservation.add(callOptions.session);
+            if (callOptions?.session) fenceObservation(callOptions.session);
             return result as T;
           }
           await new Promise((resolve) => setTimeout(resolve, 25));

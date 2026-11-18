@@ -186,6 +186,71 @@ describe("zcode-cua compatible transport", () => {
     await client.call("drag", {}, { session: "fixture" });
     expect(mutations).toBe(2);
   });
+  it.each(["click", "list_windows", "capture_app"])(
+    "keeps all known sessions fenced when %s discovers the generation change",
+    async (detector) => {
+      let generation = "g1";
+      const mutations: string[] = [];
+      const client = await fixture((r, s) => {
+        if (r.method === "click") mutations.push(r.params.kcode_operation.session);
+        s.end(JSON.stringify({ id: 1, ok: true, result: {} }) + "\n");
+      }, { generation: () => generation });
+      await client.call("capture_app", {}, { session: "s1" });
+      await client.call("capture_app", {}, { session: "s2" });
+      generation = "g2";
+      if (detector === "click") {
+        await expect(client.call(detector, {}, { session: "s1" })).rejects.toMatchObject({
+          code: "stale_state", details: { dispatch_status: "not_sent" },
+        });
+      } else {
+        await client.call(detector, {}, { session: "s2" });
+      }
+      for (const session of detector === "capture_app" ? ["s1"] : ["s1", "s2"]) {
+        for (const _ of [1, 2]) {
+          await expect(client.call("click", {}, { session })).rejects.toMatchObject({
+            code: "stale_state", details: { dispatch_status: "not_sent" },
+          });
+        }
+      }
+      expect(mutations).toEqual([]);
+      await client.call("capture_app", { tree_shown_to_model: false, include_screenshot: false }, { session: "s1" });
+      await client.call("capture_app", { tree_shown_to_model: false, include_screenshot: true }, { session: "s1" });
+      await expect(client.call("click", {}, { session: "s1" })).rejects.toMatchObject({ code: "stale_state" });
+      await client.call("capture_app", {}, { session: "s1" });
+      await client.call("click", {}, { session: "s1" });
+      expect(mutations).toEqual(["s1"]);
+    },
+  );
+  it("discards a late capture from before a same-generation recovery refusal", async () => {
+    let holdCapture = true;
+    let captureStarted!: (socket: Socket) => void;
+    const started = new Promise<Socket>((resolve) => { captureStarted = resolve; });
+    let mutations = 0;
+    const ok = JSON.stringify({ id: 1, ok: true, result: {} }) + "\n";
+    const client = await fixture((r, socket) => {
+      if (r.method === "capture_app" && holdCapture) {
+        captureStarted(socket);
+      } else if (r.method === "click" && ++mutations === 1) {
+        socket.end(JSON.stringify({ id: 1, ok: false, error: {
+          code: "action_unavailable", message: "Focus the original window",
+          details: { reason_code: "input_recovery_focus_required", dispatch_status: "not_sent" },
+        } }) + "\n");
+      } else {
+        socket.end(ok);
+      }
+    });
+    const session = { session: "s1" };
+    const late = expect(client.call("capture_app", {}, session)).rejects.toMatchObject({ code: "stale_state" });
+    const pending = await started;
+    await expect(client.call("click", {}, session)).rejects.toMatchObject({ code: "action_unavailable" });
+    pending.end(ok);
+    await late;
+    await expect(client.call("click", {}, session)).rejects.toMatchObject({ code: "stale_state" });
+    holdCapture = false;
+    await client.call("capture_app", {}, session);
+    await client.call("click", {}, session);
+    expect(mutations).toBe(2);
+  });
 });
 
 describe("transport boundary validation", () => {

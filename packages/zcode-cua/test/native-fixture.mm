@@ -47,6 +47,7 @@
 @property(nonatomic) NSUInteger submissions;
 @property(nonatomic, strong) dispatch_source_t focusOriginal;
 @property(nonatomic, strong) dispatch_source_t focusSibling;
+@property(nonatomic, strong) dispatch_source_t hideFixture;
 @end
 @implementation KCUAFixture
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -117,6 +118,7 @@
         DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, dispatch_get_main_queue());
     __weak KCUAFixtureWindow *original = self.window;
     dispatch_source_set_event_handler(self.focusOriginal, ^{
+      [NSApp unhideWithoutActivation];
       [original makeKeyAndOrderFront:nil];
     });
     dispatch_resume(self.focusOriginal);
@@ -129,6 +131,12 @@
       [sibling makeKeyAndOrderFront:nil];
     });
     dispatch_resume(self.focusSibling);
+    // 按原窗口身份复现无法取图，随后恢复同一窗口以验证旧帧确实已撤销。
+    signal(SIGURG, SIG_IGN);
+    self.hideFixture = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_SIGNAL, SIGURG, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(self.hideFixture, ^{ [NSApp hide:nil]; });
+    dispatch_resume(self.hideFixture);
   }
   [self.window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
@@ -168,7 +176,8 @@
             @"submissions" : @(self.submissions),
             @"pid" : @(getpid()),
             @"window" : @(self.window.windowNumber),
-              @"primary_key" : @(self.window.isKeyWindow),
+            @"hidden" : @(NSApp.isHidden),
+            @"primary_key" : @(self.window.isKeyWindow),
             @"input_events" : self.window.inputEvents,
             @"sibling_window" : @(self.second.windowNumber),
             @"sibling_key" : @(self.second.isKeyWindow),

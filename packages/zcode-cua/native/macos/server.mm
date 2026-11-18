@@ -77,9 +77,10 @@ static NSString *verifiedMain(pid_t pid, NSData *leaf) {
   if (![app.bundleIdentifier isEqual:@"dev.zcode.app.kcode"] ||
       app.terminated ||
       app.activationPolicy != NSApplicationActivationPolicyRegular ||
-      ![app.executableURL.path isEqual:KCUAExecutable(pid)])
+      ![app.executableURL.path.stringByResolvingSymlinksInPath
+          isEqual:KCUAExecutable(pid).stringByResolvingSymlinksInPath])
     return nil;
-  return app.bundleURL.path.stringByResolvingSymlinksInPath;
+  return app.bundleURL.path;
 }
 static bool verifyPeer(int fd, NSString **identity,
                        bool *presentationEligible) {

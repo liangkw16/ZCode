@@ -479,4 +479,4 @@ Helper Host 通过 LaunchServices 启动同一已验证 bundle 的短命进程�
 
 macOS 桌面事实兼容 root.IOConsoleLocked + 同 UID console owner；缺失或其他用户的会话仍 fail closed。锁定后 epoch 变化即使 UI 没有在锁屏期间查询也会使旧探针失效。
 
-正式 peer 使用系统验证后的签名叶证书 DER 精确匹配（兼容没有 TeamIdentifier 的本机签名），并验证真实 Main 的进程出生身份、bundle path 与父进程链。当前源码的 Agent 使用 Electron Node，无独立外部 Node 白名单；Main/Host 的 identifier 必须属于 KCode，路径必须在已验证 Main.app 的 Contents 下。presentation 仅授予 GUI Main 和由该 Main 直接启动的 Host；任意 Node、错误父进程或仅同 UID 均不能通过。开发例外只对 ad-hoc Helper 的显式参数有效。
+正式 peer 使用系统验证后的签名叶证书 DER 精确匹配（兼容没有 TeamIdentifier 的本机签名），并验证真实 Main 的进程出生身份、bundle path 与父进程链。当前源码的 Agent 使用 Electron Node，无独立外部 Node 白名单；Main/Host 的 identifier 必须属于 KCode。Main 和 peer 的路径使用同一规则解析 macOS 文件系统别名后，peer 路径必须在已验证 Main.app 的 Contents 下。解析后指向包外的目标拒绝。presentation 仅授予 GUI Main 和由该 Main 直接启动的 Host；任意 Node、错误父进程或仅同 UID 均不能通过。开发例外只对 ad-hoc Helper 的显式参数有效。

@@ -343,10 +343,11 @@ static KCUAOp getOperation(NSString *method, NSDictionary *params,
   if (found != operations.end())
     return found->second;
   if (operations.size() >= 32768) {
-    // 不淘汰幂等键后重新派发；容量耗尽时明确拒绝，后续恢复由 lifecycle 换代。
+    // 满额时请求尚未入队。保留幂等键，待会话释放后回收容量。
     KCUAFail(
         @"broker_unavailable",
-        @"Native operation ledger capacity reached; restart after draining");
+        @"Native operation ledger capacity reached; release a session to reclaim capacity",
+        @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
   }
   auto op = std::make_shared<KCUAOperation>();
   op->key = key;

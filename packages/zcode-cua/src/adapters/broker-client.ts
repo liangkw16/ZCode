@@ -412,10 +412,14 @@ export function createBrokerClient(options: {
           error instanceof NativeBrokerError && error.code === "action_unavailable" &&
           error.details.dispatch_status === "not_sent" && typeof error.details.reason_code === "string" &&
           INPUT_RECOVERY_REASONS.has(error.details.reason_code)) fenceObservation(session);
+      // Helper 已明确拒绝入队时，没有待取消的操作。满额时取消还会尝试登记新栅栏。
+      const refusedBeforeDispatch = error instanceof NativeBrokerError &&
+        error.details.dispatch_status === "not_sent" && error.details.action_sent === false;
       if (
         !control &&
         sent &&
         operation &&
+        !refusedBeforeDispatch &&
         (local.signal.aborted ||
           (error instanceof NativeBrokerError &&
             ["timeout", "broker_unavailable"].includes(error.code)))

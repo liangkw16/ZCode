@@ -147,6 +147,24 @@ describe("zcode-cua compatible transport", () => {
     expect(await client.call("list_windows", {})).toEqual(["observed"]);
     expect(dispatches).toBe(1);
   });
+  it("returns a broker refusal at capacity without trying to cancel a new operation", async () => {
+    const requests: string[] = [];
+    const client = await fixture((request, socket) => {
+      requests.push(request.method);
+      socket.end(JSON.stringify(request.method === "list_applications"
+        ? { id: 1, ok: false, error: {
+            code: "broker_unavailable", message: "ledger capacity reached",
+            details: { action_sent: false, dispatch_status: "not_sent" },
+          } }
+        : { id: 1, ok: true, result: { cleanup_complete: true, dispatch_status: "not_sent" } }) + "\n");
+    });
+    const session = { session: "long-running" };
+    await expect(client.call("list_applications", {}, session)).rejects.toMatchObject({
+      code: "broker_unavailable", details: { dispatch_status: "not_sent" },
+    });
+    await client.call("session_release", {}, session);
+    expect(requests).toEqual(["list_applications", "session_release"]);
+  });
   it("requires a fresh observation after Helper death without claiming input was released", async () => {
     const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
     const exited = once(helper, "exit");

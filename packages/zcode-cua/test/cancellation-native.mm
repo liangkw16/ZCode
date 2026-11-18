@@ -57,6 +57,7 @@ int main(int argc, const char *argv[]) {
         assert(false && "the next new operation must be rejected");
       } @catch (NSException *error) {
         assert([error.name isEqual:@"broker_unavailable"]);
+        assert([error.userInfo[@"dispatch_status"] isEqual:@"not_sent"]);
       }
       assert([KCUASubmit(@"fixture_count", @{}, @"peer", first, &closed)[@"ok"] boolValue]);
       auto status = KCUAControl(@"operation_status", @{@"operation_id" : @"first"}, @"peer", first);

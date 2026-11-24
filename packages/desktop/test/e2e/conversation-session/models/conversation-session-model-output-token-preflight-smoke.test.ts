@@ -1,5 +1,10 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+// kcode 断言残留：token 预算提醒默认关闭，捕获的请求 JSON 不应再出现该块。
+function totalTokensReminders(requestJson: string): string[] {
+  return requestJson.match(/<total_tokens>[^<]*<\/total_tokens>/gu) ?? [];
+}
 import { ESTIMATED_TOKEN_CHAR_DIVISOR } from "@zcode/shared";
 import { clearAppData, DEFAULT_WORKSPACE, getE2EAppDataPaths } from "#e2e/helpers/desktop-app";
 import { restartIntoWorkspacePreservingProfile } from "#e2e/helpers/model-provider-restart-runtime";
@@ -149,7 +154,7 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     expect(completedSessionId).toBe(sessionId);
 
     const request = await waitForCapturedRequest({ latestUserMarker: marker });
-    expect(totalTokensReminders(request.record.requestJson)).toEqual([]);
+    expect(totalTokensReminders(String(request.record.requestJson))).toEqual([]);
     const maxTokens = readMaxTokens(request.record);
     expect(maxTokens).toBeGreaterThan(0);
     expect(maxTokens).toBeLessThanOrEqual(scenario.baselineMaxOutputTokens);

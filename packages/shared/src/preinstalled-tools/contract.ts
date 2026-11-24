@@ -203,9 +203,11 @@ export type PreinstalledToolConfiguration = z.infer<typeof preinstalledToolConfi
 export type PreinstalledToolInstallation = z.infer<typeof preinstalledToolInstallationSchema>;
 export function resolvePreinstalledToolsRelease(input: {
   runtimeEnv: string;
-  productFlavor: "production" | "preview";
+  // kcode 并排安装档（不 import env.js 守模块边界）；kcode 复用 production 通道。
+  productFlavor: "production" | "preview" | "kcode";
 }): PreinstalledToolsRelease {
-  return input.runtimeEnv === "development" ? "development" : input.productFlavor;
+  if (input.runtimeEnv === "development") return "development";
+  return input.productFlavor === "preview" ? "preview" : "production";
 }
 export const preinstalledToolErrorSchema = z.enum([
   "network",

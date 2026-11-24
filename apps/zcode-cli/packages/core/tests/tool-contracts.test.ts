@@ -75,29 +75,6 @@ const EMBEDDED_SEARCH_EXPECTED_PROVIDER_TOOL_ORDER =
     (toolName) => toolName !== "Glob" && toolName !== "Grep",
   );
 
-const SOURCE_DERIVED_WEBFETCH_DESCRIPTION = [
-  "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.",
-  "",
-  "- Fails on authenticated/private URLs — use an authenticated MCP tool or `gh` for those instead.",
-  "- Fails on localhost and other hostnames without a dot; for a local server, use curl via Bash.",
-  "- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.",
-  "- Responses are cached for 15 minutes per URL.",
-].join("\n");
-
-const SOURCE_DERIVED_READ_SHORT_DESCRIPTION = [
-  "Reads a file from the local filesystem.",
-  "",
-  "- `file_path` must be an absolute path.",
-  "- Reads up to 2000 lines by default.",
-  "- When you already know which part of the file you need, only read that part. This can be important for larger files.",
-  "- Results are returned using cat -n format, with line numbers starting at 1",
-  "- Reads images (PNG, JPG, …) and presents them visually.",
-  // video 输入一期新增能力行：Read 支持读取视频作为模型输入。
-  "- Reads videos (MP4, MOV, WEBM, …) and presents them as video input (subject to ZCode's video input limit).",
-  "- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.",
-  "- Do NOT re-read a file you just edited to verify — Edit/Write would have errored if the change failed, and the harness tracks file state for you.",
-].join("\n");
-
 const SOURCE_DERIVED_SEND_MESSAGE_DESCRIPTION = [
   "# SendMessage",
   "",
@@ -366,10 +343,15 @@ describe("tool contract declarations", () => {
       "Plain text message content",
     );
     // 只有空白的 message 立即判为输入错误：child 只收到 message，空白正文会被拒绝，
-    // 却在待发队列里回报 queued，永远送不到。provider schema 不变。
-    expect(
-      runtimeSchema?.safeParse({ to: "agent_1", summary: "s", message: " \n\t" }).success,
-    ).toBe(false);
+    // 却在待发队列里回报 queued，永远送不到。检查在 validateInput，不在 runtime schema：
+    // runtime schema 失败会先返回 InputValidationError（docs/model-tool-call-validation.md）。provider schema 不变。
+    const blank = { to: "agent_1", summary: "s", message: " \n\t" };
+    expect(runtimeSchema?.safeParse(blank).success).toBe(true);
+    expect(sendMessageToolEntry.validateInput?.(blank, {})).toEqual({
+      result: false,
+      errorCode: 9,
+      message: "message must not be empty",
+    });
     expect(getSchemaPath(contract?.inputSchema, ["properties", "message"])).toEqual({
       description: "Plain text message content",
       type: "string",
@@ -1071,8 +1053,9 @@ describe("tool contract declarations", () => {
     expect(agentRegistry.get("Agent")?.timeout).toEqual({ kind: "none" });
     expect(agentRegistry.get("Task")?.timeout).toEqual({ kind: "none" });
     expect(agentRegistry.get("Agent")?.metadata.description).toContain(
-      "- `run_in_background: true` runs the agent asynchronously; you'll be notified when it completes. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running.\n",
+      "- Subagents run in the background; you'll be notified when one completes. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running.\n",
     );
+    expect(agentRegistry.get("Agent")?.metadata.description).not.toContain("run_in_background");
     expect(agentRegistry.get("Agent")?.metadata.description).not.toContain("currently runs inline");
   });
 
@@ -1233,9 +1216,7 @@ describe("tool contract declarations", () => {
     expect(agentInput.properties.subagent_type.description).toBe(
       "The type of specialized agent to use for this task",
     );
-    expect(agentInput.properties.run_in_background.description).toBe(
-      "Set to true to run this agent in the background. You will be notified when it completes.",
-    );
+    expect(agentInput.properties).not.toHaveProperty("run_in_background");
     expect(agentInput.properties.subagent_type.enum).toBeUndefined();
     expect(agentInput.properties).not.toHaveProperty("model");
 
@@ -1266,6 +1247,39 @@ describe("tool contract declarations", () => {
     expect(bashInput.properties.dangerouslyDisableSandbox.description).toBe(
       "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
     );
+  });
+
+  it("keeps the optional run_in_background Agent input when the always-background switch is off", () => {
+    const registry = createToolRegistry();
+    registerBuiltInTools(registry, { includeAgent: true, agentAlwaysBackground: false });
+
+    const byName = new Map(registry.toContracts().map((contract) => [contract.name, contract]));
+    const agentInput = byName.get("Agent")?.inputSchema as any;
+
+    // 字段排在最后，与开关出现前的 schema 相同，关闭开关时 tools 段字节不变。
+    expect(Object.keys(agentInput.properties)).toEqual([
+      "description",
+      "prompt",
+      "subagent_type",
+      "run_in_background",
+    ]);
+    expect(agentInput.properties.run_in_background.description).toBe(
+      "Set to true to run this agent in the background. You will be notified when it completes.",
+    );
+    expect(byName.get("Agent")?.description).toContain(
+      "- `run_in_background: true` runs the agent asynchronously; you'll be notified when it completes.",
+    );
+    expect(byName.get("Agent")?.description).not.toContain("- Subagents run in the background;");
+  });
+
+  it("drops a leftover run_in_background at the runtime input boundary when Agent always runs in the background", () => {
+    expect(
+      AgentInputSchema.parse({
+        description: "Inspect runtime",
+        prompt: "Find the model selection path.",
+        run_in_background: false,
+      }),
+    ).toEqual({ description: "Inspect runtime", prompt: "Find the model selection path." });
   });
 
   it("drops the legacy Agent model field at the runtime input boundary", () => {
@@ -1575,6 +1589,10 @@ describe("tool contract declarations", () => {
 
 function findProviderSchemaIssues(schema: Record<string, unknown>, path: string): string[] {
   const issues: string[] = [];
+  // Anthropic API 拒绝根节点上的组合关键字（400 “input_schema does not support oneOf, allOf, or anyOf at the top level”）。
+  for (const key of ["anyOf", "oneOf", "allOf"]) {
+    if (key in schema) issues.push(`${path} uses ${key} at the top level`);
+  }
   scanProviderSchema(schema, path, issues);
   return issues;
 }
@@ -1587,7 +1605,8 @@ function scanProviderSchema(value: unknown, path: string, issues: string[]): voi
 
   if (!isRecord(value)) return;
 
-  for (const key of ["$id", "$ref", "$defs", "definitions", "anyOf"]) {
+  // union 与 nullable 统一写成 anyOf（docs/design/v2/tool/00-tool-change-chain.md「工具 JSON Schema 生成」），不出现 oneOf。
+  for (const key of ["$id", "$ref", "$defs", "definitions", "oneOf"]) {
     if (key in value) {
       issues.push(`${path} contains provider-internal key ${key}`);
     }
@@ -1614,7 +1633,7 @@ function scanProviderSchema(value: unknown, path: string, issues: string[]): voi
   }
   scanProviderSchema(value.items, `${path}.items`, issues);
   scanProviderSchema(value.additionalProperties, `${path}.additionalProperties`, issues);
-  scanProviderSchema(value.oneOf, `${path}.oneOf`, issues);
+  scanProviderSchema(value.anyOf, `${path}.anyOf`, issues);
   scanProviderSchema(value.allOf, `${path}.allOf`, issues);
 }
 

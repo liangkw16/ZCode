@@ -1,3 +1,4 @@
+import type { ToolSearchDelivery } from "@zcode/contracts";
 import {
   CompactTrigger,
   CompactTimelineDisplay,
@@ -307,16 +308,19 @@ export async function persistCompactSummary(
   compactBoundary: CompactBoundaryPayload,
   traceContext: TraceContext,
   options?: {
+    /** 与 live 条目相同的时间；冷恢复按它还原条目时间。 */
+    created?: number;
     model?: Model;
     operationId?: string;
     completedTimeline?: CompactTimelinePayload;
     leadingReminderEntries?: readonly RuntimeMessageEntry[];
     postCompactReminderEntries?: readonly RuntimeMessageEntry[];
+    toolSearchDelivery?: ToolSearchDelivery;
   },
 ): Promise<Error | undefined> {
   if (!this.sessionStore) return;
 
-  const created = Date.now();
+  const created = options?.created ?? Date.now();
   const recordOptions = { created, model: options?.model };
   const leading = buildReminderRecords(this, options?.leadingReminderEntries, recordOptions);
   const attachments = buildReminderRecords(
@@ -347,6 +351,9 @@ export async function persistCompactSummary(
         transcriptVisibility: "hidden",
       },
       system: this.config.systemPrompt,
+      ...(options?.toolSearchDelivery
+        ? { metadata: { toolSearchDelivery: options.toolSearchDelivery } }
+        : {}),
     },
     parts: [
       {

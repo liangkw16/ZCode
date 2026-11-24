@@ -237,17 +237,17 @@ compaction 结果的顺序（boundary → 请求前公告 → summary → 保留
 [请求前公告] context_prefix → session_context → date   仅当保留段非空；保留段已有的来源不重复（date 也一样：保留段里有日期公告时，即使已过期也不放，之后的请求在末尾宣告一次变化）。context_prefix 只认完整块：保留段只有增量时也放完整块；保留段有完整块时不放，内容变化由下一次请求追加增量（reason `compaction`）
 [summary]
 [保留段]
-[compaction 附件] 文件恢复 → plan_file_reference → runtime_mode（计划模式下的完整提醒，保留段已有完整提醒时不发）
+[compaction 附件] 文件恢复（正文在 user 侧，见下文）→ task_status（后台任务状态）→ plan_file_reference → runtime_mode（计划模式下的完整提醒，保留段已有完整提醒时不发）
                   → tool_search_announcement → agent_listing_delta → skills_listing → environment → model
-                  → output_style_instructions
+                  → output_style_instructions → language
 ```
 
-- compaction 附件（含文件恢复与 plan_file_reference）都参与冒泡，附件之间保持生成顺序。支持 MCS 时它们都是 system，在 user run 末尾按上表顺序合成一条 system；不支持 MCS 时都是 user 侧 reminder，顺序相同。
-- 文件恢复（`resume_referenced_session_context`）在 summary 返回之后重读磁盘上的当前文件，不用读取状态里缓存的视图：
+- 文件恢复的正文（调用说明与结果）在 MCS 开关下都是 user 侧 `<system-reminder>`，按普通 user 消息合并：不并入前面的 tool result（auto/reactive 的保留段可能以 tool result 结尾，正文作为同一条 user 消息里 tool_result 之后的独立文本块）；前面紧挨 user 文本时，那段文本以换行结尾（两条正文相邻时，调用说明以换行结尾）。正文和其余 compaction 附件（含过大文件的引用提示与 plan_file_reference）一样参与冒泡，越过 user 输入，附件之间保持生成顺序；所以 MCS 下正文在 user 输入之前，其余附件在 user run 末尾。支持 MCS 时其余附件是 system，在 user run 末尾按上表顺序合成一条 system；不支持 MCS 时都是 user 侧 reminder，顺序相同。
+- 文件恢复（正文来源 `resume_referenced_session_context`，引用提示来源 `compact_file_reference`）在 summary 返回之后重读磁盘上的当前文件，不用读取状态里缓存的视图：
   - 候选：compact 前读取状态里 `Read`、`Write`、`Edit` 留下的记录。不选 Bash 回填、Recall 注入、`MEMORY.md` 初始记录和工作流草稿的记录；不选 plan 文件、已加载进上下文前缀的指令文件，以及 `.codex/memories/`、`docs/superpowers/plans/`、`.git/` 下的文件；不选保留段里 Read 过的文件（路径按当前工作目录解析后比较；返回 `file_unchanged` 的 Read 不算，它只指向已被摘要的旧结果）。
   - 选择：按时间从新到旧先取 5 个，再读取；读取失败或被跳过的文件照样占名额。本进程写入的记录（包括 rewind 重建的记录）按文件的 `mtimeMs` 排序，冷恢复出的记录（`restoredFromSession`）按读取时间排序；缺 `mtimeMs` 时用读取时间。
   - 读取：整个文件，不带 `offset` / `limit`。不走工具调用流程：没有 hook、工具事件和权限弹窗；只跳过命中读权限 deny 规则的文件，ask 规则照常读取；判定与 Read 工具调用共用同一个模式与规则判定，规则只加载一次。规则按原始字符串匹配，所以记录的规范化路径和工具输入的原始写法（读取状态的 `requestedPath`：live 由工具记下，冷恢复取自 tool part 的输入）各判定一次，任一命中 deny 就跳过：同一写法的 Read 被拒的文件不会被补回。补回后写回的记录保留原始写法。plan 文件和补回文件并行读取。只补回文本文件：图片、视频、PDF 和 Read 预检不通过的文件（二进制、设备文件）跳过。读取传入取消信号，读完再检查一次；取消时整个 compact 取消，不产出附件。
-  - 内容：`Called the Read tool with the following input: {"file_path":…}`，换行后是 `Result of calling the Read tool:` 和 Read 工具结果原文。估算超过 5k token，或超过 Read 的文件大小上限时，只放引用提示（"Note: … was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it."）。按顺序累加，总量超过 50k token 的文件丢掉，不放提示（单文件不超过 5k、最多 5 个文件时实际不会触发）。
+  - 内容：每个文件两条正文，各包一层 `<system-reminder>`：`Called the Read tool with the following input: {"file_path":…}`；`Result of calling the Read tool:`，换行后是 Read 工具结果原文。估算超过 5k token，或超过 Read 的文件大小上限时，只放一条引用提示（"Note: … was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it."）。按顺序累加，总量超过 50k token 的文件丢掉，不放提示（单文件不超过 5k、最多 5 个文件时实际不会触发）。
   - 读取状态：compact 后的 live 表只含补回的文件，记录规则与重启后的行为见 [Read File State Resume](tool/17-read-file-state-resume.md) 的“Compaction 之后”。
   - 补回内容随 compaction 附件一起持久化，冷恢复读到相同字节，不再重读磁盘；已有的 compaction 不改写。
   - 完整补回正文的 Read 快照随同一附件 text part metadata 进入事务，保留当时的 content / revision / mtime / size 与原始路径写法；冷恢复和 rewind 只从 active 的可信附件恢复。部分引用、无完整 freshness 字段及旧版附件不授予已读状态；编辑仍验证当前文件是否变化。
@@ -291,7 +291,7 @@ compaction 结果的顺序（boundary → 请求前公告 → summary → 保留
 - fork：重映射 `compactLeadingMessageIds`；映射不到的 ID 丢弃，不阻断 fork（旧版本 fork 会原样复制该字段）。
 - 旧版本兼容：不改 strict 的 `compactBoundary` schema。`CompactionPart.metadata` 不进入 App 协议，旧版本按 JSON 读取 part 时忽略它。旧版本冷恢复时，summary 之前的公告不在 `slice(boundaryIndex)` 范围内，会被漏掉；跨过的保留段可能带回上一次的公告。这两种情况只影响上下文内容，不会导致读取失败。
 - git status 与分支：规则只看历史（见 `loop/meta-user-context.md`）。保留段非空且其中没有 `session_context` 时，compaction 通过 `ContextSourcePort.resolveGitContext` 按当前目录重新读取（分支直接读取，不使用轮询缓存），是仓库才在 summary 之前宣告；保留段为空时由下一次请求读取。读到的 Git 只进入公告，不改 runtime 的 context 快照，compact 写库失败时不留任何 Git 事实。没有 context port 的运行时沿用会话起始快照。
-- skills_listing：在 compaction 附件中紧跟 agent_listing_delta。保留段里没有 skills_listing 且当前 skill 目录不为空时重述完整列表，判定与输入附件收集相同；compact 后的第一次请求就带 skill 名单。ZCode 不找回已调用的 skill。已恢复列表的原位更新见 `loop/meta-user-context.md`。
+- skills_listing：在 compaction 附件中紧跟 agent_listing_delta。与输入附件收集用同一收集器，以保留段为历史回放已发指纹：保留段没有列表时补完整列表，部分保留时只补缺失的行；compact 后的第一次请求就带 skill 名单。ZCode 不找回已调用的 skill。已恢复的列表不改写，规则见根目录 `docs/skills-live-catalog.md`。
 - 指令文件与 `MEMORY.md`：summary 返回后，与文件恢复并行重读（异步 IO，传入取消信号）。只更新 runtime 持有的指令内容与 Memory 索引，不改工作目录、环境、Git 预取标记。读取失败时沿用原内容并记 warn；取消时整个 compact 取消。重读结果先只用于生成 summary 之前的 context_prefix（见上表）；compact 成功落库后才交给 runtime，同时把指令增量的 reason 改为 `compaction`（之后不再改回）。compact 失败或取消时 runtime 的内容和 reason 都不变。保留段为空时由下一次请求宣告完整块。`MEMORY.md` 的读取状态在 compact 读取状态装好之后按重读的内容写入。没有 context port 的运行时（子 agent）不重读。
 
 ### File rewind after compact

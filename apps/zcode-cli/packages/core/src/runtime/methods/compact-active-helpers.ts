@@ -33,6 +33,7 @@ import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 
 import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
 import { resumeStoredSessionEventPublication } from "./events.js";
+import { isOutputTokenLimitFinishReason } from "./turn-output-token-continuation.js";
 
 const COMPACT_SUMMARY_OUTPUT_LIMIT_REASON = "compact_summary_output_limit";
 
@@ -109,6 +110,38 @@ export function createCompactContextExceededFinishError(
   return createModelContextExceededFinishError({
     finishReason: result.finishReason,
     rawFinishReason,
+  });
+}
+
+/**
+ * 摘要成功但以输出上限结束时记 warn，摘要仍按原逻辑落库。
+ * 修复原因：有正文的 length 曾被当作普通成功，未闭合的 <summary> 原样落库且没有任何日志，
+ * 线上只能靠抓包发现。判定与 Output-limit Continue 相同（normalized length 或 raw max_tokens 等）。
+ * 合并自上游 v4.0.0：与 kcode 的 createCompactSummaryOutputLimitError 重试链互补——
+ * 先按 kcode 链路重试更短的摘要；重试后仍超限时由此处告警并接受截断落库。
+ */
+export function warnCompactSummaryOutputLimit(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  context: { maxOutputTokens: number; traceContext: TraceContext; trigger: CompactTrigger },
+): void {
+  const rawFinishReason = readRawFinishReason(result.providerMetadata);
+  if (!isOutputTokenLimitFinishReason(result.finishReason, rawFinishReason)) return;
+
+  runtime.logger?.warn("Compact summary hit the output limit; the summary may be truncated", {
+    ...traceContextToLogContext(context.traceContext),
+    event: "compact.summary.output_limit",
+    finishReason: result.finishReason,
+    module: "core.runtime",
+    // 日志脱敏按键名匹配 token；这些数量不是凭据，用不含 token 的键名，线上才能判断预算是否够用。
+    outputBudget: {
+      limit: context.maxOutputTokens,
+      output: result.usage.outputTokens,
+      reasoning: result.usage.reasoningTokens,
+    },
+    rawFinishReason,
+    textLength: result.text.length,
+    trigger: context.trigger,
   });
 }
 

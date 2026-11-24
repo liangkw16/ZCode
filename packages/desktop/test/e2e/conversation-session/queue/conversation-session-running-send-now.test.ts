@@ -5,7 +5,6 @@ import {
   TID_V4_TIMELINE,
 } from "@zcode/shared/test-ids";
 import { clearAppData, readSettings, waitForDefaultWorkspaceReady } from "#e2e/helpers/desktop-app";
-import { totalTokensReminders } from "#e2e/helpers/total-tokens-evidence";
 import {
   E2E_READONLY_TOOL_FILE_CONTENT,
   ensureReadonlyToolFixtureFile,
@@ -123,8 +122,6 @@ describe("会话区 Running Queue 立即引导 E2E", () => {
       });
       expect(wire.messages[wire.index - 1]?.role).toBe("assistant");
       expect(wireText(wire.messages[wire.index - 1]?.content)).toContain("send-now-head-partial");
-      // 立即发送保留真实用户新轮语义，不生成虚拟余额。
-      expect(totalTokensReminders(evidence.at(-1)!.requestJson)).toEqual([]);
       const userRows = (await getV4Messages("user")).filter((message) =>
         message.text.includes(queuedMarker),
       );
@@ -332,9 +329,8 @@ describe("会话区 Running Queue 立即引导 E2E", () => {
       excludes: [markers.queuedMarker, "Generate a concise title"],
     });
     expect(heldRequest).toBeDefined();
-    // 被点消息仍是 tool_result 之后的独立用户文本；不再用余额清洗掩盖历史改写。
-    expect(totalTokensReminders(heldRequest!.requestJson)).toEqual([]);
-    expect(totalTokensReminders(selectedRequests[0]!.requestJson)).toEqual([]);
+    // 被点消息是 tool_result 之后的独立用户文本：被停止的那次请求已发出的内容原样保留，
+    // 新请求只在末尾追加，已写入的缓存仍可读到。token 预算提醒默认关闭，请求里没有会随新一轮移动的提醒。
     assertAppendOnly(heldRequest!.requestJson, selectedRequests[0]!.requestJson);
     await assertPlainUserInput(selectedRequests[0]!.requestJson, {
       body: buildQueuedPrompt(markers.queuedMarker),

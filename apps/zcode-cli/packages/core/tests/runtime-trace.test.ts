@@ -1,3 +1,4 @@
+import { createMockMcpPort } from "./mcp-runtime-fixture.js";
 import { withoutAgentListingMessages } from "./test-agent-listing.js";
 import { describe, expect, it } from "vitest";
 import {
@@ -50,6 +51,7 @@ const ENVIRONMENT_REMINDER = expect.stringMatching(
 const TODAY_REMINDER = expect.stringMatching(
   /^<system-reminder>\nToday's date is \d{4}-\d{2}-\d{2}\.\n<\/system-reminder>$/,
 );
+
 function providerMessagesToText(messages: readonly { content?: unknown }[] | undefined): string {
   return (messages ?? []).map((message) => providerContentToText(message.content)).join("\n");
 }
@@ -797,7 +799,6 @@ describe("AgentRuntime trace propagation", () => {
       sessionId,
       {
         systemPrompt: "You are terse for this session.",
-        language: "Chinese",
         outputStyle: {
           name: "Terse",
           prompt: "Keep responses short.",
@@ -878,9 +879,6 @@ describe("AgentRuntime trace propagation", () => {
     expect(requests[0]?.[7]?.role).toBe("user");
     expect(requests[0]?.[7]?.content).toContain("hello");
     const providerText = providerMessagesToText(requests[0]);
-    expect(
-      requests[0]?.slice(0, 2).some((message) => message.content.includes("total_tokens")),
-    ).toBe(false);
     expect(providerText).not.toContain("# Session Guidance");
     expect(providerText).not.toContain("# Session-specific guidance");
     expect(providerText).not.toContain("## Current Environment");
@@ -992,7 +990,6 @@ describe("AgentRuntime trace propagation", () => {
           osVersion: "Linux 6.6.0",
           nodeVersion: "v24.14.0",
         },
-        language: "Spanish",
         mcp: {
           enabled: true,
           servers: {
@@ -1228,8 +1225,7 @@ describe("AgentRuntime trace propagation", () => {
     await runtime.executeTurn("first question");
     await runtime.executeTurn("second question");
 
-    // 完整形状：三段 system，然后是输入附件（环境、模型）、请求前公告（日期）和第一问，
-    // 公告不带 cacheControl。
+    // 完整形状：三段 system，然后是请求前公告（环境、模型、日期）和第一问，公告不带 cacheControl。
     expect(requests[0]?.map(({ role, cacheControl }) => ({ role, cacheControl }))).toEqual([
       { role: "system", cacheControl: undefined },
       { role: "system", cacheControl: EPHEMERAL },
@@ -1286,10 +1282,11 @@ describe("AgentRuntime trace propagation", () => {
     expect(requests[0]?.[2]?.content.indexOf("# Context management")).toBeLessThan(
       requests[0]?.[2]?.content.indexOf("When you have enough information to act, act.") ?? -1,
     );
+    expect(requests[0]?.[2]?.content).toContain(
+      "If you are weighing a choice, give a recommendation, not an exhaustive survey\n\n# Finishing work\n",
+    );
     expect(
-      requests[0]?.[2]?.content.endsWith(
-        "If you are weighing a choice, give a recommendation, not an exhaustive survey",
-      ),
+      requests[0]?.[2]?.content.endsWith("work from the context, not intermediate files."),
     ).toBe(true);
     expect(requests[0]?.[2]?.content).not.toContain("not a git repository");
     expect(requests[0]?.[2]?.content).not.toContain("- **Git**:");
@@ -1303,7 +1300,6 @@ describe("AgentRuntime trace propagation", () => {
     );
     expect(requests[1]?.at(-3)?.cacheControl).toBeUndefined();
     expect(requests[1]?.at(-2)?.content).toBe("first response");
-    expect(providerMessagesToText(requests[1])).not.toContain("<total_tokens>");
     expect(requests[1]?.at(-1)).toEqual({
       role: "user",
       content: "second question",
@@ -1785,24 +1781,6 @@ class CapturingLogger implements Logger {
   }
 }
 
-function createMockMcpPort(overrides: Partial<McpPort> = {}): McpPort {
-  return {
-    connectConfiguredServers: async () => emptyMcpSnapshot(),
-    connectServer: async () => ({
-      status: "connected",
-      transport: "stdio",
-      toolCount: 1,
-      updatedAt: "now",
-    }),
-    disconnectServer: async () => undefined,
-    status: async () => ({}),
-    listTools: async () => [],
-    callTool: async () => ({ content: [{ type: "text", text: "pong" }] }),
-    close: async () => {},
-    ...overrides,
-  };
-}
-
 function emptyMcpSnapshot(): McpConnectionSnapshot {
   return {
     statuses: {},
@@ -1916,8 +1894,8 @@ it("keeps the request model's Harness wording for a manual compact after a confi
     },
   );
   await runtime.executeTurn("first");
-  // 轮外改语言会不带模型重建前缀；随后的手动 compact 仍按本次请求的模型投影。
-  runtime.updateConfig({ language: "Chinese" });
+  // 轮外改 output style 会不带模型重建前缀；随后的手动 compact 仍按本次请求的模型投影。
+  runtime.updateConfig({ outputStyle: undefined });
   await runtime.executeTurn("/compact");
 
   const compactRequest = requests.find((request) => request.querySource === "compact");

@@ -532,6 +532,8 @@ export {
 } from "./config-factory.js";
 export {
   PLUGIN_SECRETS_FILE_NAME,
+  resolvePluginSecretsPath,
+  resolvePluginSecretOverrides,
   createEmptyPluginSecretsFile,
   getPluginSecretsForScope,
   normalizePluginConfigPathForComparison,

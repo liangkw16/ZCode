@@ -47,7 +47,7 @@ import {
   type NodeReplCuaBrokerConnection,
 } from "./cua-bridge.js";
 import { createNodeReplCuaBroker } from "./cua-broker.js";
-import { createNoProgressGuard } from "./no-progress-guard.js";import {
+import {
   isDirectMcpEntrypoint,
   installNodeReplProcessGuards,
   installNodeReplShutdownTriggers,

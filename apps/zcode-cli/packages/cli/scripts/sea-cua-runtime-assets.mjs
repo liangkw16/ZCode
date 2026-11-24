@@ -30,7 +30,14 @@ export async function collectCuaRuntimeFiles({
 }) {
   const repositoryRoot = resolveRepositoryRoot(root);
   const desktopPackageRoot = join(repositoryRoot, "packages", "desktop");
-  const isReal = producerIsReal ?? (() => isRealComputerUseProducerInstalled({ desktopPackageRoot }));
+  // P1 修复（codex-review）：kcode 源码构建的 macOS producer 没有 node-gyp
+  // 原生工程（原生入口在 native/macos 的 Helper），ax_native SEA
+  // 种子只对 binding.gyp 生产者有意义；工程缺失时跳过该部分
+  // 打包，而不是在复制 binding.gyp 阶段失败。
+  const isReal = producerIsReal ?? (() =>
+    isRealComputerUseProducerInstalled({ desktopPackageRoot }) &&
+    existsSync(join(repositoryRoot, "packages", "zcode-cua", "binding.gyp"))
+  );
   if (!isReal()) return null;
 
   const { arch, releasePlatform } = targetParts(target);

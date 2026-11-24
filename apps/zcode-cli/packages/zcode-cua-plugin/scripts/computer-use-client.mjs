@@ -469,10 +469,23 @@ function isFrameAuthorityText(value) {
 function projectToHost(globals, result, options) {
   const sink = globals.nodeRepl?.emitStructuredResult;
   if (typeof sink !== "function" || !result || !Array.isArray(result.content)) return;
-  const media = result.content.filter(
-    (block) =>
-      block?.type === "image" || (block?.type === "text" && isFrameAuthorityText(block.text)),
-  );  if (media.length > 0) {
+  const raw = result.structuredContent;
+  const structured = raw && typeof raw === "object" ? forDisplay(raw) : undefined;
+  // 元数据曾只留在结构化字段，模型读取 content 时也需要它，并保持与本次截图一致。
+  // 合并修复：这两段定义在冲突解决时被 kcode 的旧 media 过滤器顶掉，函数体仍引用它们，
+  // 成功结果会抛 ReferenceError（codex-review P1）。
+  const metadataContent =
+    options?.emit !== false && structured
+      ? [{ type: "text", text: JSON.stringify(structured) }]
+      : [];
+  const media =
+    options?.emit === false
+      ? []
+      : result.content.filter(
+          (block) =>
+            block?.type === "image" || (block?.type === "text" && isFrameAuthorityText(block.text)),
+        );
+  if (media.length > 0) {
     const { structuredContent: _raw, ...rest } = result;
     sink({
       ...rest,

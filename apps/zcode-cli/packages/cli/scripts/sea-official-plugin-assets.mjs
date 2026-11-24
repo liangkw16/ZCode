@@ -75,7 +75,7 @@ export const officialSeaPlugins = [
     requiresRuntime: true,
     requiredRuntimePaths: ["dist/mcp/server.js"],
     rootPath: join("packages", "node-repl-host"),
-    version: "0.7.1",
+    version: "0.7.2",
   },
   {
     marketplace: "zcode-plugins-official",
@@ -289,7 +289,7 @@ export const officialSeaPlugins = [
     requiresRuntime: false,
     rootPath: join("packages", "zcode-cua-plugin"),
     targets: CUA_SEA_TARGETS,
-    version: "0.6.6",
+    version: "0.6.10",
   },
   // superpowers 已从内置插件下线，改走 UI 推荐区按需安装；这里不再打入 SEA 资源清单。
 ];

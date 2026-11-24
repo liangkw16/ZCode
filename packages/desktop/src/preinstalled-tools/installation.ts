@@ -103,6 +103,18 @@ function runPreinstalledRuntimeCheck(
 }
 
 /** 一个工具的唯一操作 owner；准备的执行机会来自协调器的串行队列。 */
+/** 视为「读不到」而非「已损坏」的文件系统错误码：保留记录与版本目录，初始化失败可见。 */
+const READ_FAILURE_CODES = new Set([
+  "EACCES",
+  "EPERM",
+  "EIO",
+  "EBUSY",
+  "EMFILE",
+  "ENFILE",
+  "ETIMEDOUT",
+  "EAGAIN",
+]);
+
 export class PreinstalledToolOwner {
   private state: Omit<PreinstalledToolState, "installed" | "agentEnabled">;
   // 只保存本进程见过的入口定义用于撤销；入口内容仍只从当前安装记录派生。
@@ -276,7 +288,15 @@ export class PreinstalledToolOwner {
       await validatePreinstalledFiles(record.installationDir, record);
       this.record = record;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      const code = (error as NodeJS.ErrnoException).code;
+      // P1 修复（codex-review）：EACCES/EIO 等读取故障不代表记录损坏。原实现把任何
+      // 非 ENOENT 错误都当损坏处理并删除记录，随后启动清理会把全部已装版本目录当
+      // 旧版本回收——一次瞬时读错误就清空有效安装。读故障时中止该工具初始化并保留
+      // 现状；仅校验失败（身份/目录/schema）或缺记录才走重置路径。
+      if (code && code !== "ENOENT" && READ_FAILURE_CODES.has(code)) {
+        throw error;
+      }
+      if (code !== "ENOENT")
         this.options.log.warn(undefined, "安装记录未通过启动核对", {
           toolId,
           error: String(error),
@@ -493,13 +513,24 @@ export class PreinstalledToolOwner {
         throw new PreinstalledToolFailure("unsupported", "目标平台不匹配");
       await mkdir(payload, { recursive: true });
       await checkPreinstalledToolSpace(paths.stagingDir, manifest);
+      // P2 修复（codex-review）：逐 64KiB 块调用 update 会向所有窗口广播全量工具状态，
+      // 大包一轮下载产生数千次跨进程 IPC。按 4MiB 增量节流；
+      // phase 变化与最终状态（安装完成/失败）仍即时发布。
+      let lastBroadcastBytes = -4 * 1024 * 1024;
       await downloadPreinstalledTool({
         manifest,
         archive,
         signal,
         createNetwork: this.options.createNetwork,
         progress: (downloadedBytes) => {
-          if (this.flight?.id === id && !signal.aborted) this.update({ downloadedBytes });
+          if (
+            this.flight?.id === id &&
+            !signal.aborted &&
+            downloadedBytes - lastBroadcastBytes >= 4 * 1024 * 1024
+          ) {
+            lastBroadcastBytes = downloadedBytes;
+            this.update({ downloadedBytes });
+          }
         },
         phase,
         operationId: id,

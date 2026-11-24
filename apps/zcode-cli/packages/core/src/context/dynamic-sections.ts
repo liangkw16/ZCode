@@ -1,4 +1,5 @@
 import type { ContextSection } from "./types.js";
+import { TOTAL_TOKENS_SYSTEM_LINE } from "./total-tokens.js";
 import { estimateTokens } from "./utils.js";
 
 const COMMUNICATION_PROMPT =

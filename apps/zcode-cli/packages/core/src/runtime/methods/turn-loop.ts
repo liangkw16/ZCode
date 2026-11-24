@@ -1,4 +1,13 @@
 import {
+
+  consumeTotalTokensBudget,
+  decideTotalTokensReminder,
+  reanchorTotalTokensBudget,
+} from "../helpers/total-tokens-budget.js";
+import type { InputAttachmentCollectionReason } from "../helpers/total-tokens-budget.js";
+import { latestContextTokens } from "./turn-model-step-usage.js";
+import { formatTotalTokensReminder } from "../../context/total-tokens.js";
+import {
   appendRequestAnnouncements,
   appendRuntimeContextAnnouncements,
   appendRuntimeSkillsAnnouncement,
@@ -37,7 +46,7 @@ import {
 import type { AgentRuntimeInternal } from "../internal.js";
 import { runModelBackedTurnStep } from "./turn-model-step.js";
 import { querySourceForTask } from "./turn-model-step-usage.js";
-import { inputRoleOf } from "../helpers/provider-entry-origins.js";
+import { inputRoleOf, isRealUserPrompt } from "../helpers/provider-entry-origins.js";
 import {
   evaluateRapidRefill,
   isAutomationMutationRestrictedTurn,
@@ -126,11 +135,18 @@ export async function runRegularTurnLoop(
     const collectionReason = state.normalInputPreparationPending;
     if (collectionReason) {
       state.normalInputPreparationPending = false;
-      // 收集只追加附件，最新的非附件 entry 在收集期间不变；只查一次，跳过规则和预算提醒共用。      const latestMessage = state.turnRequestState.entries.findLast(
+      // 收集只追加附件，最新的非附件 entry 在收集期间不变；只查一次，跳过规则和预算提醒共用。
+      const latestMessage = state.turnRequestState.entries.findLast(
         (entry) => !isRuntimeAttachmentEntry(entry),
       );
       if (!isNewTurnInput(latestMessage)) {
-        await collectInputAttachments(this, state, tools);
+        // 触发收集的输入是否出自用户本人：纯文本回复后看本次取出的 guide（历史 metadata 不可靠，
+        // 见 isUserSteer），其余看最新输入。
+        const fromUser =
+          collectionReason === "text_guide"
+            ? state.drainedSteerForNextRequest?.userSteered === true
+            : latestMessage !== undefined && isRealUserPrompt(latestMessage);
+        await collectInputAttachments(this, state, tools, collectionReason, fromUser);
       }
     }
 
@@ -284,6 +300,8 @@ async function collectInputAttachments(
   runtime: AgentRuntimeInternal,
   state: RegularTurnLoopState,
   tools: ReturnType<typeof getTurnTools>,
+  reason: InputAttachmentCollectionReason,
+  fromUser: boolean,
 ): Promise<void> {
   await appendRuntimeContextAnnouncements(
     runtime,
@@ -377,6 +395,7 @@ async function collectInputAttachments(
       state.turnTraceContext,
     );
   }
+  await appendTotalTokensReminder(runtime, state, reason, fromUser);
   // （2026-09-12）：原"回合开始注入 plugin_ui_state reminder"已删除，插件给模型的信息
   // 一律走 ui/update-model-context。
   // output_style 每次收集都产出，不去重。修复原因：只在首步发且不落 session 时，

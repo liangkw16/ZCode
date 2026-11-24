@@ -963,14 +963,14 @@ describe("MCP tool bridge", () => {
           text: JSON.stringify({
             image_ref: {
               actionable: true,
-              frame_id: "frame_exact_001",
+              frame_id: "frame-exact-001",
               height: 1,
               width: 1,
             },
           }),
         },
       ],
-      _meta: officialCuaIntegrityMeta("frame_exact_001", imageData),
+      _meta: officialCuaIntegrityMeta("frame-exact-001", imageData),
     };
     const callTool = vi.fn(async () => result);
     registerMcpTools(
@@ -1087,7 +1087,10 @@ describe("MCP tool bridge", () => {
 
   it("keeps official CUA receipt normalization out of the bridge budget path", async () => {
     const registry = createToolRegistry();
-    const oversizedState = `state_id=s-2 app=Example\n${"tree-node ".repeat(30_000)}`;
+    // kcode 契约：超过 263168 字节的文本按潜在凭据载体 fail-closed（frame-preservation
+    // 的 containsOfficialCuaImageRefCredentialText）。这里取 256KiB~257KiB 之间：
+    // 超出 resultBudget 触发截断路径，又不触发凭据防护，验证 receipt 不被预算改写。
+    const oversizedState = `state_id=s-2 app=Example\n${"tree-node ".repeat(26_300)}`;
     const receipt = cuaActionReceipt();
     registerMcpTools(
       registry,

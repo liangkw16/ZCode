@@ -69,7 +69,7 @@ export function formatSkillLine(
     // 字符预算使用 UTF-16 length，但不能把截断点上的代理对拆成无效 Unicode。
     trimmed = `${description.slice(0, end).replace(/[\uD800-\uDBFF]$/u, "")}${DESCRIPTION_ELLIPSIS}`;
   }
-  return `- ${skillDisplayName(skill)}: ${trimmed}${bareAliasSuffix(skill)} (file: ${skill.path})`;
+  return `- ${skillDisplayName(skill)}: ${trimmed}`;
 }
 
 export function skillDisplayName(skill: SkillMetadata): string {
@@ -83,12 +83,6 @@ function skillPurpose(skill: SkillMetadata): string {
     .join(" - ");
   // 无 frontmatter 的兼容技能允许空描述；明确缺失，不凭名字猜用途或触发自动加载。
   return purpose || MISSING_SKILL_PURPOSE;
-}
-
-function bareAliasSuffix(skill: SkillMetadata): string {
-  return skill.qualifiedName && skill.qualifiedName !== skill.name
-    ? ` (also loadable as ${skill.name})`
-    : "";
 }
 
 function compareCodeUnits(left: string, right: string): number {

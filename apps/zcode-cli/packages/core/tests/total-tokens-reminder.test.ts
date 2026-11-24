@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { TOTAL_TOKENS_SYSTEM_LINE } from "../src/context/total-tokens.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, onTestFinished } from "vitest";
@@ -24,11 +25,12 @@ import { createTestSessionEventStore } from "./test-event-store.js";
 import { createRecordingSubagentSessionStore } from "./subagent-test-store.js";
 
 // 开关默认关闭，每个 runtime 创建时从 runtimeConfig.totalTokensReminder.enabled 读一次。
-// 本文件默认在新建 runtime 时打开；undefined 表示不传配置，验证缺省关闭。
-const reminderSwitch: { enabled: boolean | undefined } = { enabled: true };
+// v4 合并后为门控语义：默认 undefined（缺省关闭），「retired」组用例验证缺省不产生虚拟余额；
+// 需要打开的用例在各自测试里显式置 true。
+const reminderSwitch: { enabled: boolean | undefined } = { enabled: undefined };
 
 beforeEach(() => {
-  reminderSwitch.enabled = true;
+  reminderSwitch.enabled = undefined;
 });
 
 function reminderConfig(): { totalTokensReminder?: { enabled: boolean } } {
@@ -342,7 +344,7 @@ describe("virtual token reminders are retired", () => {
         nodeVersion: "24.14.0",
         isGitRepository: false,
       },
-      totalTokensReminder: true,
+      totalTokensReminder: false,
     }).build();
     const tail = String(built.systemMessages.at(-1)?.content);
     expect(tail.endsWith("this note is about report files.)")).toBe(true);

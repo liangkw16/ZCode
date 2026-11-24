@@ -1,3 +1,4 @@
+import type { InputAttachmentCollectionReason } from "../helpers/total-tokens-budget.js";
 import type { ToolSearchDelivery } from "@zcode/contracts";
 import { OFF_PEAK_EXECUTION_TOOL_DENYLIST } from "@zcode/shared";
 import type {

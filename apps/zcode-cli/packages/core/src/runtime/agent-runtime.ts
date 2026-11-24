@@ -1,3 +1,4 @@
+import { createTotalTokensBudgetState, type TotalTokensBudgetState } from "./helpers/total-tokens-budget.js";
 import {
   createBorrowedSubagentMcpAccess,
   isBorrowedMcpPort,
@@ -172,6 +173,7 @@ export class AgentRuntime {
     );
   }
   private sessionId: SessionId;
+  private totalTokensBudget: TotalTokensBudgetState = createTotalTokensBudgetState();
   private turnNumber: number;
   private config: AgentRuntimeConfig;
   private appVersion: string;

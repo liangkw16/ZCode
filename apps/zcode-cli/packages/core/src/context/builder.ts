@@ -27,6 +27,7 @@ import {
   buildFinishingWorkSection,
   buildMemoryNotesSection,
   buildSessionGuidanceSection,
+  buildTotalTokensSection,
 } from "./dynamic-sections.js";
 
 // -----------------------------------------------

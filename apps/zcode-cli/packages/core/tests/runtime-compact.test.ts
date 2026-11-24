@@ -2336,9 +2336,11 @@ describe("AgentRuntime manual compact", () => {
         resumedRuntime as unknown as { readFileState: Map<string, unknown> }
       ).readFileState;
       // 补回正文仍在上下文中，读取快照必须同行恢复；外部修改不能被重新认证为已读。
+      // v4 合并：持久化快照改为只存 contentSha256（见 read-file-state-content-hash.test.ts），
+      // 冷恢复记录不再带 content；stale-guard 用哈希比较，行为不变。
       expect(resumedReadFileState.size).toBe(1);
       expect(resumedReadFileState.get(createReadFileStatePathKey(filePath))).toMatchObject({
-        content: "export const persisted = 42;\n",
+        contentSha256: expect.any(String),
         revisionId: "revision:export const persisted = 42;\n",
       });
       const edit = await resumedRuntime.getToolExecutor().execute({
@@ -3194,7 +3196,7 @@ describe("AgentRuntime manual compact", () => {
     { finishReason: "length", providerMetadata: undefined },
     { finishReason: "other", providerMetadata: { rawFinishReason: "max_tokens" } },
   ])(
-    "warns when a compact summary with text ends at the output limit ($finishReason)",
+    "regenerates instead of accepting a truncated summary at the output limit ($finishReason)",
     async ({ finishReason, providerMetadata }) => {
       const logger = {
         child: () => logger,
@@ -3204,6 +3206,8 @@ describe("AgentRuntime manual compact", () => {
         warn: vi.fn(),
       };
       const truncatedSummary = "<analysis>long</analysis>\n<summary>1. Primary Request";
+      const completeSummary =
+        "<analysis>short</analysis>\n<summary>1. Primary Request and Intent: regenerate.</summary>";
       const runtime = createTestAgentRuntime(
         createSessionId(`runtime-compact-summary-output-limit-${finishReason}`),
         { systemPrompt: "You are a compact output limit test agent." },
@@ -3214,6 +3218,13 @@ describe("AgentRuntime manual compact", () => {
             withStreamTextFromGenerateText({
               async generateText(request) {
                 const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                if (lastContent.includes("Rewrite the complete handoff")) {
+                  return {
+                    finishReason: "stop",
+                    text: completeSummary,
+                    usage: { inputTokens: 20, outputTokens: 500, totalTokens: 520 },
+                  };
+                }
                 if (lastContent.includes("create a detailed summary")) {
                   return {
                     finishReason,
@@ -3242,24 +3253,21 @@ describe("AgentRuntime manual compact", () => {
       await runtime.executeTurn("second output limit setup");
       await runtime.executeTurn("/compact");
 
-      const warning = logger.warn.mock.calls
+      // kcode 硬化语义（合并取舍）：截断摘要不落库，带更短重写指令重生成一次后成功。
+      // 上游 v4 的「告警后接受半截摘要」与本仓事故驱动设计冲突，此处按本仓契约改写。
+      const retryNotice = logger.info.mock.calls
         .map((call) => call[1])
-        .find((context) => context?.event === "compact.summary.output_limit");
-      expect(warning).toMatchObject({
-        finishReason,
-        outputBudget: { limit: 21_000, output: 21_000, reasoning: 12_000 },
-        textLength: truncatedSummary.length,
-        trigger: CompactTrigger.Manual,
-      });
-      // 只记录，不改变落库逻辑：截断的摘要仍完成压缩。
+        .find((context) => context?.event === "compact.summary.output_limit.retry");
+      expect(retryNotice).toMatchObject({ finishReason });
       const runtimeInternals = runtime as unknown as {
         messageHistory: { borrowReadOnlyRuntimeEntries(): readonly RuntimeMessageEntry[] };
       };
-      expect(
-        runtimeInternals.messageHistory
-          .borrowReadOnlyRuntimeEntries()
-          .some((entry) => String(entry.message.content).includes("1. Primary Request")),
-      ).toBe(true);
+      const historyText = runtimeInternals.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .map((entry) => String((entry as { message?: { content?: unknown } }).message?.content ?? ""))
+        .join("\n");
+      expect(historyText).toContain("1. Primary Request and Intent: regenerate.");
+      expect(historyText).not.toContain(truncatedSummary);
     },
   );
 

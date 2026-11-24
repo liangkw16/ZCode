@@ -319,6 +319,7 @@ export {
   selectCompactSummaryText,
   shouldAutoCompact,
   buildDefaultMicrocompactThreshold,
+  MAX_OUTPUT_TOKENS_FOR_SUMMARY,
 } from "../compact/index.js";
 export type { AutoCompactPolicyConfig } from "../compact/index.js";
 export type { AutoCompactTokenOverride } from "../compact/index.js";

@@ -1,3 +1,4 @@
+import type { TotalTokensBudgetState } from "./helpers/total-tokens-budget.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 import type { McpSession } from "../mcp/runtime/session.js";
 import { PermissionService, ToolScheduler } from "./deps.js";
@@ -203,6 +204,8 @@ export interface AgentRuntimeInternal
   latestAssistantMessageId?: MessageId;
   latestAssistantTurnId?: TurnId;
   mainTurnCacheHitAggregate: MainTurnCacheHitAggregate;
+  /** token 预算倒数的计数器；只在内存，resume 时重新开始。 */
+  totalTokensBudget: TotalTokensBudgetState;
   currentTurnFileChanges: RuntimeTurnFileChangeMap;
   lastAssistantCompletedAtMs?: number;
   autoCompactConsecutiveFailures: number;

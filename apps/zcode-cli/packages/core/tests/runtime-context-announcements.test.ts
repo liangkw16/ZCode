@@ -1067,7 +1067,7 @@ describe("runtime context announcements", () => {
     expect(listings[0]!.content).toBe(liveListing.content);
     expect(listings[1]!.content).toBe(
       "The following skills are available for use with the Skill tool:\n\n" +
-        "- review: review things (file: /workspace/.agents/skills/review/SKILL.md)",
+        "- review: review things",
     );
     expect(historyIndexOfListing(cold)).toBe(liveIndex);
     const lastRequest = JSON.stringify(requests.at(-1)?.messages);

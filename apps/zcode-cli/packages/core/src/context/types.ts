@@ -47,7 +47,8 @@ export type ContextSource =
   | "context_management" // 长上下文管理提示
   | "finishing_work" // 收尾：不在欠着工作时停下
   | "memory_notes" // 记忆保存与笔记的取舍规则
-  | "total_tokens" // 固定的 token 预算行  | "desktop_context"; // ZCode Desktop 渲染与交互协议
+  | "total_tokens" // 固定的 token 预算行
+  | "desktop_context"; // ZCode Desktop 渲染与交互协议
 
 export type ContextInjectionTarget = "system" | "meta_user";
 

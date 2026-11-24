@@ -1,3 +1,26 @@
+const SOURCE_DERIVED_WEBFETCH_DESCRIPTION = [
+  "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.",
+  "",
+  "- Fails on authenticated/private URLs — use an authenticated MCP tool or `gh` for those instead.",
+  "- Fails on localhost and other hostnames without a dot; for a local server, use curl via Bash.",
+  "- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.",
+  "- Responses are cached for 15 minutes per URL.",
+].join("\n");
+
+const SOURCE_DERIVED_READ_SHORT_DESCRIPTION = [
+  "Reads a file from the local filesystem.",
+  "",
+  "- `file_path` must be an absolute path.",
+  "- Reads up to 2000 lines by default.",
+  "- When you already know which part of the file you need, only read that part. This can be important for larger files.",
+  "- Results are returned using cat -n format, with line numbers starting at 1",
+  "- Reads images (PNG, JPG, …) and presents them visually.",
+  // video 输入一期新增能力行：Read 支持读取视频作为模型输入。
+  "- Reads videos (MP4, MOV, WEBM, …) and presents them as video input (subject to ZCode's video input limit).",
+  "- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.",
+  "- Do NOT re-read a file you just edited to verify — Edit/Write would have errored if the change failed, and the harness tracks file state for you.",
+].join("\n");
+
 import { describe, expect, it, vi } from "vitest";
 import { AgentInputSchema, BashInputJsonSchema, BashOutputJsonSchema } from "@zcode/contracts";
 import { agentToolEntry } from "../src/tool/handlers/agent.js";
@@ -405,7 +428,9 @@ describe("tool contract declarations", () => {
     expect(byName.get("Agent")?.outputSchema).toBeDefined();
     expect(byName.get("Agent")?.inputSchema).not.toHaveProperty("properties.subagent_type.enum");
     expect(byName.get("Agent")?.inputSchema).not.toHaveProperty("properties.model");
-    expect(byName.get("Agent")?.inputSchema).toHaveProperty("properties.run_in_background.type");
+    // v4：Agent 默认常驻后台（alwaysBackground），暴露 schema 不含 run_in_background；
+    // 开关关闭时才用 AgentInputWithBackgroundSchema（见 07-subagent.md「ZCode 当前实现」）。
+    expect(byName.get("Agent")?.inputSchema).not.toHaveProperty("properties.run_in_background");
     expect(byName.get("Agent")?.permission?.sideEffectScope).toBe("session");
 
     const agentDescription = byName.get("Agent")?.description ?? "";
@@ -507,15 +532,17 @@ describe("tool contract declarations", () => {
       [
         "Executes a bash command and returns its output.",
         "",
-        "- Working directory persists between calls, but prefer absolute paths — `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",
+        "- `cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder; otherwise it stays where it was. Prefer absolute paths — `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",
         "- IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.",
         "- Command output is displayed to you, not reliably to the user.",
+        "- Workspace-controlled adb executables are blocked. Installed SDK adb outside the workspace is allowed; bare adb resolves through SDK paths and absolute PATH entries. Use an SDK absolute path if it is only configured in shell startup files. Android MCP tools are optional.",
         "- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.",
-        "- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.",
+        "- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed. Foreground `sleep` of 25 seconds or more is blocked; to wait on a condition, run an until-loop with `run_in_background`.",
         "",
         "# Git",
         "- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.",
         "- Use the `gh` CLI for GitHub operations (PRs, issues, API).",
+        "- GitHub notifies the owner of any `@name` written in a PR, issue, or comment. Write a bare `@name` only for a real login you mean to notify. Put roles, placeholders, and code (`@human`, `@reviewer`, `@types/node`) in backticks or drop the `@`, even when copied from project files.",
         "- Commit or push only when the user asks. If on the default branch, branch first.",
       ].join("\n"),
     );
@@ -1154,15 +1181,17 @@ describe("tool contract declarations", () => {
       [
         "Executes a bash command and returns its output.",
         "",
-        "- Working directory persists between calls, but prefer absolute paths — `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",
+        "- `cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder; otherwise it stays where it was. Prefer absolute paths — `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",
         "- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.",
         "- Command output is displayed to you, not reliably to the user.",
+        "- Workspace-controlled adb executables are blocked. Installed SDK adb outside the workspace is allowed; bare adb resolves through SDK paths and absolute PATH entries. Use an SDK absolute path if it is only configured in shell startup files. Android MCP tools are optional.",
         "- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.",
-        "- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.",
+        "- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed. Foreground `sleep` of 25 seconds or more is blocked; to wait on a condition, run an until-loop with `run_in_background`.",
         "",
         "# Git",
         "- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.",
         "- Use the `gh` CLI for GitHub operations (PRs, issues, API).",
+        "- GitHub notifies the owner of any `@name` written in a PR, issue, or comment. Write a bare `@name` only for a real login you mean to notify. Put roles, placeholders, and code (`@human`, `@reviewer`, `@types/node`) in backticks or drop the `@`, even when copied from project files.",
         "- Commit or push only when the user asks. If on the default branch, branch first.",
       ].join("\n"),
     );

@@ -139,6 +139,9 @@ export interface CompactModelOverrideResolution {
  * - 未设置的字段剔除，不得以 undefined 覆盖模型窗口或全局值（omitUndefined 语义）；
  * - 结果剥离 modelOverrides 键，避免配置结构泄漏进阈值计算。
  */
+/** 摘要请求的固定输出上限 token（kcode：与 auto reserve 方案二选一，本仓保留固定 20K）。 */
+export const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000;
+
 export function applyCompactModelOverrides(
   config: AutoCompactPolicyConfig,
   model: { providerId: string; modelId: string },

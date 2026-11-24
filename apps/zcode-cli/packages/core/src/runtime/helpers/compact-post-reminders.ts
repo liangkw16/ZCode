@@ -94,13 +94,12 @@ export async function buildPostCompactFileRestore(input: {
           ...requestedPathField(candidate.requestedPath, restored.readFileStateEntry.path),
         }
       : undefined;
-    restore.entries.push({
-      ...systemReminderAttachmentEntry("resume_referenced_session_context", restored.content),
-      // 冷恢复不能只恢复正文却丢掉已读证据；引用提示不代表模型看过完整文件。
-      ...(readFileStateEntry && !readFileStateEntry.isPartialView
-        ? { readFileState: readFileStateEntry }
-        : {}),
-    });
+    restore.entries.push(...restored.entries);
+    // 冷恢复不能只恢复正文却丢掉已读证据；完整视图时把读取状态挂到正文条目上。
+    if (readFileStateEntry && !readFileStateEntry.isPartialView) {
+      const contentEntry = restore.entries.at(-1) as RuntimeAttachmentEntry | undefined;
+      if (contentEntry) contentEntry.readFileState = readFileStateEntry;
+    }
     if (readFileStateEntry) restore.readFileStateEntries.push(readFileStateEntry);
   });
   return restore;

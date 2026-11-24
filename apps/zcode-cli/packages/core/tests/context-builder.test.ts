@@ -63,6 +63,8 @@ const EXPECTED_MEMORY_NOTES_PROMPT = [
   "Don't create planning, decision, or analysis documents unless the user asks for them \u2014 work from the context, not intermediate files.",
 ].join("\n");
 
+const TOTAL_TOKENS_LINE = "<total_tokens>15000000 tokens left</total_tokens>";
+
 const REMOVED_AUTONOMY_PARAGRAPHS = [
   "You are operating autonomously.",
   "Exception: when the user is describing a problem",
@@ -1578,7 +1580,8 @@ describe("ContextBuilder meta user context", () => {
     );
 
     expect(content).toContain("superpowers:test-driven-development");
-    expect(content).toContain("also loadable as test-driven-development");
+    // kcode 行格式：不带 (also loadable as …) 别名后缀。
+    expect(content).not.toContain("also loadable as");
   });
 });
 

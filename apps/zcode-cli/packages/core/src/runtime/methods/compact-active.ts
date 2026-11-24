@@ -65,6 +65,7 @@ import {
   restateContextAfterCompact,
 } from "./context-refresh.js";
 import type { CompactTimelineContext, RuntimeModelTextResult } from "../types.js";
+import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import {
   legacySyntheticRuntimeMetadata,
@@ -91,6 +92,8 @@ import {
 import { runCompactSummaryModelRequest } from "./compact-summary-model-request.js";
 
 import { createRefreshRuntimeHeadersBeforeModelAttempt } from "./model-runtime-headers.js";
+import { resolveAutoCompactPolicyConfig } from "./model-token-limits.js";
+import { applyCompactModelOverrides } from "../../compact/index.js";
 import { recordModelUsageFact } from "./usage-observability.js";
 import { resetProjectMemoryRecall } from "../helpers/project-memory-recall.js";
 import { createRuntimeModel } from "./runtime-model.js";
@@ -395,7 +398,10 @@ async function compactActiveConversationImpl(
         const networkEventStartIndex = events.length;
         const compactSummaryMaxOutputTokens = capCompactSummaryMaxOutputTokens(
           compactModel,
-          this.config.compact,
+          applyCompactModelOverrides(
+            resolveAutoCompactPolicyConfig(this, compactModel),
+            { providerId: compactModel.providerId, modelId: compactModel.modelId },
+          ).config,
         );
         // 输出重生成和媒体重试也是真实请求，不能沿用 PTL 次数导致 usage 主键覆盖。
         const usageAttemptIndex = compactRequestAttempt++;
@@ -485,10 +491,10 @@ async function compactActiveConversationImpl(
           toolCallCount: this.extractToolCallsFromResult(result).length,
           traceContext: modelTraceContext,
         });
-        if (this.extractToolCallsFromResult(result).length > 0) {
-          formatCompactSummaryOrThrow(this, result);
-        }
         // 输出截断不是输入超窗，不能靠丢旧轮次让半截摘要变成成功；恢复预算属于整次 operation。
+        // 合并取舍：上游 v4 对「有正文的截断」是告警后接受；本仓保留 kcode 事故驱动的硬化语义——
+        // 未闭合/半截摘要一律重生成一次，仍截断才报错。warnCompactSummaryOutputLimit 保留给
+        // 非截断路径的观测（上游合并产物），不再作为接受半截摘要的依据。
         if (
           isOutputTokenLimitFinishReason(
             result.finishReason,
@@ -519,11 +525,6 @@ async function compactActiveConversationImpl(
             preCompactTokenCount,
           });
         }
-        warnCompactSummaryOutputLimit(this, result, {
-          maxOutputTokens: compactSummaryMaxOutputTokens,
-          traceContext: modelTraceContext,
-          trigger,
-        });
         break;
       }
 
@@ -761,8 +762,10 @@ async function compactActiveConversationImpl(
           model: compactModel,
           operationId: compactTimeline.operationId,
           completedTimeline: compactCompletedPayload,
-          leadingReminderEntries,
-          postCompactReminderEntries,
+          created: compactCreated,
+          leadingReminderEntries: leadingEntries,
+          postCompactReminderEntries: postCompactAttachmentEntries,
+          toolSearchDelivery,
         },
       );
 

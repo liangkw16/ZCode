@@ -39,8 +39,8 @@ describe("skills listing delta", () => {
     // 字面量锁定字节：改为增量前 builder 渲染的完整列表就是这段文字。
     expect(entry.content).toBe(
       "The following skills are available for use with the Skill tool:\n\n" +
-        "- alpha: alpha skill (file: /skills/alpha/SKILL.md)\n" +
-        "- beta: beta skill (file: /skills/beta/SKILL.md)",
+        "- alpha: alpha skill\n" +
+        "- beta: beta skill",
     );
     expect(entry.metadata.source).toBe("skills_listing");
     expect(entry.metadata.skillsListingDelta?.names).toEqual(["alpha", "beta"]);
@@ -55,7 +55,7 @@ describe("skills listing delta", () => {
     const added = collect([skill("alpha"), skill("beta"), skill("gamma")], [initial])!;
     expect(added.content).toBe(
       "The following skills are available for use with the Skill tool:\n\n" +
-        "- gamma: gamma skill (file: /skills/gamma/SKILL.md)",
+        "- gamma: gamma skill",
     );
     expect(added.metadata.skillsListingDelta?.names).toEqual(["gamma"]);
     // 删除不发通知；用相同内容恢复也不重发。
@@ -66,11 +66,13 @@ describe("skills listing delta", () => {
     expect(changed.content).toContain("- alpha: new text");
   });
 
-  it("degrades a batch over budget to names without re-announcing it later", () => {
+  it("degrades an over-budget batch to shortened purposes without re-announcing it later", () => {
     const skills = [skill("alpha", "x".repeat(200)), skill("beta", "y".repeat(200))];
-    const entry = collect(skills, [], { budget: 200 })!;
-    expect(entry.content).toContain("- alpha (file: /skills/alpha/SKILL.md)");
-    expect(entry.content).not.toContain("xxx");
+    const entry = collect(skills, [], { budget: 400 })!;
+    // kcode 行格式（无 file 后缀）：降级先均匀缩短用途，再省略条目，不一步删光描述。
+    expect(entry.content).toContain("- alpha: ");
+    // 缩短档截断到 80 字符 + 省略号，完整 200 字符描述不应整体保留。
+    expect(entry.content).not.toContain("x".repeat(120));
     // 指纹按完整格式计算：之后预算变大也不重发同一批 skill。
     expect(collect(skills, [entry])).toBeUndefined();
   });

@@ -1,9 +1,12 @@
 import {
   COMPACT_PROMPT_TOO_LONG_USER_MESSAGE,
+  hasCompactSummaryBlock,
+  selectCompactSummaryText,
   CoreErrorType,
   SessionEventType,
   isCoreError,
   MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+  getAutoCompactOutputReserveTokens,
   createCoreError,
   formatCompactSummary,
   traceContextToLogContext,
@@ -182,24 +185,22 @@ export function buildCompactSummaryRequestMessages(
 export function formatCompactSummaryOrThrow(
   runtime: AgentRuntimeInternal,
   result: RuntimeModelTextResult,
+  traceContext?: TraceContext,
 ): string {
   const compactToolCalls = runtime.extractToolCallsFromResult(result);
   if (compactToolCalls.length > 0) {
-    throw createCoreError(CoreErrorType.ModelError, COMPACT_TOOL_USE_DENIAL_MESSAGE, {
-      context: {
-        behavior: "deny",
-        decisionReason: {
-          reason: COMPACT_TOOL_USE_DENIAL_REASON,
-          type: "other",
-        },
-        toolNames: compactToolCalls.map((toolCall) => toolCall.name),
-      },
-      recoverable: true,
-      retryable: false,
+    runtime.logger?.info("Compact summary reply called tools; ignoring them", {
+      ...(traceContext ? traceContextToLogContext(traceContext) : {}),
+      event: "compact.summary.tool_calls_ignored",
+      module: "core.runtime",
+      toolNames: compactToolCalls.map((toolCall) => toolCall.name),
     });
   }
 
-  const summary = formatCompactSummary(result.text);
+  const text = selectCompactSummaryText(result);
+  // 带工具调用时，选出的块里没有摘要就不用它（例如调用工具前的开场白），按没有摘要失败。
+  const usable = compactToolCalls.length === 0 || hasCompactSummaryBlock(text);
+  const summary = usable ? formatCompactSummary(text) : "";
   if (!summary) {
     throw createCoreError(CoreErrorType.ModelError, "Failed to generate compact summary", {
       recoverable: true,
@@ -258,10 +259,13 @@ export function capCompactSummaryMaxOutputTokens(
   config: AutoCompactPolicyConfig | undefined,
 ): number {
   const configured = config?.summaryMaxOutputTokens;
+  // 合并自上游 v4：未显式配置 summaryMaxOutputTokens 时，摘要上限取 Auto Compact 输出预留
+  // （触发压缩时这部分窗口正好留给摘要，大窗口按窗口比例加大），不再固定 20K。
+  // 不按 usage 估算剩余窗口：截断旧轮或剥离媒体后重试时，留下的旧 usage 已过期，会算错上限。
   const summaryCap =
     typeof configured === "number" && Number.isFinite(configured) && configured > 0
       ? Math.floor(configured)
-      : MAX_OUTPUT_TOKENS_FOR_SUMMARY;
+      : getAutoCompactOutputReserveTokens(config);
   // Compact 是独立执行链，在这里显式选择模型上限与 summary 上限中的较小值。
   const desired = Math.min(
     resolveNormalRequestMaxOutputTokens({

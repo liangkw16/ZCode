@@ -302,7 +302,7 @@ usable, so keep the default.
 ```
 list_apps({})
 list_windows({app_ref})
-get_app_state({app_ref, include_screenshot?=false, disable_diffing?=false})
+get_app_state({app_ref, include_screenshot?=true, disable_diffing?=false})
 
 left_click({target, mouse_button?="left", click_count?=1, modifiers?="",
            strategy?, app_ref?, return_state?})
@@ -326,7 +326,11 @@ Argument shapes: `app_ref` / `app` is an `AppRef`, but a bare string here is
 read as a bundle id, so pass `{name: "Notes"}` for a display name.
 `scroll_direction` is `up|down|left|right`, `scroll_amount` is pages, `strategy`
 is `auto|a11y|event`, and `return_state` is `compact|full|none` to return the app
-state in the same call. For `target`, `text_range`, `modifiers` and the response
+state in the same call. An explicit strategy forces that path and is refused, with
+nothing sent, when the action has no such path: `a11y` serves element clicks,
+`scroll`, `set_value`, `select_text` and `perform_action`; `event` serves clicks,
+drags, `scroll`, `type`, `key` and `paste`. For `target`, `text_range`, `modifiers`
+and the response
 shapes, see `nodeRepl.write(await agent.documentation.get("computer-use"))`.
 
 On macOS, one scroll page is 80% of the target window’s size on the requested axis. Re-observe the viewport to confirm movement; a successful dispatch alone does not prove it scrolled.

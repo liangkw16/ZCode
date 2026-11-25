@@ -558,3 +558,46 @@ it("forwards trusted turn context to presentation without accepting it as a mode
     turn_id: "trusted-turn",
   });
 });
+it("honors the documented key repeat, type target focus and whole-value select_text", async () => {
+  const f = await fixture();
+  const base = { app_ref: { pid: 700 } },
+    target = { type: "element", index: 0 };
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+
+  // 文档约定 key 用 repeat 重发和弦，而不是让调用方循环。
+  const key = await f.run("key", { ...base, text: "enter", repeat: 3 });
+  expect(key.isError, JSON.stringify(key)).not.toBe(true);
+  expect(f.calls.filter((c) => c.method === "press_key_to_app")).toHaveLength(3);
+
+  // 文档约定 type 可带 target：元素先聚焦再输入。
+  const typed = await f.run("type", { ...base, text: "hello", target });
+  expect(typed.isError, JSON.stringify(typed)).not.toBe(true);
+  expect(f.calls.slice(-2).map((c) => c.method)).toEqual(["element_focus", "type_text_to_app"]);
+  expect(f.calls.at(-2)?.params).toMatchObject({ native: "token1" });
+
+  // 文档约定不带 text_range 时选中整个值；夹具里的值是 "中文🌟"（UTF-16 长度 4）。
+  const selected = await f.run("select_text", { ...base, target });
+  expect(selected.isError, JSON.stringify(selected)).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "element_select_text",
+    params: { text_range: [0, 4] },
+  });
+
+  // 文档里的修饰键是 "+" 分隔的和弦字符串。
+  const clicked = await f.run("left_click", { ...base, target, modifiers: "cmd+Shift" });
+  expect(clicked.isError, JSON.stringify(clicked)).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({ method: "click", params: { modifiers: ["cmd", "shift"] } });
+
+  // 显式 strategy 强制走那一条路径：a11y 做不到的事明确拒绝，不静默改发事件，也不派发任何原生调用。
+  for (const [name, args] of [
+    ["left_click", { ...base, target, modifiers: "cmd", strategy: "a11y" }],
+    ["key", { ...base, text: "a", strategy: "a11y" }],
+    ["set_value", { ...base, target, value: "x", strategy: "event" }],
+  ] as const) {
+    const sent = f.calls.length;
+    const refused = await f.run(name, args);
+    expect(refused.isError, `${name} should refuse`).toBe(true);
+    expect(f.calls.length).toBe(sent);
+  }
+  expect(f.calls.filter((c) => c.method === "press_key_to_app")).toHaveLength(3);
+});

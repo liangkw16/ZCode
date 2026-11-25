@@ -159,7 +159,7 @@ await agent.computerUse.computer.get_app_state({
 ```
 list_apps({})
 list_windows({app_ref})
-get_app_state({app_ref, include_screenshot?=false, disable_diffing?=false})
+get_app_state({app_ref, include_screenshot?=true, disable_diffing?=false})
 
 left_click({target, mouse_button?="left", click_count?=1, modifiers?="",
            strategy?="auto", app_ref?, return_state?="none"})
@@ -196,12 +196,17 @@ stop_computer_control({reason?})
 - `text_range` — `[start, length]` into the element's current value. `select_text`
   without it selects the whole value.
 - `strategy` — `auto | a11y | event`. `auto` prefers accessibility and falls back
-  to synthetic events; the other two force one path. The bound macOS `scroll`
-  defaults to its window-scoped event backend because native AX scroll is not
-  implemented; explicit `a11y` is preserved and fails if unsupported. `event` sends global input and
+  to synthetic events; the other two force one path and are refused, with nothing
+  sent, when the action has no such path. `a11y` serves `left_click`, `scroll`,
+  `set_value`, `select_text` and `perform_action` on an element; `event` serves
+  `left_click`, `left_click_drag`, `scroll`, `type`, `key` and `paste`. `event`
+  sends global input and
   requires the target app (and `window_id`, when given) to be frontmost already —
   it never activates anything, so on a background app it is refused with
   `FOREGROUND_REQUIRED` and nothing is sent. Target an element instead.
+- `get_app_state` captures a raster unless `include_screenshot` is `false`; the
+  raster is what a coordinate target binds to, so a tree-only observation cannot
+  be followed by a coordinate action.
 - `return_state` — `compact | full | none` (default `none`). Returns the app state
   in the same call, saving a separate observation. The bound API does its own
   observing, so this only matters when you call a tool directly.

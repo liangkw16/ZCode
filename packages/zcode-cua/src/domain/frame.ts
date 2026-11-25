@@ -61,6 +61,13 @@ export function containsImageRefAuthority(value: unknown): boolean {
 export function sha256Hex(bytes: Uint8Array) {
   return Array.from(sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 }
+/** 按 UTF-16 码元上限截断，且不在代理对中间切开：星体字符、emoji 不会变成半个。 */
+export function truncateUtf16(text: string, maxUnits: number): string {
+  if (text.length <= maxUnits) return text;
+  const cut = text.slice(0, maxUnits);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
 export function readRasterEnvelopeIdentity(
   input: unknown,
 ): { mimeType: string; width: number; height: number; orientation?: number } | undefined {

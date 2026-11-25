@@ -99,30 +99,68 @@ const schemas: Record<string, string[]> = {
   ],
   scroll: ["app_ref", "target", "scroll_direction", "scroll_amount", "strategy", "return_state"],
   left_click_drag: ["app_ref", "from_target", "to", "modifiers", "strategy", "return_state"],
-  type: ["app_ref", "text", "return_state"],
-  set_value: ["app_ref", "target", "value", "return_state"],
+  // 修复原因：键集合原先比给模型看的工具文档（docs/computer-use.md）窄——type 的 target/strategy、
+  // set_value 的 strategy、key 的 repeat 都会被判成 unknown key，在派发前拒绝。这里对齐文档契约。
+  type: ["app_ref", "text", "target", "strategy", "return_state"],
+  set_value: ["app_ref", "target", "value", "strategy", "return_state"],
   select_text: ["app_ref", "target", "text_range", "return_state"],
-  key: ["app_ref", "text", "hold_seconds", "strategy", "return_state"],
+  key: ["app_ref", "text", "repeat", "hold_seconds", "strategy", "return_state"],
   perform_action: ["app_ref", "target", "action", "return_state"],
   paste: ["app_ref", "text", "format", "return_state"],
   request_access: [],
   stop_computer_control: [],
 };
+const MODIFIER_NAMES = [
+  "cmd",
+  "command",
+  "ctrl",
+  "control",
+  "alt",
+  "option",
+  "shift",
+  "meta",
+  "super",
+] as const;
+export const KEY_REPEAT_MAX = 100;
+// 文档约定 modifiers 是 "+" 分隔的和弦字符串（如 "cmd+shift"），空串表示没有修饰键；
+// 原生侧使用名称数组。原先只收数组，SDK 透传的字符串在派发前就被拒绝。
+function modifiers(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  const parts = typeof value === "string" ? value.split("+") : value;
+  if (!Array.isArray(parts) || parts.length > 4) fail("Invalid modifiers");
+  const names: string[] = [];
+  for (const part of parts) {
+    if (typeof part !== "string") fail("Invalid modifiers");
+    const name = part.trim().toLowerCase();
+    if (name === "" && typeof value === "string" && parts.length === 1) break;
+    if (!(MODIFIER_NAMES as readonly string[]).includes(name) || names.includes(name))
+      fail("Invalid modifiers");
+    names.push(name);
+  }
+  return names;
+}
 export function validateRequest(name: string, input: unknown): Bag {
   if (!(MODEL_TOOLS as readonly string[]).includes(name))
     throw new RequestError("method_not_found", "Unknown computer-use tool");
   const args = shape(copy(input ?? {}), schemas[name], "arguments");
   if (schemas[name].includes("app_ref")) args.app_ref = appReference(args.app_ref);
+  // type 的 target 是可选的（文档 type({text, target?})），缺省时输入到当前焦点；其余动作的目标必填。
   for (const key of ["target", "from_target", "to"])
-    if (schemas[name].includes(key)) args[key] = target(args[key]);
+    if (schemas[name].includes(key) && !(name === "type" && args[key] === undefined))
+      args[key] = target(args[key]);
   for (const key of ["include_screenshot", "disable_diffing", "tree_shown_to_model"])
     if (args[key] !== undefined && typeof args[key] !== "boolean") fail(`${key} must be boolean`);
   for (const key of ["text", "value", "action"])
     if (schemas[name].includes(key) && typeof args[key] !== "string") fail(`${key} must be text`);
   if (args.return_state !== undefined && !["none", "compact", "full"].includes(args.return_state))
     fail("return_state must be none, compact or full");
-  if (args.strategy !== undefined && !["auto", "event", "ax"].includes(args.strategy))
-    fail("Unsupported strategy");
+  // 文档写作 "a11y"，内部与原生侧的名称是 "ax"。
+  if (args.strategy !== undefined) {
+    const strategy = args.strategy === "a11y" ? "ax" : args.strategy;
+    if (typeof strategy !== "string" || !["auto", "ax", "event"].includes(strategy))
+      fail("Unsupported strategy");
+    args.strategy = strategy;
+  }
   if (args.mouse_button !== undefined && !["left", "right", "middle"].includes(args.mouse_button))
     fail("Invalid mouse button");
   if (
@@ -144,8 +182,12 @@ export function validateRequest(name: string, input: unknown): Bag {
     (typeof args.hold_seconds !== "number" || args.hold_seconds < 0 || args.hold_seconds > 30)
   )
     fail("hold_seconds must be 0..30");
+  if (args.repeat !== undefined && (!positiveInteger(args.repeat) || args.repeat > KEY_REPEAT_MAX))
+    fail(`repeat must be 1..${KEY_REPEAT_MAX}`);
+  // 文档约定 select_text 不带 text_range 时选中整个值，范围由运行时按观测到的元素值补齐。
   if (
     name === "select_text" &&
+    args.text_range !== undefined &&
     (!Array.isArray(args.text_range) ||
       args.text_range.length !== 2 ||
       !args.text_range.every((n: number) => Number.isSafeInteger(n) && n >= 0))
@@ -153,19 +195,7 @@ export function validateRequest(name: string, input: unknown): Bag {
     fail("text_range must be [start,length] integers");
   if (args.format !== undefined && !["text", "md", "html"].includes(args.format))
     fail("format must be text, md or html");
-  if (
-    args.modifiers !== undefined &&
-    (!Array.isArray(args.modifiers) ||
-      args.modifiers.length > 4 ||
-      !args.modifiers.every(
-        (m: unknown) =>
-          typeof m === "string" &&
-          ["cmd", "command", "ctrl", "control", "alt", "option", "shift", "meta", "super"].includes(
-            m.toLowerCase(),
-          ),
-      ))
-  )
-    fail("Invalid modifiers");
+  args.modifiers = modifiers(args.modifiers);
   return args;
 }
 export function sessionKey(context: Bag) {

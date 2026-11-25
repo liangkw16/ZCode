@@ -15,6 +15,7 @@ import {
   decodeFrameBase64,
   readRasterEnvelopeIdentity,
   sha256Hex,
+  truncateUtf16,
   OFFICIAL_CUA_FRAME_INTEGRITY_META_KEY,
 } from "../domain/frame.js";
 interface Observation {
@@ -172,13 +173,18 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       snapshot_mode: "full",
       truncated: raw.truncated === true,
     };
-    state.text = elements
-      .map(
-        (e: Bag) =>
-          `${"  ".repeat(Math.min(e.depth ?? 0, 12))}[${e.index}] ${e.kind ?? e.role}${e.title ? ` ${JSON.stringify(e.title)}` : ""}${e.value !== null && e.value !== undefined ? ` value=${JSON.stringify(e.value)}` : ""}${e.enabled === false ? " disabled" : ""}`,
-      )
-      .join("\n")
-      .slice(0, 48000);
+    // 修复原因：这里原先按 UTF-16 码元硬截断（slice(0, 48000)），标题或值里的 emoji、
+    // 生僻字可能被切成半个代理项，provider 收到孤立代理项直接拒绝整个请求（500）；
+    // 适配层的 toWellFormed 兜底只修发往 provider 的副本，落盘历史仍带半个字符。
+    state.text = truncateUtf16(
+      elements
+        .map(
+          (e: Bag) =>
+            `${"  ".repeat(Math.min(e.depth ?? 0, 12))}[${e.index}] ${e.kind ?? e.role}${e.title ? ` ${JSON.stringify(e.title)}` : ""}${e.value !== null && e.value !== undefined ? ` value=${JSON.stringify(e.value)}` : ""}${e.enabled === false ? " disabled" : ""}`,
+        )
+        .join("\n"),
+      48_000,
+    );
     const observation: Observation = {
       state,
       tokens,
@@ -272,7 +278,15 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
     t: Bag,
     app: Bag,
     s: Session,
-  ): { native?: string; point: Bag; guards: Bag; appRef: Bag; canPress?: boolean } {
+  ): {
+    native?: string;
+    point: Bag;
+    guards: Bag;
+    appRef: Bag;
+    canPress?: boolean;
+    /** 元素当前值的 UTF-16 长度；坐标目标或值不是文本时为 undefined。 */
+    valueLength?: number;
+  } {
     if (t.type === "element") {
       const observation = s.observations.find((o) => appMatches(o.state, app));
       const token = observation?.tokens.get(t.index),
@@ -287,6 +301,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         guards: {},
         appRef: { pid: observation!.state.app.pid, window_id: observation!.state.window.window_id },
         canPress: Array.isArray(element.actions) && element.actions.includes("AXPress"),
+        valueLength: typeof element.value === "string" ? element.value.length : undefined,
       };
     }
     const f = s.frame;
@@ -344,6 +359,8 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       }
       let method: string,
         params: Bag = { app_ref: args.app_ref };
+      // 主动作之前要先派发的步骤（type 带 target 时先聚焦或点击），与主动作同属一次在途输入。
+      const before: Array<{ method: string; params: Bag }> = [];
       const target = args.target ? resolveTarget(args.target, args.app_ref, s) : undefined;
       if (target) params.app_ref = target.appRef;
       if (name === "left_click") {
@@ -354,6 +371,12 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           (args.mouse_button ?? "left") === "left" &&
           (args.click_count ?? 1) === 1 &&
           !args.modifiers?.length;
+        // 文档约定显式 strategy 强制走那一条路径：点名 a11y 却没有可按的元素时不静默改发事件。
+        if (args.strategy === "ax" && !semantic)
+          throw new RequestError(
+            "invalid_request",
+            "left_click strategy a11y needs an element that supports AXPress, a single left click and no modifiers",
+          );
         method = semantic ? "element_press" : "click";
         params = {
           ...params,
@@ -369,6 +392,8 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
               }),
         };
       } else if (name === "scroll") {
+        if (args.strategy === "ax" && !target?.native)
+          throw new RequestError("invalid_request", "scroll strategy a11y needs an element target");
         method = target?.native && args.strategy === "ax" ? "element_scroll" : "scroll";
         params = {
           ...params,
@@ -390,6 +415,8 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
             "invalid_request",
             "Drag endpoints must belong to the same verified window",
           );
+        if (args.strategy === "ax")
+          throw new RequestError("invalid_request", "drag only sends input events; strategy a11y is not supported");
         method = "drag";
         params = {
           ...params,
@@ -405,6 +432,11 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       } else if (["set_value", "select_text", "perform_action"].includes(name)) {
         if (!target?.native)
           throw new RequestError("invalid_request", "Semantic action requires an observed element");
+        if (args.strategy === "event")
+          throw new RequestError(
+            "invalid_request",
+            `${name} only works through the accessibility path; strategy event is not supported`,
+          );
         method = {
           set_value: "element_set_value",
           select_text: "element_select_text",
@@ -416,10 +448,13 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           ...(name === "set_value"
             ? { value: args.value }
             : name === "select_text"
-              ? { text_range: args.text_range }
+              ? // 文档约定不带 text_range 时选中整个值；长度取自最近一次观测到的元素值（UTF-16，与原生一致）。
+                { text_range: args.text_range ?? [0, target.valueLength ?? 0] }
               : { action: args.action }),
         };
       } else if (name === "key") {
+        if (args.strategy === "ax")
+          throw new RequestError("invalid_request", "key only sends input events; strategy a11y is not supported");
         method = args.hold_seconds ? "hold_key_to_app" : "press_key_to_app";
         params = {
           ...params,
@@ -427,6 +462,25 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           ...(args.hold_seconds ? { duration: args.hold_seconds } : {}),
         };
       } else if (name === "type") {
+        if (args.strategy === "ax")
+          throw new RequestError("invalid_request", "type only sends input events; strategy a11y is not supported");
+        // 文档约定 type 可带 target：元素先聚焦，坐标先点一下，再输入。
+        if (target)
+          before.push(
+            target.native
+              ? { method: "element_focus", params: { ...params, native: target.native } }
+              : {
+                  method: "click",
+                  params: {
+                    ...params,
+                    ...target.guards,
+                    point: target.point,
+                    button: "left",
+                    clicks: 1,
+                    modifiers: [],
+                  },
+                },
+          );
         method = "type_text_to_app";
         params = { ...params, text: args.text };
       } else {
@@ -439,6 +493,10 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       s.activeInputs++;
       let action;
       try {
+        for (const step of before) await native(step.method, step.params, key, s, input.signal);
+        // 文档约定 key 用 repeat 重发和弦；全部重发计入同一次在途输入。
+        for (let i = 1; i < (args.repeat ?? 1); i++)
+          await native(method, params, key, s, input.signal);
         action = await native(method, params, key, s, input.signal);
       } finally {
         s.activeInputs--;

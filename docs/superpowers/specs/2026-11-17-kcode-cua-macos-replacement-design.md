@@ -395,6 +395,8 @@ sequenceDiagram
 
 签名使用构建机器现有可用身份，主 App、Agent/Helper 可执行闭包满足 peer requirements；不导出或搬运私钥。保留稳定 bundle identity 和安装路径。M2 的 Release 安装位置固定为 `~/Applications/KCode.app`，独立 Helper 为 `~/Applications/KCode Computer Use.app`；发现同路径已有安装则保存可回滚副本。嵌入 Helper 路径仍通过现有 installer contract 解析，安装器校验架构、签名、bundle/protocol/build identity 后原子切换，失败保留旧完整安装。
 
+同路径已有安装校验不通过时同样按需替换，被替换的一份保留为最近一次的可回滚副本，包括没有来源清单的更早版本和封印资源与签名不符的安装。首次安装与替换在按安装目标的跨进程锁内完成，持锁后复核是否仍需安装。稳定路径上有运行中的旧 Helper 时报 `upgrade_required`，由 Host 核对 PID、出生时间和可执行路径后终止再替换；安装目录或可执行文件是符号链接时无法确认进程归属，只报错，不自动终止。
+
 本轮只在 M2 切换验证版；不顺手覆盖当前本 Mac 上的已用版本。新路径首次 TCC 授权由用户完成。回滚是显式恢复完整旧安装，不允许新 runtime 在运行时偷偷加载旧 ZCode native。
 
 ## 11. M2 验收与证据合同

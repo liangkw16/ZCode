@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { executablePath } from "./helper-installer.js";
+import { executablePath } from "./helper-paths.js";
 import { NativeBrokerError } from "./broker-client.js";
 export async function withLifecycleGuard<T>(
   app: string,

@@ -47,7 +47,7 @@ void KCUABeginScopedFocus(const KCUATargetRef &target, const KCUAOp &op);
 void KCUAEndScopedFocus(void);
 void KCUAStampWindowEvent(CGEventRef event, const KCUATargetRef &target);
 
-void KCUAPresentationInitialize(bool enabled);
+// KCUAPresentationInitialize 的声明在 protocol.h（PiP 与 ghost cursor 两个开关）。
 void KCUAPresentationCapture(const KCUATargetRef &target,
                              NSDictionary *context);
 void KCUAGhostPoint(CGPoint point);

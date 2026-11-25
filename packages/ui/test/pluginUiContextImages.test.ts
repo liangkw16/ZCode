@@ -78,4 +78,29 @@ describe("plugin ui context images", () => {
     expect(added).toHaveLength(1);
     expect(removed).toEqual(["att-1"]);
   });
+
+  it("keeps each composer scope's attachments separate in split screen", () => {
+    // 修复回归：映射原先按上下文 id 全局共享。分屏下 A 为一条上下文附加了图片，B 同步空列表时
+    // 会把这条映射清掉，而 B 的 removeAttachment 只作用于 B 的附件作用域；之后 A 再移除该上下文时
+    // 已找不到要撤的附件，图片留在 A 的附件里随下一条消息发出。
+    const a = makePort();
+    const b = makePort();
+    b.port.scopeKey = "scope-2";
+    const ctx = context(1);
+    syncPluginUiContextImages([ctx], a.port);
+    syncPluginUiContextImages([], b.port);
+    expect(a.added).toHaveLength(1);
+    expect(b.added).toHaveLength(0);
+    // B 同步空列表碰不到 A 的附件；它的 removeAttachment 也只作用于 B 的作用域。
+    expect(a.removed).toEqual([]);
+    expect(b.removed).toEqual([]);
+    // 同一条上下文在两个作用域里各自附加；A 移除时只撤 A 的附件。
+    syncPluginUiContextImages([ctx], b.port);
+    expect(b.added).toHaveLength(1);
+    syncPluginUiContextImages([], a.port);
+    expect(a.removed).toEqual(["att-1"]);
+    expect(b.removed).toEqual([]);
+    syncPluginUiContextImages([], b.port);
+    expect(b.removed).toEqual(["att-1"]);
+  });
 });

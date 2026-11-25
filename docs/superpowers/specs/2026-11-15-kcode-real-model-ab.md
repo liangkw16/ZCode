@@ -81,6 +81,7 @@
 - `runs/<case>-<repeat>-<A|B>/`：原始 `result.json`、`events.json`、脱敏 `capture.json` 和实际工作区副本；repeat 为 0、1。原始初次计数存在事件名/输入字段遗漏，以 `summary.json` 的统一重算为准。
 - `fixtures.mjs`、`worker.mjs`、`run.mjs`、`summarize.mjs`：固定输入、断言、真实 App 调用和分析脚本；`A-revision.json` / `B-revision.json` 记录完整 Git revision。`variants/` 保存两版完整 Core 源码与独立编译产物，实际加载路径均已检查。
 - `run.mjs` 按既定顺序执行，已有结果会直接保留；`mise exec -- node .tmp/kcode-real-ab-20261115/summarize.mjs` 可从现有原始事件和 wire usage 重算报告数据。脚本复用当前仓库的 capture proxy 与 App 公开入口，没有新增生产工具或依赖。
+- 可复现性边界：上述脚本与全部产物都在 `.tmp/` 下，该目录被 `.gitignore` 排除，不随仓库提交。仅凭本提交无法重算本报告的数值；这条命令只适用于仍保留本次实验原始产物的环境。要在干净检出中重算，需要先从该环境取得脚本与 `runs/` 产物。
 
 这是单一模型、三个合成小项目、每场景两对的探索性验证，未固定采样 seed，未进行统计显著性推断。没有覆盖真实大仓库、Workflow/子 Agent、记忆授权语义、真实自动或 reactive 压缩、摘要截断恢复、独立摘要模型能力差异及提交后存储/事件故障；既有故障注入回归不能被混算为这轮真实模型效果。
 

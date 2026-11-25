@@ -27,7 +27,10 @@ const WORKSPACE_ROOT_SOURCE =
 const GLOBAL_ROOT_TOKEN = new RegExp(GLOBAL_ROOT_SOURCE, "g");
 const ROOT_TOKEN = new RegExp(`(?:${GLOBAL_ROOT_SOURCE})|(?:${WORKSPACE_ROOT_SOURCE})`, "g");
 // `.zcode` 作为路径段紧跟在引号或反引号之后；以及句子里嵌入的 "~/…" 家目录路径（提示文案、模板串）。
-const ZCODE_LITERAL = /["'`]\.zcode(["'`/])|["'`]~\/\.zcode|~\/\.zcode(?=[/\s"'`）)（(:：])/g;
+// "~/.zcode" 必须是完整路径段：".zcode-beta" 是别的产品目录。
+const ZCODE_LITERAL =
+  /["'`]\.zcode(["'`/])|["'`]~\/\.zcode(?=[/"'`\s]|$)|~\/\.zcode(?=[/\s"'`）)（(:：])/g;
+const WORKSPACE_DECLARATOR = new RegExp(WORKSPACE_ROOT_SOURCE);
 
 /**
  * 去掉注释但保持字符串与行列位置不变，避免注释里提到的 ".zcode" 被当成代码。
@@ -113,7 +116,8 @@ export function stripComments(source) {
 /**
  * 取字面量所在的上下文：先找包住它的最内层括号。
  * 调用括号 `(` → 这次调用里位于字面量之前的实参（根通常就是前一个实参）；
- * 数组括号 `[` → 这个数组字面量本身（路径段常量）；其余 → 到最近一个分隔符为止。
+ * 数组括号 `[` → 这个数组字面量本身（路径段常量），以及声明它的那一行（`declarator`）；
+ * 其余 → 到最近一个分隔符为止。
  */
 function literalContext(code, literalIndex) {
   let depth = 0;
@@ -123,7 +127,12 @@ function literalContext(code, literalIndex) {
     else if (char === "(" || char === "[" || char === "{") {
       if (depth === 0) {
         if (char === "(") return { kind: "call", text: code.slice(index + 1, literalIndex) };
-        if (char === "[") return { kind: "array", text: code.slice(index + 1, literalIndex) };
+        if (char === "[")
+          return {
+            kind: "array",
+            text: code.slice(index + 1, literalIndex),
+            declarator: code.slice(code.lastIndexOf("\n", index - 1) + 1, index),
+          };
         break;
       }
       depth -= 1;
@@ -145,12 +154,21 @@ export function findGlobalZcodeLiterals(source) {
     const context = literalContext(code, literal.index);
     // 数组形态只看作为独立路径段的 ".zcode"（`[".zcode", "worktrees"]`），不含带斜杠的字符串枚举。
     const pathSegmentArray = context.kind === "array" && ["'", '"', "`"].includes(literal[1]);
+    // 声明名带工作区根的路径段数组（workspaceDirectorySegments 等）只用于 join(<工作区>, …parts)，
+    // 按规则保留字面量，不算全局派生点；声明名里同时出现全局根时仍按全局处理。
+    const workspaceSegmentArray =
+      pathSegmentArray &&
+      WORKSPACE_DECLARATOR.test(context.declarator ?? "") &&
+      !GLOBAL_ROOT_TOKEN.test(context.declarator ?? "");
     const roots = [...context.text.matchAll(ROOT_TOKEN)];
     const nearest = roots.at(-1)?.[0];
     const nearestIsGlobal = Boolean(nearest && GLOBAL_ROOT_TOKEN.test(nearest));
     GLOBAL_ROOT_TOKEN.lastIndex = 0;
     // "~/…" 文案与路径段数组恒为全局；调用实参里以最近的根来源为准。
-    if (!homePathText && !pathSegmentArray && !(context.kind === "call" && nearestIsGlobal)) {
+    if (
+      workspaceSegmentArray ||
+      (!homePathText && !pathSegmentArray && !(context.kind === "call" && nearestIsGlobal))
+    ) {
       continue;
     }
     findings.push({
@@ -184,16 +202,6 @@ const ALLOWLIST = [
     reason: "文案描述的是远端设备上的目录（推送配置、安装远端服务、远端插件），恒为 ZCode。",
   },
   {
-    path: "packages/desktop/src/main/mcpUserDirectory/index.ts",
-    snippet: /workspaceConfigDirSegments/,
-    reason: "工作区级 MCP 配置目录段，项目内状态。",
-  },
-  {
-    path: "packages/services/src/commands/commandsService.ts",
-    snippet: /workspaceDirectorySegments/,
-    reason: "工作区级命令目录段；同处的 userDirectorySegments 已按 segment 给出。",
-  },
-  {
     path: "apps/zcode-cli/packages/core/src/memory/memory-file-path.ts",
     snippet: /^"\.zcode",$/,
     reason: "工作区路径解析的忽略目录名单（与 node_modules、.git 等并列），不是路径拼接。",
@@ -202,11 +210,6 @@ const ALLOWLIST = [
     path: "packages/desktop/src/main/mcpUserDirectory/types.ts",
     snippet: /configDirSegments/,
     reason: "工作区级 MCP 来源描述；用户级段由 index.ts 的 userConfigDirSegments 按 segment 给出。",
-  },
-  {
-    path: "packages/services/src/mcp-sync/mcpSyncService.ts",
-    snippet: /workspaceConfigDirSegments/,
-    reason: "工作区级 MCP 配置目录段，项目内状态。",
   },
   {
     path: "packages/services/src/runtime-tools/providerRuntimeResolver.ts",
@@ -278,6 +281,11 @@ test("findGlobalZcodeLiterals 只命中全局根与 .zcode 拼在一起的位置
   assert.deepEqual(lines('const e = "将删除 ~/.zcode/v2（配置、凭据）";'), [1]);
   // 路径段常量数组：拼接点不在同一行，按数组字面量形态判为全局派生点。
   assert.deepEqual(lines('export const ROOT_SEGMENTS = [".zcode", "worktrees"] as const;'), [1]);
+  // 声明名带工作区根的路径段数组只用于 join(<工作区>, …parts)，保留字面量，不算全局派生点。
+  assert.deepEqual(lines('workspaceDirectorySegments: [\n  ".zcode",\n  "commands",\n],'), []);
+  // "~/.zcode" 必须是完整路径段：".zcode-beta" 是别的产品目录。
+  assert.deepEqual(lines('const p = "~/.zcode-beta/data";'), []);
+  assert.deepEqual(lines('const q = "~/.zcode-beta";'), []);
   // 注释里提到的 ".zcode" 不算代码；JSX 文本里的撇号不会带偏后面的行。
   assert.deepEqual(
     lines(

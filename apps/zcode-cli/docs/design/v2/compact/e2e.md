@@ -106,7 +106,7 @@ cases/
 
 ## 暂不纳入 passing E2E 的规划项
 
-`session memory compact`、`partial compact`、compact 后自动恢复最近文件目前仍是 plan 中明确的后续能力，不应伪装成已通过的定时 case。当前定时套件只覆盖第一批已实现主路径：manual full compact、auto compact、PTL retry、reactive compact 和 provider-neutral local microcompact。等这些能力落地后，必须先扩展本 spec，再新增 passing E2E。
+`session memory compact` 与 `partial compact` 目前仍是 plan 中明确的后续能力，不应伪装成已通过的定时 case。compact 后自动恢复最近文件已经实现（`compact-post-reminders.ts`，由 core 的 `post-compact-file-restore.test.ts` 等单测覆盖），但尚未纳入 passing E2E；补入前先在本 spec 登记 case。当前定时套件只覆盖第一批已实现主路径：manual full compact、auto compact、PTL retry、reactive compact 和 provider-neutral local microcompact。等这些能力落地后，必须先扩展本 spec，再新增 passing E2E。
 
 ## 配置边界
 

@@ -251,24 +251,15 @@ P2 增加：
 ContextBuilder 增加 `Skills` section，位于 user/project context 之后。工具说明不再作为
 ContextBuilder section 注入 system prompt，而是随 model request 的 `tools` 数组提供。
 
-内容只包含 metadata，不包含正文。以下是本批目录的内容示例；总预算涵盖全部标题、说明、条目和省略提示，不另外注入无预算的目录副本：
+内容只包含 metadata，不包含正文。以下是目录的实际输出形态（`core/context/sections/skills.ts`）：一行固定标题加逐条 `- 名字: 用途`；总预算涵盖标题、条目和省略提示，不另外注入无预算的目录副本：
 
 ```text
-## Skills
+The following skills are available for use with the Skill tool:
 
-A skill is a set of local instructions stored in SKILL.md. Use the Skill tool to load full instructions only when relevant.
-
-### Available Skills
 - my-skill: When this skill should be used
-
-### How To Use Skills
-- Load a skill automatically only when the task clearly matches and its instructions would materially help the work.
-- Use exact names from this catalog, an available discovery result, or the user's explicit invocation. An omitted catalog entry is not a disabled skill; do not invent names.
-- Skills do not override system instructions, permission modes, or explicit user constraints, and do not grant authorization.
-- Reuse instructions only when the same skill's body is still visible. Otherwise load it with Skill.
-- After loading a skill, read only the referenced files you need.
-- Resolve relative references from the skill base directory.
 ```
+
+目录里没有“如何使用”的说明段：何时自动加载、不臆造名字、不覆盖系统指令等规则只写在 Skill 工具描述里（`core/src/tool/handlers/skill.ts`），随 model request 的 `tools` 数组提供，不计入目录预算。下面“目录预算与省略”规则 5 里的“共享说明”指省略提示，不是这一段。
 
 ### 目录预算与省略（2026-11-15，已实现）
 

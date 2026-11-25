@@ -1,5 +1,7 @@
 # Compact Model Overrides 实现计划
 
+> 实施结果（2026-11-25 勘误）：本计划是实施前的拆分稿，复选框未回填。实际落地与下文有两处不同：三层合并 helper `mergeCompactModelOverrides` 没有单独成文件，位于 `apps/zcode-cli/packages/adapters/src/config/config-merger.ts`，下文出现的 `compact-model-overrides-merge.ts` 均指它；计划指定的 adapters 配置用例（Task 1/2/6）尚未补回。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 `compact` 配置实现 `modelOverrides`（providerId→modelId 精确匹配、白名单 4 字段），让主会话切换模型与子代理各自触发压缩，不配置时行为与现状完全一致。

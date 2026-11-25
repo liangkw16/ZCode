@@ -352,7 +352,7 @@ active context 的裁剪、summary 生成、boundary 持久化和 resume/replay 
 
 - compact lifecycle 必须额外写入一条 synthetic timeline message。它不是 provider-visible summary，也不是 tool call；它只服务 transcript、TUI、ZCode app-server replay 和恢复诊断。
 - timeline message 使用 `compaction` part，但 `timelineStatus` 表示 `started` / `completed` / `failed` / `interrupted`，只有带 `compactBoundary` 的 compaction part 才能作为 active-chain 截断边界。
-- compact 开始先写 timeline message + `compact_started` event；summary 和 boundary 写成功后，再把同一条 timeline message 更新为 `completed` 并写 `compact_completed` event。
+- compact 开始先写 timeline message + `compact_started` event；summary 产出后，`completed` timeline 与请求前公告、summary、compaction 附件整组在同一个 store 事务里提交，再写 `compact_completed` event（原先写成“summary 和 boundary 写成功后再把 timeline 更新为 completed”，现以 `compact-persistence.ts` 的 bundle 提交为准：后续事件写失败不能把已提交的 timeline 重新变成 failed）。
 - 进程在 summary 请求中被中断时，下一次 `resumeFromStore()` 扫描到没有 terminal 状态的 timeline part，应把它标记为 `interrupted`。如果已经存在同 operation 的 boundary，则恢复成 `completed`。
 - ZCode app-server 不新增主路径通知。bootstrap 把 compact lifecycle 投影成 `agent_message_chunk + messageId + _meta["zcode.timeline"]`，client 识别 meta 后渲染为 separator；泛 ZCode protocol client 显示 fallback 文本。
 

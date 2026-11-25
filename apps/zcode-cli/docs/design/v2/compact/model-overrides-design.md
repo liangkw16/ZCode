@@ -4,7 +4,7 @@
 
 本文是 [README.md](./README.md)（compact 总设计）的补充篇，记录按模型覆盖 compact 阈值策略的领域边界、配置契约、合并语义、解析所有权与验收标准。属于 `L1 Candidate Contract`：固定语义与规则，不固定最终 TypeScript 接口细节。
 
-状态：设计已与 owner 对齐（2026-10-22），并经独立评审修订（2026-10-22，子代理继承与程序化共存两项契约为评审后按最小影响面选定，owner 可推翻）。待实现。实施拆分见 [model-overrides-plan.md](./model-overrides-plan.md)。
+状态：设计已与 owner 对齐（2026-10-22），并经独立评审修订（2026-10-22，子代理继承与程序化共存两项契约为评审后按最小影响面选定，owner 可推翻）。已实现（本仓提交 `be6ee997`）。与设计的已知差距：程序化 override 剔除 `modelOverrides` 时尚未输出 warn；§3.4 的组合校验只实现了成对校验。实施拆分见 [model-overrides-plan.md](./model-overrides-plan.md)。
 
 ## 背景与动机
 

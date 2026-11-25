@@ -46,7 +46,11 @@ export const COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT =
 export function createCompactSummaryOutputLimitError(result: RuntimeModelTextResult): Error {
   return createCoreError(
     CoreErrorType.ModelError,
-    "Compact summary exceeded the output limit; the original history was preserved.",
+    // 修复原因：按设计，输出上限恢复耗尽后报不可原样重试的错误、不丢旧轮次；但原文案没有告诉用户
+    // 下一步怎么办。补上两个可操作的配置项，键名与 adapters 配置 schema 一致。
+    "Compact summary exceeded the output limit twice; the original history was preserved. " +
+      "Raise compact.summaryMaxOutputTokens, or set compact.summaryProvider and compact.summaryModel " +
+      "to a model with a larger context window, then retry.",
     {
       context: {
         reason: COMPACT_SUMMARY_OUTPUT_LIMIT_REASON,

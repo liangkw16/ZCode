@@ -207,13 +207,16 @@ Compact timeline 的显示规则属于客户端投影：
 
 ZCode 自有配置和环境变量必须使用 `ZCODE_` 前缀。
 
-建议配置项：
+当前配置项（根配置的 `compact` 段，strict schema 见 `adapters/src/config/schema.ts`；阈值覆盖的语义见 [model-overrides-design.md](./model-overrides-design.md)）：
 
-- `autoCompactEnabled`：是否启用自动 compact。
-- `compact.maxSummaryOutputTokens`：summary 输出预算。
-- `compact.bufferTokens`：自动 compact 触发 buffer。
+- `compact.enabled`：是否启用自动 compact。
+- `compact.summaryMaxOutputTokens`：summary 输出预算。
+- `compact.bufferTokens`、`compact.contextWindowTokens`、`compact.thresholdRatio`：自动 compact 的触发窗口与阈值。
 - `compact.maxConsecutiveFailures`：自动 compact 失败熔断次数。
-- `compact.preserveRecentTokens`：session memory compact 或 partial compact 的最近上下文保留量。
+- `compact.keepRecentTokens`：session memory compact 或 partial compact 的最近上下文保留量。
+- `compact.summaryProvider` 与 `compact.summaryModel`：摘要请求使用的模型，必须成对配置。
+- `compact.modelOverrides`：按 `providerId → modelId` 精确匹配的阈值覆盖表。
+- `compact.microcompact.*`：microcompact 的同构配置。
 
 调试和运维 override 不声明环境变量入口，优先使用 config file、CLI/session override 或测试注入。新增 `ZCODE_` 环境变量必须先补齐 spec，明确用途、优先级、错误行为和测试覆盖。
 

@@ -20,16 +20,28 @@ NSString *KCUADesktopAvailability(void) {
     IOObjectRelease(root);
   return KCUADesktopAvailabilityFromFacts(session, users, locked, getuid());
 }
+NSDictionary *KCUADesktopAdmissionError(NSString *availability) {
+  if ([availability isEqual:@"unlocked"])
+    return nil;
+  // 修复原因：锁屏原先返回自造的 desktop_locked，脱离了既有的 permission_denied /
+  // reason:screen_locked / action_sent:false 错误形状（规范 §8.2 与 SDK 迁移说明）。
+  // 锁定状态无法确定时同样拒绝，并明确说明原因；typed 的 availability 一并带出。
+  BOOL locked = [availability isEqual:@"locked"];
+  return KCUAError(
+      @"permission_denied",
+      locked
+          ? @"The desktop is locked; unlock it and observe again"
+          : @"Desktop availability is unknown; unlock state could not be verified",
+      @{@"action_sent" : @NO,
+        @"dispatch_status" : @"not_sent",
+        @"reason" : locked ? @"screen_locked" : @"desktop_state_unknown",
+        @"desktop_availability" : availability});
+}
 void KCUARequireDesktop(void) {
-  NSString *availability = KCUADesktopAvailability();
-  if (![availability isEqual:@"unlocked"])
-    KCUAFail(
-        [availability isEqual:@"locked"] ? @"desktop_locked"
-                                         : @"desktop_unavailable",
-        @"Desktop is locked or its availability cannot be verified; unlock "
-        @"manually and observe again",
-        @{@"action_sent" : @NO,
-          @"dispatch_status" : @"not_sent"});
+  NSDictionary *error = KCUADesktopAdmissionError(KCUADesktopAvailability());
+  if (error)
+    KCUAFail(error[@"error"][@"code"], error[@"error"][@"message"],
+             error[@"error"][@"details"]);
 }
 NSDictionary *KCUAPermissionStatus(void) {
   NSString *ax = AXIsProcessTrusted() ? @"granted" : @"denied";
@@ -90,9 +102,16 @@ void KCUAStartAvailabilityTracking(void) {
     unsigned tick = 0;
     while (!availabilityStopping) {
       @autoreleasepool {
-        observeAvailability(KCUADesktopAvailability());
-        if (++tick % 20 == 0)
-          KCUAReapDeadScopes();
+        // 修复原因：这个线程没有请求级的 @try，回收时读到坏 lease 抛出的异常会直接终止
+        // 常驻 Helper。后台扫描的读取失败只跳过这一轮，下一轮再试。
+        @try {
+          observeAvailability(KCUADesktopAvailability());
+          if (++tick % 20 == 0)
+            KCUAReapDeadScopes();
+        } @catch (NSException *error) {
+          fprintf(stderr, "CUA background scan skipped: %s\n",
+                  error.reason.UTF8String);
+        }
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

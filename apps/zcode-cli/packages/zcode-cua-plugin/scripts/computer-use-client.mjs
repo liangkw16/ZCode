@@ -299,7 +299,14 @@ function assertOk(methodName, result) {
   const brokerError = brokerErrorOf(result);
   const brokerCode = brokerError.code;
   const reasonCode = brokerError.details?.reason_code;
-  const code = isError ? (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL") : "TIMEOUT";
+  // Helper 对锁屏沿用既有的 permission_denied + reason:screen_locked 兼容形状；SDK 一侧仍给出
+  // 语义明确的 DESKTOP_LOCKED，调用方不会把它当成 TCC 拒绝授权。
+  const screenLocked = brokerError.details?.reason === "screen_locked";
+  const code = isError
+    ? screenLocked
+      ? "DESKTOP_LOCKED"
+      : (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL")
+    : "TIMEOUT";
   throw new ComputerUseError(messageOf(result, `${methodName} failed`), {
     code,
     actionSent: actionSent || dispatch === "possibly_sent",

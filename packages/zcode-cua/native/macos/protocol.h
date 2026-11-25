@@ -54,15 +54,20 @@ void KCUAStopServer(void);
 NSString *KCUAGeneration(void);
 
 NSString *KCUADesktopAvailability(void);
+// 返回 nil 表示可以接纳；否则是 {ok, error} 形式的拒绝原因。
+NSDictionary *KCUADesktopAdmissionError(NSString *availability);
 void KCUARequireDesktop(void);
 void KCUARequireAccessibility(void);
 NSDictionary *KCUAPermissionStatus(void);
 NSString *KCUAScalarString(NSString *input, NSUInteger limit);
+// 改变显示状态的方法只接受 presentation 能力的连接。
+bool KCUARequiresPresentation(NSString *method);
 
 void KCUAInputInitialize(NSString *runtimeDir);
 KCUAOp KCUACurrentOperation(void);
 
-void KCUAPresentationInitialize(bool enabled);
+// PiP 面板与 ghost cursor 各自由自己的启动开关控制。
+void KCUAPresentationInitialize(bool pipEnabled, bool ghostCursorEnabled);
 
 void KCUANotifyDesktopUnavailable(void);
 uint64_t KCUADesktopEpoch(void);

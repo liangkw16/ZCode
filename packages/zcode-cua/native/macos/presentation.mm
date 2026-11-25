@@ -11,6 +11,9 @@ static NSPanel *pipPanel;
 static NSImageView *pipImage;
 static NSPanel *ghostPanel;
 static std::atomic<bool> pipEnabled{false};
+// ghost cursor 与 PiP 是两个独立的进程级开关：设置页的只读探测只传 --ghost-cursor-overlay，
+// 之后被复用的常驻 Helper 仍要给真实输入画光标。
+static std::atomic<bool> ghostCursorEnabled{false};
 static std::atomic<bool> pipDismissed{false};
 static std::atomic<uint64_t> visualGeneration{0};
 static std::recursive_mutex liveLifecycleMutex;
@@ -230,8 +233,9 @@ static void startLive(NSDictionary *target) {
                                  }];
                                }];
 }
-void KCUAPresentationInitialize(bool enabled) {
-  pipEnabled = enabled;
+void KCUAPresentationInitialize(bool pip, bool ghostCursor) {
+  pipEnabled = pip;
+  ghostCursorEnabled = ghostCursor;
   turns = [NSMutableDictionary dictionary];
   sequences = [NSMutableDictionary dictionary];
   eventIds = [NSMutableSet set];
@@ -258,7 +262,9 @@ void KCUAPresentationCapture(const KCUATargetRef &target,
     startLive(value);
 }
 void KCUAGhostPoint(CGPoint point) {
-  if (!pipEnabled)
+  // 修复原因：ghost cursor 原先跟着 --pip-mode 一起开关，入口根本不读 --ghost-cursor-overlay。
+  // 设置页先拉起 Helper 时不带 PiP，之后整轮真实输入都没有光标反馈。
+  if (!ghostCursorEnabled)
     return;
   dispatch_async(dispatch_get_main_queue(), ^{
     if (!ghostPanel) {

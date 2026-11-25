@@ -32,6 +32,30 @@ static NSString *generation;
 static thread_local KCUAOp currentOperation;
 KCUAOp KCUACurrentOperation(void) { return currentOperation; }
 
+// 进程身份：pid、启动时间与可执行路径。格式与旧 producer 一致，互相都能认出对方仍在运行；
+// 启动时间在进程生命周期内不变，PID 被别的进程复用后对不上。
+static NSString *processIdentity(pid_t pid) {
+  NSTask *ps = [NSTask new];
+  ps.executableURL = [NSURL fileURLWithPath:@"/bin/ps"];
+  ps.arguments = @[
+    @"-p", [NSString stringWithFormat:@"%d", pid], @"-o", @"lstart=", @"-o",
+    @"comm="
+  ];
+  NSPipe *pipe = [NSPipe pipe];
+  ps.standardOutput = pipe;
+  ps.standardError = [NSFileHandle fileHandleWithNullDevice];
+  if (![ps launchAndReturnError:nil])
+    return nil;
+  NSData *identity = [pipe.fileHandleForReading readDataToEndOfFile];
+  [ps waitUntilExit];
+  NSString *text = [[NSString alloc] initWithData:identity
+                                         encoding:NSUTF8StringEncoding];
+  text = [text stringByTrimmingCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return text.length ? [NSString stringWithFormat:@"darwin:%d:%@", pid, text]
+                     : nil;
+}
+
 NSString *KCUAExecutable(pid_t pid) {
   char path[PROC_PIDPATHINFO_MAXSIZE] = {};
   return proc_pidpath(pid, path, sizeof(path)) > 0
@@ -90,16 +114,24 @@ static NSDictionary *readLease(void) {
   if (lstat(path.fileSystemRepresentation, &st) != 0)
     return nil;
   checkPrivatePath(path, false);
+  // lease 只在派发前读取，这里的拒绝都发生在任何输入发出之前。
+  NSDictionary *notSent =
+      @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"};
   if (st.st_size > 8192)
-    KCUAFail(@"controller_busy", @"CUA lease exceeds size limit");
+    KCUAFail(@"controller_busy", @"CUA lease exceeds size limit", notSent);
   int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
   if (fd < 0)
-    KCUAFail(@"controller_busy", @"CUA lease cannot be read safely");
+    KCUAFail(@"controller_busy", @"CUA lease cannot be read safely", notSent);
+  // 坏文件无法确认归属，只能保留并拒绝新的控制会话；消息带上路径，便于人工处理。
+  NSString *malformedLeaseMessage = [NSString
+      stringWithFormat:
+          @"CUA lease at %@ is malformed; remove it to let a new controller start",
+          path];
   char bytes[8193];
   ssize_t count = read(fd, bytes, 8192);
   close(fd);
   if (count <= 0)
-    KCUAFail(@"controller_busy", @"CUA lease is malformed");
+    KCUAFail(@"controller_busy", malformedLeaseMessage, notSent);
   id record = [NSJSONSerialization
       JSONObjectWithData:[NSData dataWithBytes:bytes length:(NSUInteger)count]
                  options:0
@@ -108,18 +140,42 @@ static NSDictionary *readLease(void) {
       [record[@"schema"] intValue] != 1 ||
       ![record[@"pid"] isKindOfClass:[NSNumber class]] ||
       [record[@"pid"] intValue] < 1)
-    KCUAFail(@"controller_busy", @"CUA lease is malformed");
+    KCUAFail(@"controller_busy", malformedLeaseMessage, notSent);
   return record;
 }
+// 读不到或解析不了的 lease 无法确认归属：状态查询如实报告，释放与后台回收都不碰它。
+// 只有获取 lease 的路径按 controller_busy 拒绝，不会把坏文件当成自己的删掉。
+static NSDictionary *readLeaseQuietly(bool *malformed) {
+  *malformed = false;
+  @try {
+    return readLease();
+  } @catch (NSException *error) {
+    *malformed = ![error.name isEqual:@"not_authorized"];
+    return nil;
+  }
+}
+// lease 记录的 owner 是否仍是同一个进程。修复原因：原先只看 PID 是否还存在，记录的进程退出后
+// PID 被无关程序复用，新控制会话会一直 controller_busy。现在核对记录的进程身份；
+// 记录里没有身份、或当前身份算不出来时无法确认，按仍在占用处理。
+static bool leaseOwnerAlive(NSDictionary *owner) {
+  pid_t pid = [owner[@"pid"] intValue];
+  NSString *recorded = owner[@"processIdentity"];
+  bool exists = kill(pid, 0) == 0 || errno == EPERM;
+  if (!recorded || !exists)
+    return exists;
+  NSString *current = processIdentity(pid);
+  return !current || [current isEqual:recorded];
+}
 NSDictionary *KCUALeaseStatus(void) {
-  NSDictionary *owner = readLease();
-  bool alive =
-      owner && (kill([owner[@"pid"] intValue], 0) == 0 || errno == EPERM);
+  bool malformed = false;
+  NSDictionary *owner = readLeaseQuietly(&malformed);
+  bool alive = owner && leaseOwnerAlive(owner);
   return @{
     @"controlled" : @(alive),
     @"owner" : owner ?: [NSNull null],
     @"is_owner" : @(alive && [owner[@"pid"] intValue] == getpid() &&
-                    [owner[@"processIdentity"] isEqual:leaseIdentity])
+                    [owner[@"processIdentity"] isEqual:leaseIdentity]),
+    @"malformed" : @(malformed)
   };
 }
 size_t KCUAActiveOperationCount(void) {
@@ -219,7 +275,7 @@ void KCUAAcquireLease(void) {
       pid_t pid = [owner[@"pid"] intValue];
       if (pid == getpid() && [owner[@"processIdentity"] isEqual:leaseIdentity])
         return;
-      if (kill(pid, 0) == 0 || errno == EPERM)
+      if (leaseOwnerAlive(owner))
         KCUAFail(
             @"controller_busy",
             @"Another live computer-use controller owns the desktop",
@@ -247,15 +303,27 @@ void KCUAAcquireLease(void) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:record
                                                    options:0
                                                      error:nil];
-    int fd = open(leaseFile().fileSystemRepresentation,
+    // 修复原因：lease 原先以最终文件名创建后再写入，进程在两步之间退出会留下空文件，
+    // 后续 Helper 读到它只能报 malformed。现在先写完临时文件再原子发布；
+    // RENAME_EXCL 保证同时只有一个进程能拿到这个名字。
+    NSString *staged =
+        [runtimePath stringByAppendingFormat:@"/.controller-lease-%d-%@.tmp",
+                                         getpid(), [NSUUID UUID].UUIDString];
+    int fd = open(staged.fileSystemRepresentation,
                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     if (fd < 0)
       KCUAFail(@"controller_busy", @"Could not acquire controller lease");
-    ssize_t count = write(fd, data.bytes, data.length);
-    fsync(fd);
-    close(fd);
-    if (count != (ssize_t)data.length)
-      KCUAFail(@"controller_busy", @"Could not persist controller lease");
+    @try {
+      ssize_t count = write(fd, data.bytes, data.length);
+      fsync(fd);
+      close(fd);
+      if (count != (ssize_t)data.length ||
+          renamex_np(staged.fileSystemRepresentation,
+                     leaseFile().fileSystemRepresentation, RENAME_EXCL) != 0)
+        KCUAFail(@"controller_busy", @"Could not persist controller lease");
+    } @finally {
+      unlink(staged.fileSystemRepresentation);
+    }
   } @finally {
     if (published) {
       unlink([lock stringByAppendingPathComponent:@"owner.json"]
@@ -270,7 +338,10 @@ void KCUAAcquireLease(void) {
   }
 }
 void KCUAReleaseLease(void) {
-  NSDictionary *owner = readLease();
+  // 只在能证明 lease 属于本进程时删除。这个函数运行在 worker 线程的收尾、控制请求和后台
+  // 回收线程里，读不到或解析不了时不能抛出：无法确认归属的 lease 原样保留。
+  bool malformed = false;
+  NSDictionary *owner = readLeaseQuietly(&malformed);
   if ([owner[@"pid"] intValue] == getpid() &&
       [owner[@"processIdentity"] isEqual:leaseIdentity])
     unlink(leaseFile().fileSystemRepresentation);
@@ -284,9 +355,30 @@ static void releaseLeaseIfIdle(void) {
       return;
   KCUAReleaseLease();
 }
-static void cancelOperation(const KCUAOp &op) {
+// 调用方必须持有 queueMutex。
+static void cancelOperationLocked(const KCUAOp &op) {
   bool first = !op->cancelled.exchange(true);
-  if (!first || op->settled.load())
+  if (!first)
+    return;
+  for (auto it = queue.begin(); it != queue.end(); ++it) {
+    if (*it != op)
+      continue;
+    // 修复原因：排队项要等前面的操作结束才能被 worker 标记落定，原先取消线程等 5 秒后
+    // 向整个 Helper 发 SIGTERM，正在执行的长按等正常输入随之中断。未开始的项没有派发过
+    // 任何输入，直接出队并立即回 not_sent；恢复计时只留给已经开始的工作。
+    queue.erase(it);
+    std::lock_guard<std::mutex> lock(op->mutex);
+    op->response = KCUAError(
+        @"cancelled", @"CUA operation cancelled before dispatch", @{
+          @"action_sent" : @NO,
+          @"dispatch_status" : @"not_sent"
+        });
+    op->cleanupComplete = true;
+    op->settled = true;
+    op->changed.notify_all();
+    return;
+  }
+  if (op->settled.load())
     return;
   std::thread([op] {
     std::unique_lock<std::mutex> lock(op->mutex);
@@ -304,6 +396,10 @@ static void cancelOperation(const KCUAOp &op) {
       return;
     _exit(75);
   }).detach();
+}
+static void cancelOperation(const KCUAOp &op) {
+  std::lock_guard<std::mutex> lock(queueMutex);
+  cancelOperationLocked(op);
 }
 static std::string sessionKey(NSString *peer, NSString *session);
 void KCUACheck(const KCUAOp &op) {
@@ -371,25 +467,7 @@ void KCUACoordinatorStart(NSString *runtimeDir, NSString *socketPath) {
   checkPrivatePath(runtimePath, true);
   // 保留旧 lease 的 processIdentity 格式，使旧 producer
   // 也能识别本进程仍然存活。
-  NSTask *ps = [NSTask new];
-  ps.executableURL = [NSURL fileURLWithPath:@"/bin/ps"];
-  ps.arguments = @[
-    @"-p", [NSString stringWithFormat:@"%d", getpid()], @"-o",
-    @"lstart=", @"-o", @"comm="
-  ];
-  NSPipe *pipe = [NSPipe pipe];
-  ps.standardOutput = pipe;
-  ps.standardError = [NSFileHandle fileHandleWithNullDevice];
-  [ps launchAndReturnError:nil];
-  NSData *identity = [pipe.fileHandleForReading readDataToEndOfFile];
-  [ps waitUntilExit];
-  NSString *text = [[NSString alloc] initWithData:identity
-                                         encoding:NSUTF8StringEncoding];
-  leaseIdentity = [NSString
-      stringWithFormat:@"darwin:%d:%@", getpid(),
-                       [text stringByTrimmingCharactersInSet:
-                                 NSCharacterSet
-                                     .whitespaceAndNewlineCharacterSet]];
+  leaseIdentity = processIdentity(getpid());
   worker = std::thread([] {
     while (true) {
       KCUAOp op;
@@ -496,8 +574,12 @@ NSDictionary *KCUASubmit(NSString *method, NSDictionary *params, NSString *peer,
   std::unique_lock<std::mutex> lock(op->mutex);
   while (!op->settled) {
     op->changed.wait_for(lock, std::chrono::milliseconds(50));
-    if (connectionClosed->load())
+    if (connectionClosed->load() && !op->settled) {
+      // 取消按 queueMutex → op->mutex 的顺序加锁，这里必须先放开 op->mutex。
+      lock.unlock();
       cancelOperation(op);
+      lock.lock();
+    }
   }
   NSDictionary *response = op->response;
   if (KCUAIsReadOnly(method))
@@ -591,7 +673,7 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
         op->cleanupComplete = true;
         op->settled = true;
       } else
-        cancelOperation(op);
+        cancelOperationLocked(op);
     }
     for (auto &entry : operations)
       if ([entry.second->peer isEqual:peer] &&
@@ -599,7 +681,7 @@ NSDictionary *KCUAControl(NSString *method, NSDictionary *params,
           (!opId || [entry.second->operationId isEqual:opId])) {
         selected.push_back(entry.second);
         if (!status && !readClosed)
-          cancelOperation(entry.second);
+          cancelOperationLocked(entry.second);
       }
   }
   bool complete = (!status && !readClosed) || !selected.empty(), sent = false;
@@ -640,14 +722,14 @@ void KCUACancelPeer(NSString *peer) {
   std::lock_guard<std::mutex> lock(queueMutex);
   for (auto &entry : operations)
     if ([entry.second->peer isEqual:peer] && !entry.second->settled)
-      cancelOperation(entry.second);
+      cancelOperationLocked(entry.second);
 }
 void KCUACoordinatorStop(void) {
   {
     std::lock_guard<std::mutex> lock(queueMutex);
     stopping = true;
     for (auto &entry : operations)
-      cancelOperation(entry.second);
+      cancelOperationLocked(entry.second);
   }
   queueChanged.notify_all();
   if (worker.joinable())
@@ -672,41 +754,66 @@ void KCUANotifyDesktopUnavailable(void) {
     entry.second++;
   for (auto &entry : operations)
     if (!entry.second->settled)
-      cancelOperation(entry.second);
+      cancelOperationLocked(entry.second);
 }
 
+// peer 的格式是 uid:pid:启动秒:启动微秒:可执行路径。原进程退出后 PID 即使被复用，
+// 启动身份也对不上，可以确认它已经结束。
+static bool peerHasEnded(NSString *peer) {
+  NSArray *parts = [peer componentsSeparatedByString:@":"];
+  if (parts.count < 5)
+    return false;
+  pid_t pid = [parts[1] intValue];
+  if (pid <= 1)
+    return false;
+  NSString *expected =
+      [NSString stringWithFormat:@"%@:%@:%@", parts[1], parts[2], parts[3]],
+               *birth = KCUAProcessBirth(pid);
+  return birth ? ![birth isEqual:expected]
+               : (kill(pid, 0) != 0 && errno == ESRCH);
+}
 void KCUAReapDeadScopes(void) {
   std::lock_guard<std::mutex> lock(queueMutex);
-  for (auto it = activeScopes.begin(); it != activeScopes.end();) {
-    auto anchor = it->second;
-    NSArray *parts = [anchor->peer componentsSeparatedByString:@":"];
-    if (parts.count < 5) {
-      ++it;
+  // 修复原因：死亡扫描原先只遍历做过写操作的会话，发现死亡后也只撤销未完成项、不删操作记录。
+  // Host 退出时不会发 session_release，它的记录（尤其是只做过只读请求的 Host）会永久占用
+  // 本代容量，常驻 Helper 累计到 32,768 条后所有新会话都无法入队。现在每个出现过的 peer
+  // 都按进程出生身份判断，已确认死亡的走与 session_release 相同的回收。
+  std::set<NSString *> peers;
+  for (const auto &entry : activeScopes)
+    peers.insert(entry.second->peer);
+  for (const auto &entry : operations)
+    peers.insert(entry.second->peer);
+  for (const auto &known : peers) {
+    NSString *peer = known;
+    if (!peerHasEnded(peer))
       continue;
+    for (auto it = operations.begin(); it != operations.end();) {
+      if (![it->second->peer isEqual:peer]) {
+        ++it;
+        continue;
+      }
+      if (!it->second->settled)
+        cancelOperationLocked(it->second);
+      it = operations.erase(it);
     }
-    pid_t pid = [parts[1] intValue];
-    if (pid <= 1) {
-      ++it;
-      continue;
-    }
-    NSString *expected = [NSString
-                 stringWithFormat:@"%@:%@:%@", parts[1], parts[2], parts[3]],
-             *birth = KCUAProcessBirth(pid);
-    bool ended = birth ? ![birth isEqual:expected]
-                       : (kill(pid, 0) != 0 && errno == ESRCH);
-    if (!ended) {
-      ++it;
-      continue;
-    }
-    // socket 是按请求建立的，不能按 EOF
-    // 释放会话；这里只使用真实调用进程死亡/出生身份变化的证明。
-    sessionEpochs[it->first]++;
-    for (auto &entry : operations)
-      if ([entry.second->peer isEqual:anchor->peer] &&
-          [entry.second->session isEqual:anchor->session] &&
-          !entry.second->settled)
-        cancelOperation(entry.second);
-    it = activeScopes.erase(it);
+    for (auto it = activeScopes.begin(); it != activeScopes.end();)
+      it = [it->second->peer isEqual:peer] ? activeScopes.erase(it) : ++it;
+    // 会话键是 peer、session 与操作号组成的 JSON 数组，同一 peer 的键共用数组前缀。
+    NSData *prefix = [NSJSONSerialization dataWithJSONObject:@[ peer ]
+                                                     options:0
+                                                       error:nil];
+    std::string scope(
+        (const char *)prefix.bytes,
+        [prefix length] - 1 /* 去掉结尾的 ] */);
+    scope += ',';
+    for (auto it = sessionEpochs.begin(); it != sessionEpochs.end();)
+      it = it->first.compare(0, scope.size(), scope) == 0
+               ? sessionEpochs.erase(it)
+               : ++it;
+    for (auto it = closedSessions.begin(); it != closedSessions.end();)
+      it = it->first.compare(0, scope.size(), scope) == 0
+               ? closedSessions.erase(it)
+               : ++it;
   }
   releaseLeaseIfIdle();
 }

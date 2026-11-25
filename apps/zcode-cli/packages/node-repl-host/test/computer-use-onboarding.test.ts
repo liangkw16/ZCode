@@ -203,3 +203,56 @@ describe("computer-use producer action receipts", () => {
     },
   );
 });
+
+describe("computer-use desktop admission errors", () => {
+  // Host 的失败信封：首个文本块是 {error, action_receipt}，structuredContent 同形。
+  const refusal = (details: Record<string, unknown>) => {
+    const body = {
+      error: {
+        code: "permission_denied",
+        message: "The desktop is locked; unlock it and observe again",
+        details,
+      },
+      action_receipt: {
+        schema_version: "zcode-cua-action-receipt-v1",
+        action_sent: false,
+        dispatch_status: "not_sent",
+        retry_action: false,
+      },
+    };
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify(body) }],
+      structuredContent: body,
+    };
+  };
+
+  it("reports DESKTOP_LOCKED for the broker's permission_denied + reason screen_locked shape", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockResolvedValueOnce(
+      refusal({
+        action_sent: false,
+        dispatch_status: "not_sent",
+        reason: "screen_locked",
+        desktop_availability: "locked",
+      }),
+    );
+    await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
+      code: "DESKTOP_LOCKED",
+      actionSent: false,
+      dispatchStatus: "not_sent",
+      retry: "never",
+    });
+  });
+
+  it("does not mistake a real accessibility denial for a locked desktop", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockResolvedValueOnce(
+      refusal({ action_sent: false, dispatch_status: "not_sent" }),
+    );
+    await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
+      code: "PERMISSION_DENIED",
+      retry: "never",
+    });
+  });
+});

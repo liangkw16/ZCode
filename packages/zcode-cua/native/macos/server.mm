@@ -296,9 +296,7 @@ static void handleConnection(int fd) {
                   KCUAError(@"not_authorized",
                             @"Authenticate must be the first CUA request");
             else {
-              bool presentationMethod =
-                  [method isEqual:@"pip_session_handshake"] ||
-                  [method isEqual:@"pip_session_event"];
+              bool presentationMethod = KCUARequiresPresentation(method);
               if (presentationMethod != presentation)
                 KCUAFail(@"not_authorized",
                          @"Presentation and tool authorities are separate");

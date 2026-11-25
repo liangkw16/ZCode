@@ -2,9 +2,6 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <objc/runtime.h>
 #include <cassert>
-#include <chrono>
-#include <cstring>
-#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -18,10 +15,18 @@ static std::vector<Delivery> deliveries;
 static KCUATargetRef original;
 static BOOL wroteDuringSnapshot;
 static IMP originalItems;
+static NSPasteboard *fixtureBoard;
+static BOOL consumedOnDelivery;
 
 extern "C" void CGEventPostToPid(pid_t pid, CGEventRef event) {
   (void)pid;
   deliveries.push_back({CGEventGetType(event), CGEventGetFlags(event)});
+  // ⌘V 送达即模拟目标应用读取剪贴板。读取必须和事务在同一线程：NSPasteboard 按名字返回的是
+  // 同一个缓存对象，另一个线程同时读写会在 AppKit 的类型缓存里竞争（并行时 NSRangeException
+  // 或 SIGSEGV）。
+  if (fixtureBoard && CGEventGetType(event) == kCGEventKeyDown)
+    consumedOnDelivery =
+        [[fixtureBoard stringForType:NSPasteboardTypeString] isEqual:@"payload"];
 }
 NSString *KCUAProcessBirth(pid_t pid) { return pid == original->pid ? original->birth : nil; }
 NSString *KCUAGeneration(void) { return @"paste-test"; }
@@ -123,26 +128,11 @@ int main(void) {
     seed(board, @"user-old");
     op = operation();
     deliveries.clear();
-    std::thread worker([&] {
-      @autoreleasepool {
-        KCUAPasteText(board, original, @"payload", @"text", op);
-      }
-    });
-    // 目标应用读取剪贴板即视为消费了待粘贴内容。worker 在 clearContents 与 setString 之间会让
-    // 剪贴板短暂为空，此时 stringForType: 抛 NSRangeException（整套并行时必然撞上），
-    // 所以先看条目数并兜住异常，这一帧没读到就下一帧再读。
-    auto consumed = [&] {
-      @try {
-        return board.pasteboardItems.count > 0 &&
-               [[board stringForType:NSPasteboardTypeString] isEqual:@"payload"];
-      } @catch (NSException *) {
-        return NO;
-      }
-    };
-    for (int tick = 0; tick < 400 && !consumed(); tick++)
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    assert(consumed() && "fixture never observed the pasted payload");
-    worker.join();
+    fixtureBoard = board;
+    consumedOnDelivery = NO;
+    KCUAPasteText(board, original, @"payload", @"text", op);
+    fixtureBoard = nil;
+    assert(consumedOnDelivery && "fixture never observed the pasted payload");
     assert([[board stringForType:NSPasteboardTypeString] isEqual:@"payload"]);
     assert(deliveries.size() == 2 && deliveries[0].type == kCGEventKeyDown &&
            deliveries[1].type == kCGEventKeyUp);

@@ -30,3 +30,27 @@ test(
     }
   },
 );
+test(
+  "every method that changes the PiP panel requires the presentation capability",
+  { skip: process.platform !== "darwin" },
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kcua-roles-"));
+    try {
+      const out = join(dir, "roles");
+      await exec("/usr/bin/xcrun", [
+        "clang++",
+        "-std=c++17",
+        "-fobjc-arc",
+        "-framework",
+        "Cocoa",
+        resolve(import.meta.dirname, "../native/macos/method-roles.mm"),
+        resolve(import.meta.dirname, "method-roles-native.mm"),
+        "-o",
+        out,
+      ]);
+      assert.match((await exec(out, [])).stdout, /presentation role table regressions passed/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);

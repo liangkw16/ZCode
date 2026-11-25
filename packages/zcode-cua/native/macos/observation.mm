@@ -440,6 +440,17 @@ static AXUIElementRef refetch(const std::shared_ptr<ElementRecord> &record,
     for (id child in [children isKindOfClass:NSArray.class] ? children : @[])
       stack.push_back(child);
   }
+  if (!stack.empty()) {
+    // 修复原因：遍历因节点数或时间预算中止时栈内还有节点，原先仍返回已经找到的第一个候选。
+    // 截断点之后若还有同角色、同标识的控件，后续动作会落到错误的控件上。规范 §4.4 只允许
+    // 重新定位到唯一匹配，搜索没有完成就不能下结论：释放候选，按元素不可用处理。
+    if (candidate)
+      CFRelease(candidate);
+    KCUAFail(
+        @"element_unavailable",
+        @"Element refetch could not finish searching the window; observe again",
+        @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
+  }
   return candidate;
 }
 AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &op,

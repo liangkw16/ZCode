@@ -85,7 +85,8 @@ int main(int argc, const char *argv[]) {
       fprintf(stderr, "KCode Computer Use requires --socket <private path>\n");
       return 2;
     }
-    KCUAPresentationInitialize([args containsObject:@"--pip-mode"]);
+    KCUAPresentationInitialize([args containsObject:@"--pip-mode"],
+                               [args containsObject:@"--ghost-cursor-overlay"]);
     __block dispatch_source_t terminate;
     signal(SIGTERM, SIG_IGN);
     signal(SIGINT, SIG_IGN);

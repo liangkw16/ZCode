@@ -38,6 +38,10 @@ test(
         ["--capacity", /32768 operations reclaimed with closed sessions fenced/],
         ["--single-session-capacity", /single live session capacity reached and released without replay/],
         ["--release-drain", /late cancellation respects the session drain/],
+        ["--queued-cancel", /queued cancellation settles without dispatch or process recovery/],
+        ["--malformed-lease", /malformed lease is reported and kept without stopping the Helper/],
+        ["--lease-pid-reuse", /a lease whose recorded owner exited is reclaimed despite PID reuse/],
+        ["--read-only-peer-death", /dead host ledger reclaimed for read-only and write sessions/],
       ];
       const leaseResults = await Promise.allSettled(
         leaseModes.map(async ([mode, expected]) =>

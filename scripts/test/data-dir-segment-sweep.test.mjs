@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import test from "node:test";
 
 // 规则来源：docs/superpowers/specs/2026-10-20-kcode-full-isolation-design.md §2——
@@ -141,7 +141,7 @@ export function findGlobalZcodeLiterals(source) {
   const code = stripComments(source);
   const findings = [];
   for (const literal of code.matchAll(new RegExp(ZCODE_LITERAL.source, "g"))) {
-    const homePathText = /~\/\.zcode$/.test(literal[0]);
+    const homePathText = literal[0].endsWith("~/.zcode");
     const context = literalContext(code, literal.index);
     // 数组形态只看作为独立路径段的 ".zcode"（`[".zcode", "worktrees"]`），不含带斜杠的字符串枚举。
     const pathSegmentArray = context.kind === "array" && ["'", '"', "`"].includes(literal[1]);

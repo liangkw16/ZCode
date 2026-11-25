@@ -247,9 +247,7 @@ describe("computer-use desktop admission errors", () => {
 
   it("does not mistake a real accessibility denial for a locked desktop", async () => {
     const { target, call } = await makeTarget("darwin");
-    call.mockResolvedValueOnce(
-      refusal({ action_sent: false, dispatch_status: "not_sent" }),
-    );
+    call.mockResolvedValueOnce(refusal({ action_sent: false, dispatch_status: "not_sent" }));
     await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
       code: "PERMISSION_DENIED",
       retry: "never",

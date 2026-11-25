@@ -13,6 +13,7 @@ import type {
   MessageId,
   PartId,
   SessionEvent,
+  SessionEventSink,
   SessionId,
   TargetCompletionVerificationPayload,
   TraceContext,
@@ -79,10 +80,26 @@ export function createEvent(
   });
 }
 
+export interface SessionEventSinkFailure {
+  sink: SessionEventSink;
+  /** 实际投递的事件（已落库、带序号）。补投必须复用它，不能另起事件或序号。 */
+  event: SessionEvent;
+  error: unknown;
+}
+
+export interface AppendSessionEventOptions {
+  /**
+   * 给出时收集本次投递中抛错的 sink，由调用方决定是否补投。
+   * 不给出时与以往一致：sink 失败只记日志。
+   */
+  sinkFailures?: SessionEventSinkFailure[];
+}
+
 export async function appendEvent(
   this: AgentRuntimeInternal,
   event: SessionEvent,
   traceContext: TraceContext,
+  options: AppendSessionEventOptions = {},
 ): Promise<void> {
   // live sink 以前拿到的是 createSessionEvent 默认的 sequenceNumber=0，
   // 而 replay/read 路径拿到的是 eventStore 补号后的事件，导致同一 session 有两套顺序事实。
@@ -107,7 +124,9 @@ export async function appendEvent(
     phase = "session_event.record_usage";
     await recordToolUsageFromEvent(this, storedEvent, traceContext);
     phase = "session_event.notify_sinks";
-    await this.notifyEventSinks(storedEvent, traceContext);
+    options.sinkFailures?.push(
+      ...(await deliverSessionEventToSinks.call(this, storedEvent, traceContext)),
+    );
     if (shouldLogLifecycle) {
       this.logger?.info("Session event persistence completed", {
         ...traceContextToLogContext(traceContext),
@@ -152,10 +171,13 @@ export async function resumeStoredSessionEventPublication(
   runtime: AgentRuntimeInternal,
   event: SessionEvent,
   traceContext: TraceContext,
+  options: AppendSessionEventOptions = {},
 ): Promise<void> {
   await persistDurableSessionEvent.call(runtime, event, traceContext);
   await recordToolUsageFromEvent(runtime, event, traceContext);
-  await runtime.notifyEventSinks(event, traceContext);
+  options.sinkFailures?.push(
+    ...(await deliverSessionEventToSinks.call(runtime, event, traceContext)),
+  );
 }
 
 function recordSessionEventAppendAggregate(
@@ -553,15 +575,22 @@ async function readExistingTimelineTiming(
   return undefined;
 }
 
-export async function notifyEventSinks(
+/**
+ * 逐个 sink 投递并返回失败项。通用路径（notifyEventSinks）只记日志；提交后的 compact 事件
+ * 据此用同一事件补投一次。
+ */
+export async function deliverSessionEventToSinks(
   this: AgentRuntimeInternal,
   event: SessionEvent,
   traceContext: TraceContext,
-): Promise<void> {
-  for (const sink of this.eventSinks) {
+  sinks: Iterable<SessionEventSink> = this.eventSinks,
+): Promise<SessionEventSinkFailure[]> {
+  const failures: SessionEventSinkFailure[] = [];
+  for (const sink of sinks) {
     try {
       await sink.onSessionEvent(event);
     } catch (error) {
+      failures.push({ sink, event, error });
       this.logger?.warn("Session event sink failed", {
         ...traceContextToLogContext(traceContext),
         errorMessage: error instanceof Error ? error.message : String(error),
@@ -572,6 +601,15 @@ export async function notifyEventSinks(
       });
     }
   }
+  return failures;
+}
+
+export async function notifyEventSinks(
+  this: AgentRuntimeInternal,
+  event: SessionEvent,
+  traceContext: TraceContext,
+): Promise<void> {
+  await deliverSessionEventToSinks.call(this, event, traceContext);
 }
 
 /**

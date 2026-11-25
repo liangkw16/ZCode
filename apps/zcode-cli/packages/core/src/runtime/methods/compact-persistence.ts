@@ -86,12 +86,37 @@ export async function persistCompactTimeline(
   this: AgentRuntimeInternal,
   payload: CompactTimelinePayload,
   traceContext: TraceContext,
+  // 冷恢复修正旧状态时传入已加载的记录：只更新完成状态与 boundary 字段。
+  loaded?: MessageWithParts,
 ): Promise<void> {
   if (!this.sessionStore) return;
 
   const record = buildCompactTimelineRecord(this, payload, traceContext);
+  if (loaded) preserveCompactTimelineAssociations(record, loaded);
   await this.persistMessage(record.info, traceContext);
   for (const part of record.parts) await this.persistPart(part, traceContext);
+}
+
+// 修复原因：冷恢复修正旧的压缩状态时，原先用当前 runtime 重建整条消息再保存。此刻还没有
+// latestConversationMessageId，重建出的 parentID 指向时间线消息自己，原命令关联 sourceCommandId
+// 也丢了，V4 随后无法把这条时间线事实关联到原 /compact 命令。恢复只改完成状态与 boundary 字段，
+// 消息头与时间线 part 的关联字段沿用已加载的记录。
+function preserveCompactTimelineAssociations(
+  record: MessageWithParts,
+  loaded: MessageWithParts,
+): void {
+  if (record.info.role !== "assistant" || loaded.info.role !== "assistant") return;
+  const rebuilt = record.info;
+  record.info = {
+    ...loaded.info,
+    finish: rebuilt.finish,
+    time: { ...loaded.info.time, completed: rebuilt.time.completed },
+  };
+  record.parts = record.parts.map((part) => {
+    const previous = loaded.parts.find((item) => item.id === part.id);
+    if (part.type !== "timeline" || previous?.type !== "timeline") return part;
+    return { ...part, sourceCommandId: previous.sourceCommandId };
+  });
 }
 
 function buildCompactTimelineRecord(
@@ -266,7 +291,7 @@ export async function recoverInterruptedCompactTimelines(
         tailStartMessageId: boundary?.lastSummarizedMessageId,
         truePostCompactTokenCount: boundary?.truePostCompactTokenCount,
       });
-      await this.persistCompactTimeline(payload, traceContext);
+      await persistCompactTimeline.call(this, payload, traceContext, message);
       Object.assign(part, {
         timelineStatus: payload.status,
         phase: payload.phase,

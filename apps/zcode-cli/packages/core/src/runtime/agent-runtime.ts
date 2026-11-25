@@ -134,6 +134,7 @@ import type {
   LockPendingInputEditResult,
 } from "./types.js";
 import type { AgentRuntimeInternal } from "./internal.js";
+import type { AppendSessionEventOptions } from "./methods/events.js";
 import { InMemoryRuntimeTaskRegistry, type RuntimeTaskRegistry } from "../runtime-task/registry.js";
 import type { WorkflowBlockedReminderClock } from "../runtime-task/workflow-blocked-reminder.js";
 import type { BackgroundSubagentStallClock } from "../subagent/background-stall.js";
@@ -701,7 +702,11 @@ export interface AgentRuntime {
   /** 会话外部改了会影响组成的状态（换模型）：最近一次请求组成作废并通知。 */
   markContextCompositionChanged(): void;
   /** Bootstrap-owned lifecycle producers append only validated session events through this durable path. */
-  appendEvent(event: SessionEvent, traceContext: TraceContext): Promise<void>;
+  appendEvent(
+    event: SessionEvent,
+    traceContext: TraceContext,
+    options?: AppendSessionEventOptions,
+  ): Promise<void>;
   /**
    * 外部子 runtime 的接缝（一）：交出本 runtime 的会话事件 store，供 class 外构造的子
    * runtime 共享（照 `subagent.ts` 的 `eventStore: this.eventStore`）。理由见

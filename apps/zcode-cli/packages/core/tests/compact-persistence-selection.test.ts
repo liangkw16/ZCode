@@ -209,15 +209,77 @@ describe("committed compact boundary", () => {
     ).toBe(true);
   });
 
+  it("reports status synchronization when a live event sink keeps rejecting committed events", async () => {
+    const h = await committedFixture();
+    // 客户端接收失败：appendEvent 本身成功落库，只有 sink 抛错。
+    const deliveries: string[] = [];
+    h.internal.eventSinks.add({
+      onSessionEvent(event) {
+        if (
+          event.type !== SessionEventType.CompactBoundary &&
+          event.type !== SessionEventType.CompactCompleted
+        )
+          return;
+        deliveries.push(event.type);
+        throw new Error("client rejected compact event");
+      },
+    });
+    const result = await h.internal.compactActiveConversation(
+      undefined,
+      createRootTraceContext({ sessionId: h.sessionId }),
+      [],
+      { trigger: CompactTrigger.Auto },
+    );
+    expect(result).toMatchObject({ outcome: "compacted", syncError: expect.any(Error) });
+    // 每个事件用原 ID 与序号补投一次；boundary 失败没有跳过 completed。
+    expect(deliveries).toEqual([
+      SessionEventType.CompactBoundary,
+      SessionEventType.CompactBoundary,
+      SessionEventType.CompactCompleted,
+      SessionEventType.CompactCompleted,
+    ]);
+    expect(h.summaryCalls()).toBe(1);
+    expect(historyText(h.internal)).toContain("committed summary");
+  });
+
+  it("redelivers a committed compact event once with its original ID and sequence", async () => {
+    const h = await committedFixture();
+    const delivered: { id: string; sequence: number }[] = [];
+    h.internal.eventSinks.add({
+      onSessionEvent(event) {
+        if (event.type !== SessionEventType.CompactBoundary) return;
+        delivered.push({ id: event.id, sequence: event.sequenceNumber });
+        if (delivered.length === 1) throw new Error("transient client failure");
+      },
+    });
+    const result = await h.internal.compactActiveConversation(
+      undefined,
+      createRootTraceContext({ sessionId: h.sessionId }),
+      [],
+      { trigger: CompactTrigger.Auto },
+    );
+    expect(result.outcome).toBe("compacted");
+    expect(result).not.toHaveProperty("syncError", expect.anything());
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]).toEqual(delivered[0]);
+    expect(h.summaryCalls()).toBe(1);
+  });
+
   it.each(["failed", "interrupted"])(
     "repairs a legacy %s timeline from its committed boundary",
     async (status) => {
       const h = await committedFixture();
-      await h.runtime.executeTurn("/compact");
+      // 手动 /compact 以 inputId 作为命令关联，写进时间线 part 的 sourceCommandId。
+      await h.runtime.executeTurn("/compact", undefined, { inputId: "compact-command-1" });
       const timeline = h.store.savedParts.find(
         (p) => p.type === "compaction" && p.timelineStatus === "completed",
       );
       timeline.timelineStatus = status;
+      const before = h.store.savedMessages.find((m) => m.id === timeline.messageID);
+      const commandPart = h.store.savedParts.find(
+        (p) => p.type === "timeline" && p.messageID === timeline.messageID,
+      );
+      expect(commandPart.sourceCommandId).toBe("compact-command-1");
       const cold = createTestAgentRuntime(h.sessionId, h.config, {
         eventStore: createTestSessionEventStore(),
         sessionStore: h.store as never,
@@ -228,12 +290,26 @@ describe("committed compact boundary", () => {
       expect(h.store.savedParts.find((p) => p.id === timeline.id).timelineStatus).toBe("completed");
       const again = await cold.resumeFromStore();
       expect(again.persistedMessagesReloadRequired).toBe(false);
+      // 修复回归：恢复只改完成状态与 boundary 字段。原先整条消息被重建，冷恢复时还没有
+      // latestConversationMessageId，parentID 指向了时间线消息自己，原命令关联也丢了。
+      const after = h.store.savedMessages.find((m) => m.id === timeline.messageID);
+      expect(after.parentID).toBe(before.parentID);
+      expect(after.parentID).not.toBe(timeline.messageID);
+      expect(
+        h.store.savedParts.find((p) => p.type === "timeline" && p.messageID === timeline.messageID)
+          .sourceCommandId,
+      ).toBe(commandPart.sourceCommandId);
     },
   );
 
-  it.each(["auto", "reactive"] as const)(
-    "installs committed request entries before stopping %s on publication failure",
-    async (trigger) => {
+  it.each([
+    ["auto", "append"],
+    ["reactive", "append"],
+    ["auto", "sink"],
+    ["reactive", "sink"],
+  ] as const)(
+    "installs committed request entries before stopping %s on %s publication failure",
+    async (trigger, point) => {
       const h = await committedFixture();
       h.internal.config.compact = {
         enabled: true,
@@ -241,11 +317,21 @@ describe("committed compact boundary", () => {
         outputReserveTokens: 0,
         bufferTokens: 0,
       };
-      const append = h.internal.appendEvent.bind(h.internal);
-      vi.spyOn(h.internal, "appendEvent").mockImplementation(async (event, trace) => {
-        if (event.type === SessionEventType.CompactBoundary) throw new Error("unavailable");
-        await append(event, trace);
-      });
+      if (point === "append") {
+        const append = h.internal.appendEvent.bind(h.internal);
+        vi.spyOn(h.internal, "appendEvent").mockImplementation(async (event, trace) => {
+          if (event.type === SessionEventType.CompactBoundary) throw new Error("unavailable");
+          await append(event, trace);
+        });
+      } else {
+        // 落库成功，只是客户端一直收不下 boundary。
+        h.internal.eventSinks.add({
+          onSessionEvent(event) {
+            if (event.type === SessionEventType.CompactBoundary)
+              throw new Error("client rejected compact event");
+          },
+        });
+      }
       const state = {
         entries: h.internal.messageHistory.borrowReadOnlyRuntimeEntries(),
         outputTokenContinuationCount: 0,
@@ -372,6 +458,36 @@ describe("committed compact boundary", () => {
           (event.payload as { querySource?: string }).querySource === "main_turn",
       ),
     ).toHaveLength(3);
+  });
+
+  it("does not regenerate a third summary when recording the second truncated usage fails", async () => {
+    const h = await committedFixture("always");
+    h.internal.config.compact = {
+      enabled: true,
+      contextWindow: 1,
+      outputReserveTokens: 0,
+      bufferTokens: 0,
+    };
+    // 第二次截断摘要的 ModelComplete 计量事件写入失败。
+    const append = h.internal.appendEvent.bind(h.internal);
+    let truncatedCompletions = 0;
+    vi.spyOn(h.internal, "appendEvent").mockImplementation(async (event, trace) => {
+      const payload = event.payload as { querySource?: string; stopReason?: string };
+      if (
+        event.type === SessionEventType.ModelComplete &&
+        payload.querySource === "compact" &&
+        payload.stopReason === "length" &&
+        ++truncatedCompletions === 2
+      )
+        throw new Error("event store unavailable");
+      await append(event, trace);
+    });
+    await expect(h.runtime.executeTurn("continue the task")).rejects.toThrow(
+      "Compact summary exceeded the output limit",
+    );
+    expect(h.summaryCalls()).toBe(2);
+    expect(h.store.savedMessages.some((m) => m.summary)).toBe(false);
+    expect(historyText(h.internal)).toContain("old original prompt one");
   });
 
   it("keeps old history when the summary/completion transaction fails", async () => {

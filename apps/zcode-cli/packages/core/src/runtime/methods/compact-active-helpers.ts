@@ -32,7 +32,11 @@ import type { CompactRecentPreservationPolicy } from "../helpers/index.js";
 import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 
 import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
-import { resumeStoredSessionEventPublication } from "./events.js";
+import {
+  deliverSessionEventToSinks,
+  resumeStoredSessionEventPublication,
+  type SessionEventSinkFailure,
+} from "./events.js";
 
 const COMPACT_SUMMARY_OUTPUT_LIMIT_REASON = "compact_summary_output_limit";
 
@@ -43,19 +47,30 @@ export function isCompactSummaryOutputLimitError(error: unknown): boolean {
 export const COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT =
   "The previous summary exceeded the output limit. Rewrite the complete handoff substantially more concisely. Preserve the current goal, constraints, evidence gaps, and next action; omit repeated history and long excerpts.";
 
-export function createCompactSummaryOutputLimitError(result: RuntimeModelTextResult): Error {
+export function createCompactSummaryOutputLimitError(
+  result: RuntimeModelTextResult,
+  options: { usageRecordingError?: unknown } = {},
+): Error {
   return createCoreError(
     CoreErrorType.ModelError,
     // 修复原因：按设计，输出上限恢复耗尽后报不可原样重试的错误、不丢旧轮次；但原文案没有告诉用户
     // 下一步怎么办。补上两个可操作的配置项，键名与 adapters 配置 schema 一致。
+    // 摘要预算取 summaryMaxOutputTokens 与摘要模型最大输出中的较小值（capCompactSummaryMaxOutputTokens），
+    // 所以加大上下文窗口并不会放宽它：先调预算，预算已到模型上限再换最大输出更高的模型。
     "Compact summary exceeded the output limit twice; the original history was preserved. " +
-      "Raise compact.summaryMaxOutputTokens, or set compact.summaryProvider and compact.summaryModel " +
-      "to a model with a larger context window, then retry.",
+      "Raise compact.summaryMaxOutputTokens; if it already reaches the summary model's maximum " +
+      "output, set compact.summaryProvider and compact.summaryModel to a model with a larger " +
+      "maximum output, then retry.",
     {
+      ...(options.usageRecordingError instanceof Error
+        ? { cause: options.usageRecordingError }
+        : {}),
       context: {
         reason: COMPACT_SUMMARY_OUTPUT_LIMIT_REASON,
         finishReason: result.finishReason,
         rawFinishReason: readRawFinishReason(result.providerMetadata),
+        // 截断摘要的真实用量没能入账；诊断时不要把它当成未发生过的请求。
+        ...(options.usageRecordingError !== undefined ? { usageRecordingFailed: true } : {}),
       },
       recoverable: true,
       retryable: false,
@@ -191,16 +206,32 @@ export async function publishCommittedCompactEvents(
   let failure: Error | undefined;
   for (const event of pending) {
     try {
+      // 修复原因：sink 抛错被 notifyEventSinks 吞掉，只有 appendEvent 自身失败才走得到补投分支，
+      // 返回的 syncError 恒为空。客户端漏掉压缩完成状态，auto/reactive 仍继续下一次模型请求。
+      const sinkFailures: SessionEventSinkFailure[] = [];
       try {
-        await runtime.appendEvent(event, trace);
+        await runtime.appendEvent(event, trace, { sinkFailures });
       } catch {
         const stored = (await runtime.eventStore.getEvents(runtime.sessionId)).find(
           (item) => item.id === event.id,
         );
-        if (stored) await resumeStoredSessionEventPublication(runtime, stored, trace);
-        else await runtime.appendEvent(event, trace);
+        if (stored)
+          await resumeStoredSessionEventPublication(runtime, stored, trace, { sinkFailures });
+        else await runtime.appendEvent(event, trace, { sinkFailures });
       }
       events.push(event);
+      // 落库已经成功，sink 失败不改 compact 终态：对失败的 sink 用同一事件（原 ID 与序号）补投一次。
+      let rejected = 0;
+      for (const sinkFailure of sinkFailures) {
+        const remaining = await deliverSessionEventToSinks.call(runtime, sinkFailure.event, trace, [
+          sinkFailure.sink,
+        ]);
+        rejected += remaining.length;
+      }
+      if (rejected > 0)
+        throw new Error(
+          `${rejected} event sink(s) rejected ${event.type} again after one redelivery`,
+        );
     } catch (error) {
       failure ??= createCoreError(
         CoreErrorType.ModelError,

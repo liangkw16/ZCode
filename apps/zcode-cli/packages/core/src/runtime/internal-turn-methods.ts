@@ -71,6 +71,7 @@ import type {
   RuntimeBackgroundStopOptions,
   RuntimeBackgroundStopResult,
 } from "./methods/background.js";
+import type { AppendSessionEventOptions } from "./methods/events.js";
 import type {
   AutoCompactLoopContext,
   AutoCompactOutcome,
@@ -321,7 +322,11 @@ export interface AgentRuntimeTurnMethods {
     },
   ): BackgroundTaskInfo;
   createEvent(type: SessionEventType, payload: unknown, traceContext: TraceContext): SessionEvent;
-  appendEvent(event: SessionEvent, traceContext: TraceContext): Promise<void>;
+  appendEvent(
+    event: SessionEvent,
+    traceContext: TraceContext,
+    options?: AppendSessionEventOptions,
+  ): Promise<void>;
   notifyEventSinks(event: SessionEvent, traceContext: TraceContext): Promise<void>;
   ensureSessionPersisted(input: string, traceContext: TraceContext): Promise<void>;
   buildCompactTimelinePayload(

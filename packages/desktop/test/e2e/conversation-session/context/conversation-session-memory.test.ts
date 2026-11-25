@@ -799,7 +799,8 @@ function extractMainMemoryIndexContext(requestJson: unknown): string {
   );
   if (!contextBlock) throw new Error("provider request is missing the Main MEMORY.md source");
 
-  const contextStart = contextBlock.indexOf("Codebase and user instructions are shown below.");
+  // 前言首短语不带句号：本仓的共同前言在 "shown below" 之后还有来源与作用域说明。
+  const contextStart = contextBlock.indexOf("Codebase and user instructions are shown below");
   const firstSourceStart = contextBlock.indexOf("\n\nContents of ", contextStart);
   const memorySourceStart = contextBlock.indexOf(
     `Contents of ${PROJECT_MEMORY_INDEX} (${MAIN_MEMORY_INDEX_SOURCE}):`,

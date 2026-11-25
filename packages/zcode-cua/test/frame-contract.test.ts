@@ -4,6 +4,7 @@ import {
   OFFICIAL_CUA_FRAME_INTEGRITY_META_KEY as key,
   parseOfficialCuaImageRef,
   containsImageRefAuthority,
+  containsOfficialCuaImageRefCredentialText,
   readRasterEnvelopeIdentity,
   preserveOfficialCuaFrameResult,
   attestOfficialCuaFrameContent,
@@ -50,6 +51,30 @@ it("parses exact actionable authority and detects nested or embedded credentials
   ).toBeNull();
   expect(containsImageRefAuthority({ value: ["prefix " + ref.text + " suffix"] })).toBe(true);
   expect(containsImageRefAuthority({ value: "plain text" })).toBe(false);
+});
+it("requires a frame- prefixed id and fails closed on text beyond the credential scan limit", async () => {
+  // 上游 core 的夹具曾用 frame_exact_001（下划线）；真实契约只认 "frame-" 前缀，防止伪造引用混入。
+  expect(
+    parseOfficialCuaImageRef({
+      type: "text",
+      text: JSON.stringify({
+        image_ref: { frame_id: "frame_exact_001", width: 1, height: 1, actionable: true },
+      }),
+    }),
+  ).toBeNull();
+  const limit = 263168;
+  expect(containsOfficialCuaImageRefCredentialText("a".repeat(limit))).toBe(false);
+  expect(containsOfficialCuaImageRefCredentialText("a".repeat(limit + 1))).toBe(true);
+  // 扫描不了的文本不能降级成普通文本放行：没有合法帧对时整条结果按完整性校验失败处理。
+  const oversized = { content: [{ type: "text", text: "a".repeat(limit + 1) }] };
+  expect(containsImageRefAuthority(oversized.content)).toBe(true);
+  const preserved = { content: [{ type: "text", text: "a".repeat(limit) }] };
+  expect(
+    (await preserveOfficialCuaFrameResult(oversized, { imageProcessorPort: processor })).isError,
+  ).toBe(true);
+  expect(await preserveOfficialCuaFrameResult(preserved, { imageProcessorPort: processor })).toBe(
+    preserved,
+  );
 });
 it("checks complete PNG envelope, exact byte hash and host full decode without resizing", async () => {
   expect(readRasterEnvelopeIdentity(bytes)).toEqual({ mimeType: "image/png", width: 1, height: 1 });

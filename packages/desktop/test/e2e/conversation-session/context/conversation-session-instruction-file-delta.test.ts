@@ -46,7 +46,8 @@ const RULE_V1 = "IFD_RULE_V1 original rule";
 const RULE_V2 = "IFD_RULE_V2 changed between turns";
 const RULE_V3 = "IFD_RULE_V3 changed before compact";
 const COMPACT_REQUEST = "CRITICAL: Respond with TEXT ONLY";
-const FULL_HEAD = "Codebase and user instructions are shown below.";
+// 只取首短语：本仓的共同前言在 "shown below" 之后还有来源与作用域说明，不能带句号整句匹配。
+const FULL_HEAD = "Codebase and user instructions are shown below";
 const DELTA_HEAD = "Instruction files were re-read";
 const PROJECT_TYPE = "(project instructions, checked into the codebase):";
 

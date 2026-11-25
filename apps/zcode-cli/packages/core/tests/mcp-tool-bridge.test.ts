@@ -883,6 +883,9 @@ describe("MCP tool bridge", () => {
     const registry = createToolRegistry();
     const imageData =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    // 修复原因：上游开源仓库的 frame-contract 是空壳实现，原夹具的 frame_exact_001 能原样通过；
+    // 本仓换成真实契约后 frame_id 必须以 "frame-" 开头，否则按伪造引用拒绝。夹具改成合法 id，
+    // 用例原意（权威帧逐字节保留）不变；规则由 packages/zcode-cua/test/frame-contract.test.ts 钉住。
     const result = {
       content: [
         { type: "image" as const, data: imageData, mimeType: "image/png" },
@@ -891,14 +894,14 @@ describe("MCP tool bridge", () => {
           text: JSON.stringify({
             image_ref: {
               actionable: true,
-              frame_id: "frame_exact_001",
+              frame_id: "frame-exact-001",
               height: 1,
               width: 1,
             },
           }),
         },
       ],
-      _meta: officialCuaIntegrityMeta("frame_exact_001", imageData),
+      _meta: officialCuaIntegrityMeta("frame-exact-001", imageData),
     };
     const callTool = vi.fn(async () => result);
     registerMcpTools(
@@ -1015,7 +1018,10 @@ describe("MCP tool bridge", () => {
 
   it("keeps official CUA receipt normalization out of the bridge budget path", async () => {
     const registry = createToolRegistry();
-    const oversizedState = `state_id=s-2 app=Example\n${"tree-node ".repeat(30_000)}`;
+    // 修复原因：真实 frame 契约把超过 263168 字节的文本按潜在凭据载体 fail-closed（上游空壳实现
+    // 不设此限，原夹具 30_000 次重复约 300 KB 会直接命中）。这里取 256 KiB 到 263168 字节之间：
+    // 仍超出 resultBudget 触发截断路径，又不触发凭据防护，用例原意（receipt 不被预算改写）不变。
+    const oversizedState = `state_id=s-2 app=Example\n${"tree-node ".repeat(26_300)}`;
     const receipt = cuaActionReceipt();
     registerMcpTools(
       registry,

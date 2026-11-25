@@ -1561,8 +1561,10 @@ describe("session persistence", () => {
       expect(result.response).toBe("done");
       expect(capturedSystem).not.toContain("project-rule-314");
       // 指令作为 context_prefix 公告注入 user 侧，直接以指令前言开头，不带聚合标题，带来源标签。
+      // 修复原因：本仓按 kcode-prompt-refinement 设计加长了共同前言（"shown below, with their
+      // sources…"），这里只钉住首短语；前言全文由 core 的 prompt snapshot 用例覆盖。
       expect(capturedMetaUser).toMatch(
-        /^<system-reminder>\nCodebase and user instructions are shown below\./,
+        /^<system-reminder>\nCodebase and user instructions are shown below,/,
       );
       expect(capturedMetaUser).not.toContain("# agentsMd");
       expect(capturedMetaUser).not.toContain("# claudeMd");

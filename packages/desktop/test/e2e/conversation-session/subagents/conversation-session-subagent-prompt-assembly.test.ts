@@ -46,7 +46,8 @@ const ENVIRONMENT_ANNOUNCEMENT =
   "# Environment\nYou have been invoked in the following environment";
 const MODEL_ANNOUNCEMENT = "You are powered by the model named";
 const DATE_ANNOUNCEMENT = "Today's date is ";
-const INSTRUCTIONS_PREAMBLE = "Codebase and user instructions are shown below.";
+// 只取首短语：本仓的共同前言在 "shown below" 之后还有来源与作用域说明，不能带句号整句匹配。
+const INSTRUCTIONS_PREAMBLE = "Codebase and user instructions are shown below";
 const WORKSPACE_AGENTS_MARKER = "E2E_SUBAGENT_WORKSPACE_AGENTS_INSTRUCTION";
 const TEST_HOME_DIR = resolveE2EHomeDir();
 const USER_AGENTS_PATH = join(TEST_HOME_DIR, ".zcode", "AGENTS.md");

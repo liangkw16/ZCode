@@ -1,9 +1,13 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Socket } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createComputerUseRuntime } from "../index.js";
+import {
+  CUA_REQUEST_ACCESS_STATUS_META_KEY,
+  cuaRequestAccessStatusSchema,
+} from "../request-access-contract.js";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const fn of cleanups.splice(0).reverse()) await fn();
@@ -28,6 +32,10 @@ async function fixture(options: {
   let generation = "g1",
     epoch = 0,
     failObservation = false,
+    appExited = false,
+    failCall:
+      | ((request: any, ordinal: number) => Record<string, unknown> | undefined)
+      | undefined,
     rasterFailure: "blank" | "capture_error" | undefined;
   const server = createServer((socket) => {
     sockets.add(socket);
@@ -60,6 +68,13 @@ async function fixture(options: {
           continue;
         }
         calls.push(r);
+        // 注入点：按方法与第几次调用返回错误或指定结果，用来模拟多步骤动作中途失败。
+        const ordinal = calls.filter((c) => c.method === r.method).length;
+        const injected = failCall?.(r, ordinal);
+        if (injected) {
+          socket.end(JSON.stringify({ id: r.id, ok: false, error: injected }) + "\n");
+          continue;
+        }
         if (r.method === options.hold) continue;
         if (r.method === "operation_cancel") {
           epoch++;
@@ -105,11 +120,21 @@ async function fixture(options: {
               }
             : r.method === "list_applications"
               ? [{ pid: 700, bundle_id: "dev.fixture", name: "Fixture" }]
+              : r.method === "application_info"
+                ? // 与原生一致：应用在运行时返回应用信息，已退出时返回 null。
+                  (appExited ? null : { pid: 700, bundle_id: "dev.fixture", name: "Fixture" })
               : r.method === "list_windows"
                 ? [{ window_id: 10 }]
                 : r.method === "session_release"
                   ? { cleanup_complete: true }
-                  : { action_sent: true, dispatch_status: "accepted" };
+                  : r.method === "request_access" || r.method === "permission_status"
+                    ? {
+                        grant_owner: "dev.zcode.cua-helper.kcode",
+                        accessibility: "granted",
+                        screen_recording: "denied",
+                        desktop_availability: "unlocked",
+                      }
+                    : { action_sent: true, dispatch_status: "accepted" };
         if (r.method === "capture_app" && r.params.include_screenshot && rasterFailure) {
           Object.assign(result, rasterFailure === "blank"
             ? { screenshot_blank: true }
@@ -148,6 +173,10 @@ async function fixture(options: {
     setEpoch: (e: number) => (epoch = e),
     failObservation: () => (failObservation = true),
     setRasterFailure: (failure?: "blank" | "capture_error") => (rasterFailure = failure),
+    setAppExited: (exited: boolean) => (appExited = exited),
+    setFailCall: (
+      hook: ((request: any, ordinal: number) => Record<string, unknown> | undefined) | undefined,
+    ) => (failCall = hook),
   };
 }
 it.each([true, false])(
@@ -392,8 +421,9 @@ it("cancels and drains before settling, invalidates old indices and allows the s
 });
 it("projects only the latest delivered raster to native points and keeps it across hidden or AX-only observations", async () => {
   const f = await fixture({ screenshot: true });
-  const observed = await f.run("get_app_state", { app_ref: { pid: 700 } });
+  const observed = await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: true });
   const frame = JSON.parse((observed.content.at(-1) as any).text).image_ref.frame_id;
+  // 纯 AX 观察不产生新帧，也不撤销仍有效的旧帧（设计 §9.1）。
   await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
   expect(
     (
@@ -412,7 +442,8 @@ it("projects only the latest delivered raster to native points and keeps it acro
       expected_desktop_epoch: 0,
     },
   });
-  await f.run("get_app_state", { app_ref: { pid: 700 } });
+  // 新的像素观察撤销旧帧。
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: true });
   const before = f.calls.filter((c) => c.method === "click").length;
   expect(
     (
@@ -426,7 +457,7 @@ it("projects only the latest delivered raster to native points and keeps it acro
 });
 it("allows an implicit latest-frame coordinate across fresh SDK cells", async () => {
   const f = await fixture({ screenshot: true });
-  await f.run("get_app_state", { app_ref: { pid: 700 } });
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: true });
   expect(
     (
       await f.run("left_click", {
@@ -441,7 +472,7 @@ it.each(["blank", "capture_error", "request_error", "after_input"] as const)(
   async (scenario) => {
     const f = await fixture({ screenshot: true, pixelsOnly: true });
     const app_ref = { pid: 700 };
-    const first = await f.run("get_app_state", { app_ref });
+    const first = await f.run("get_app_state", { app_ref, include_screenshot: true });
     const frame_id = JSON.parse((first.content.at(-1) as any).text).image_ref.frame_id;
     const pixel = { type: "coordinate", x: 0, y: 0 };
     if (scenario === "after_input") {
@@ -569,19 +600,35 @@ it("honors the documented key repeat, type target focus and whole-value select_t
   expect(key.isError, JSON.stringify(key)).not.toBe(true);
   expect(f.calls.filter((c) => c.method === "press_key_to_app")).toHaveLength(3);
 
-  // 文档约定 type 可带 target：元素先聚焦再输入。
+  // 文档约定 type 可带 target：定位与输入是同一次原生请求（Host 侧分两步时并发调用会交错）。
+  const sentBefore = f.calls.length;
   const typed = await f.run("type", { ...base, text: "hello", target });
   expect(typed.isError, JSON.stringify(typed)).not.toBe(true);
-  expect(f.calls.slice(-2).map((c) => c.method)).toEqual(["element_focus", "type_text_to_app"]);
-  expect(f.calls.at(-2)?.params).toMatchObject({ native: "token1" });
+  expect(f.calls.length).toBe(sentBefore + 1);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "type_text_to_app",
+    params: { focus_native: "token1", text: "hello" },
+  });
+  expect(f.calls.at(-1).params).not.toHaveProperty("click_native");
+  // 显式 event 不碰 AX 焦点：按元素当前位置点击定位。
+  const eventTyped = await f.run("type", {
+    ...base, text: "hello", target, strategy: "event",
+  });
+  expect(eventTyped.isError, JSON.stringify(eventTyped)).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "type_text_to_app",
+    params: { click_native: "token1", text: "hello" },
+  });
+  expect(f.calls.at(-1).params).not.toHaveProperty("focus_native");
 
-  // 文档约定不带 text_range 时选中整个值；夹具里的值是 "中文🌟"（UTF-16 长度 4）。
+  // 文档约定不带 text_range 时选中整个值：范围由原生层按元素当前值计算，Host 不传。
   const selected = await f.run("select_text", { ...base, target });
   expect(selected.isError, JSON.stringify(selected)).not.toBe(true);
-  expect(f.calls.at(-1)).toMatchObject({
-    method: "element_select_text",
-    params: { text_range: [0, 4] },
-  });
+  expect(f.calls.at(-1)).toMatchObject({ method: "element_select_text", params: { native: "token1" } });
+  expect(f.calls.at(-1).params).not.toHaveProperty("text_range");
+  const ranged = await f.run("select_text", { ...base, target, text_range: [1, 2] });
+  expect(ranged.isError, JSON.stringify(ranged)).not.toBe(true);
+  expect(f.calls.at(-1).params.text_range).toEqual([1, 2]);
 
   // 文档里的修饰键是 "+" 分隔的和弦字符串。
   const clicked = await f.run("left_click", { ...base, target, modifiers: "cmd+Shift" });
@@ -600,4 +647,140 @@ it("honors the documented key repeat, type target focus and whole-value select_t
     expect(f.calls.length).toBe(sent);
   }
   expect(f.calls.filter((c) => c.method === "press_key_to_app")).toHaveLength(3);
+});
+
+it("does not capture a raster unless include_screenshot is true", async () => {
+  const f = await fixture({ screenshot: true });
+  const state = await f.run("get_app_state", { app_ref: { pid: 700 } });
+  expect(state.isError, JSON.stringify(state)).not.toBe(true);
+  expect(state.content.some((item) => item.type === "image")).toBe(false);
+  expect(f.calls.find((c) => c.method === "capture_app").params.include_screenshot).toBe(false);
+});
+
+it("drops a cached binding when application_info reports that the app exited", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  f.setAppExited(true);
+  const hidden = await f.run("get_app_state", {
+    app_ref: { pid: 700 }, include_screenshot: false, tree_shown_to_model: false,
+  });
+  expect(hidden.isError, JSON.stringify(hidden)).not.toBe(true);
+  // 缓存被撤销并重新观察，而不是带着旧 PID 原样返回。
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(2);
+});
+
+it("maps request_access to the documented AccessStatus and accepts the SDK's stop reason", async () => {
+  const f = await fixture();
+  const access = await f.run("request_access", { capabilities: ["accessibility"] });
+  expect(access.isError, JSON.stringify(access)).not.toBe(true);
+  const status = {
+    ready: false,
+    accessibility: "granted",
+    screenRecording: "denied",
+  };
+  // SDK 的 requestAccess() 解析首个文本块；桌面的权限观察读取 _meta 里的权限事实。
+  expect(access.structuredContent).toEqual(status);
+  expect(JSON.parse(access.content[0].text)).toEqual(status);
+  expect(cuaRequestAccessStatusSchema.safeParse(access._meta[CUA_REQUEST_ACCESS_STATUS_META_KEY]))
+    .toMatchObject({ success: true });
+  expect(access._meta[CUA_REQUEST_ACCESS_STATUS_META_KEY]).toMatchObject({
+    platform: "darwin",
+    grantOwner: "dev.zcode.cua-helper.kcode",
+    accessibility: "granted",
+    screenRecording: "denied",
+  });
+  const stopped = await f.run("stop_computer_control", { reason: "user" });
+  expect(stopped.isError, JSON.stringify(stopped)).not.toBe(true);
+  expect(stopped.structuredContent).toEqual({ stopped: true });
+});
+
+it.each(["error", "not_sent"] as const)(
+  "reports a multi-step action as sent when an earlier step was dispatched (%s on the later step)",
+  async (later) => {
+    const f = await fixture();
+    await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+    f.setFailCall((request, ordinal) =>
+      request.method === "press_key_to_app" && ordinal === 2
+        ? later === "error"
+          ? {
+              code: "cancelled",
+              message: "cancelled before dispatch",
+              details: { action_sent: false, dispatch_status: "not_sent" },
+            }
+          : { code: "cancelled", message: "cancelled before dispatch" }
+        : undefined,
+    );
+    const result = await f.run("key", { app_ref: { pid: 700 }, text: "ENTER", repeat: 2 });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: "cancelled" },
+      // 第一次按键已经发出，整次回执不能报成 not_sent。
+      action_receipt: { action_sent: true, dispatch_status: "possibly_sent" },
+    });
+  },
+);
+
+describe("stop latch with an injected runtime", () => {
+  async function runtimeFixture() {
+    const { createRuntime } = await import("../src/app/runtime.js");
+    const dispatched: string[] = [];
+    let failPrepare = true;
+    let pending: Promise<void> | undefined;
+    const runtime = createRuntime({
+      id: () => "fixture",
+      prepare: async () => {
+        if (pending) await pending;
+        if (failPrepare) throw new Error("helper unavailable");
+      },
+      broker: {
+        generation: "g1",
+        epoch: () => 0,
+        call: async (method: string) => {
+          dispatched.push(method);
+          return { action_sent: true, dispatch_status: "accepted" };
+        },
+        close: async () => {},
+      },
+    } as any);
+    cleanups.push(() => runtime.dispose());
+    const run = (toolName: string, args: unknown = {}) =>
+      runtime.execute({ toolName, arguments: args, context });
+    return {
+      run,
+      dispatched,
+      recoverPrepare: () => (failPrepare = false),
+      // 让之后的 prepare() 都停在栅栏上，直到返回的函数被调用。
+      blockPrepare: () => {
+        let release!: () => void;
+        pending = new Promise<void>((resolve) => (release = resolve));
+        return release;
+      },
+    };
+  }
+  it("keeps the session stopped when Helper preparation fails during stop", async () => {
+    const f = await runtimeFixture();
+    // stop 请求本身因准备失败而报错，但停止标记已经落下。
+    expect((await f.run("stop_computer_control", { reason: "user" })).isError).toBe(true);
+    f.recoverPrepare();
+    const key = await f.run("key", { app_ref: { pid: 700 }, text: "ENTER" });
+    expect(key.structuredContent).toMatchObject({
+      error: { code: "stopped" },
+      action_receipt: { dispatch_status: "not_sent" },
+    });
+    expect(f.dispatched).not.toContain("press_key_to_app");
+    expect((await f.run("stop_computer_control", { reason: "user" })).isError).not.toBe(true);
+  });
+  it("re-checks the stop latch after a request has finished waiting for preparation", async () => {
+    const f = await runtimeFixture();
+    f.recoverPrepare();
+    const release = f.blockPrepare();
+    const blocked = f.run("key", { app_ref: { pid: 700 }, text: "ENTER" });
+    // 等待 prepare() 期间到达的 stop 同样生效。
+    const stopped = f.run("stop_computer_control", { reason: "user" });
+    release();
+    expect((await stopped).isError).not.toBe(true);
+    const key = await blocked;
+    expect(key.structuredContent).toMatchObject({ error: { code: "stopped" } });
+    expect(f.dispatched).not.toContain("press_key_to_app");
+  });
 });

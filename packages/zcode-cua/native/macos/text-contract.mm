@@ -142,6 +142,13 @@ KCUAKeyChord KCUAParseKeyChord(NSString *text) {
 }
 
 CFRange KCUATextSelection(NSString *value, NSArray *range) {
+  // 省略 text_range 表示选中整个值（工具文档的约定）。长度取元素当前值，而不是 Host 观测到的值：
+  // 观测字符串会被截到 16,384 个码元，长值按它算会漏选尾部。
+  if (!range) {
+    if (![value isKindOfClass:NSString.class])
+      KCUAFail(@"not_selectable", @"Text selection requires a text value");
+    return CFRangeMake(0, (NSInteger)value.length);
+  }
   if (![range isKindOfClass:NSArray.class] || range.count != 2 ||
       ![range[0] isKindOfClass:NSNumber.class] ||
       ![range[1] isKindOfClass:NSNumber.class])

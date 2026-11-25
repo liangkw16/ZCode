@@ -31,7 +31,7 @@ test(
         binary,
       ]);
       const { stdout } = await exec(binary, { timeout: 10000 });
-      assert.match(stdout, /raster budget and immutable small PNG passed/);
+      assert.match(stdout, /immutable small PNG and wide-window side limit passed/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

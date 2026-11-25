@@ -61,6 +61,35 @@ int main(void) {
     assert(decoded.pixelsWide == [encoded[@"width"] integerValue]);
     assert(decoded.pixelsHigh == [encoded[@"height"] integerValue]);
     assert(decoded.pixelsWide <= 1280 && decoded.pixelsHigh <= 640);
-    puts("native raster budget and immutable small PNG passed");
+
+    // 修复回归：宽而好压缩的窗口（5000×500 双色）PNG 远小于字节预算，原先不看边长原样返回，
+    // 超过 Host 的 4096 上限后整次观察会被判成 invalid_response。
+    NSUInteger wideWidth = 5000, wideHeight = 500;
+    NSBitmapImageRep *wide =
+        [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
+                                                pixelsWide:wideWidth
+                                                pixelsHigh:wideHeight
+                                             bitsPerSample:8
+                                           samplesPerPixel:4
+                                                  hasAlpha:YES
+                                                  isPlanar:NO
+                                            colorSpaceName:NSDeviceRGBColorSpace
+                                               bytesPerRow:wideWidth * 4
+                                              bitsPerPixel:32];
+    memset(wide.bitmapData, 0, wideWidth * wideHeight * 4);
+    for (NSUInteger i = 0; i < wideWidth * wideHeight; i++)
+      wide.bitmapData[i * 4 + 3] = 255;
+    NSData *widePNG =
+        [wide representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    assert(widePNG.length < 153600);
+    NSDictionary *scaled = KCUAEncodeRaster(widePNG, wideWidth, wideHeight);
+    assert([scaled[@"width"] integerValue] == 4096);
+    assert([scaled[@"height"] integerValue] == 409);
+    assert([scaled[@"format"] isEqual:@"png"]);
+    assert([scaled[@"bytes"] length] <= 153600);
+    NSBitmapImageRep *scaledDecoded =
+        [NSBitmapImageRep imageRepWithData:scaled[@"bytes"]];
+    assert(scaledDecoded.pixelsWide == 4096 && scaledDecoded.pixelsHigh == 409);
+    puts("native raster budget, immutable small PNG and wide-window side limit passed");
   }
 }

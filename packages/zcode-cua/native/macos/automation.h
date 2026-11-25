@@ -32,6 +32,13 @@ AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &op,
                                   KCUATargetRef *target);
 NSDictionary *KCUACapture(const KCUATargetRef &target, const KCUAOp &op);
 id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op);
+// 输入前的目标定位，三选一：focus_native（AX 聚焦该元素）、click_native（点击该元素当前的中心）、
+// click_point（点击已验证窗口内的一点）。与随后的输入在同一次原生操作里完成。
+void KCUAPositionTyping(NSDictionary *params, const KCUATargetRef &target,
+                        const KCUAOp &op);
+// 粘贴事务；运行时传入系统剪贴板，测试可传入独立剪贴板。
+void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
+                   NSString *text, NSString *format, const KCUAOp &op);
 void KCUAInputCleanup(const KCUAOp &op);
 id KCUAPresentation(NSString *method, NSDictionary *params, const KCUAOp &op);
 

@@ -29,6 +29,20 @@ int main(void) {
     assert(rejected(@"A🌟B", @[ @0, @9 ]));
     CFRange end = KCUATextSelection(@"A🌟B", @[ @4, @0 ]);
     assert(end.location == 4 && end.length == 0);
+    // 省略范围即全选：长度取元素当前值，不受 Host 侧观测截断（16,384 码元）影响。
+    CFRange whole = KCUATextSelection(@"A🌟B", nil);
+    assert(whole.location == 0 && whole.length == 4);
+    NSString *long_ = [@"" stringByPaddingToLength:20000 withString:@"x" startingAtIndex:0];
+    assert(KCUATextSelection(long_, nil).length == 20000);
+    assert(KCUATextSelection(@"", nil).length == 0);
+    bool notText = false;
+    id numeric = @42;
+    @try {
+      KCUATextSelection(numeric, nil);
+    } @catch (NSException *error) {
+      notText = [error.name isEqual:@"not_selectable"];
+    }
+    assert(notText);
     KCUAKeyChord chord = KCUAParseKeyChord(@"cmd+shift+k");
     assert(chord.key == 40);
     assert(chord.flags == (kCGEventFlagMaskCommand | kCGEventFlagMaskShift));

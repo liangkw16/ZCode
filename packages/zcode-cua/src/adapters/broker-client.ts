@@ -204,6 +204,14 @@ const needsObservation = () => new NativeBrokerError(
   "stale_state", "Helper recovery requires a fresh observation before input",
   { action_sent: false, dispatch_status: "not_sent" },
 );
+// 修复原因：长按最长 30 秒，原生在松开后才回包；沿用固定的请求 deadline 时，客户端会先超时并
+// 取消已经派发的按键。请求 deadline 在原有预算之上加上按住时长；调用方即时取消不受影响。
+function holdSeconds(params: unknown): number {
+  const duration = (params as { duration?: unknown } | null)?.duration;
+  return typeof duration === "number" && Number.isFinite(duration) && duration > 0
+    ? duration
+    : 0;
+}
 export function createBrokerClient(options: {
   socketPath: string;
   timeoutMs?: number;
@@ -350,7 +358,8 @@ export function createBrokerClient(options: {
     local.signal.addEventListener("abort", cancel);
     try {
       const result = await exchange<T>(options.socketPath, method, params, {
-        timeoutMs: callOptions.timeoutMs ?? options.timeoutMs ?? 12000,
+        timeoutMs:
+          (callOptions.timeoutMs ?? options.timeoutMs ?? 12000) + holdSeconds(params) * 1000,
         afterDrain: drained.signal,
         session: callOptions.session,
         role: options.role,

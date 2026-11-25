@@ -18,6 +18,10 @@ import {
   truncateUtf16,
   OFFICIAL_CUA_FRAME_INTEGRITY_META_KEY,
 } from "../domain/frame.js";
+import {
+  CUA_REQUEST_ACCESS_STATUS_META_KEY,
+  cuaRequestAccessStatusSchema,
+} from "../../request-access-contract.js";
 interface Observation {
   state: Bag;
   tokens: Map<number, string>;
@@ -111,7 +115,9 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
     signal?: AbortSignal,
     context?: ComputerUseRuntimeContext,
   ) {
-    const includesPixels = args.include_screenshot ?? true;
+    // 沿用旧契约与 SDK 文档：缺省不截图。纯 AX 观察不产生新帧，也不撤销此前仍有效的像素帧；
+    // 坐标目标绑定的是会话最近一次可操作的栅格。
+    const includesPixels = args.include_screenshot ?? false;
     const frameRequest = includesPixels && s.activeInputs === 0 ? {} : undefined;
     if (includesPixels) {
       // 新的取图请求一旦开始就撤销旧坐标。空白、失败或迟到的旧响应不能恢复它。
@@ -126,10 +132,14 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           o.generation === ports.broker.generation &&
           o.epoch === ports.broker.epoch(key),
       );
-    if (args.tree_shown_to_model === false && args.include_screenshot === false && cachedState()) {
-      await native("application_info", { app_ref: args.app_ref }, key, s, signal);
-      const cached = cachedState();
-      if (cached) return ok(cached.state);
+    const cached = cachedState();
+    if (args.tree_shown_to_model === false && args.include_screenshot === false && cached) {
+      // 修复原因：application_info 的返回值原先被丢弃。应用已退出（native 返回 null）或 PID 已变时，
+      // 隐式绑定仍会带着旧缓存成功返回；现在改走一次完整观察。这次 native 调用可能带回新的 epoch，
+      // 所以调用之后还要确认缓存仍是当前代际的那一份。
+      const app = await native("application_info", { app_ref: args.app_ref }, key, s, signal);
+      if (app && app.pid === cached.state.app.pid && cachedState() === cached)
+        return ok(cached.state);
     }
     const raw = await native(
       "capture_app",
@@ -278,15 +288,7 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
     t: Bag,
     app: Bag,
     s: Session,
-  ): {
-    native?: string;
-    point: Bag;
-    guards: Bag;
-    appRef: Bag;
-    canPress?: boolean;
-    /** 元素当前值的 UTF-16 长度；坐标目标或值不是文本时为 undefined。 */
-    valueLength?: number;
-  } {
+  ): { native?: string; point: Bag; guards: Bag; appRef: Bag; canPress?: boolean } {
     if (t.type === "element") {
       const observation = s.observations.find((o) => appMatches(o.state, app));
       const token = observation?.tokens.get(t.index),
@@ -301,7 +303,6 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         guards: {},
         appRef: { pid: observation!.state.app.pid, window_id: observation!.state.window.window_id },
         canPress: Array.isArray(element.actions) && element.actions.includes("AXPress"),
-        valueLength: typeof element.value === "string" ? element.value.length : undefined,
       };
     }
     const f = s.frame;
@@ -342,8 +343,14 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         throw new RequestError("stopped", "Computer control is stopped for this logical session");
       if (input.signal?.aborted)
         throw new RequestError("cancelled", "Request cancelled before dispatch");
+      // 修复原因：停止标记原先要等 Helper 准备成功、native 清理完成才生效。准备失败时 stop 请求报错，
+      // 标记却没有落下，同一会话随后仍能继续派发输入。现在先同步关闭本会话的 admission，再做可重试的清理。
+      if (name === "stop_computer_control") s.stopped = true;
       await ports.prepare();
       sync(key, s);
+      // 等待 prepare() 期间到达的 stop 同样生效：派发前复核。
+      if (s.stopped && name !== "stop_computer_control")
+        throw new RequestError("stopped", "Computer control is stopped for this logical session");
       if (name === "stop_computer_control") {
         await release(key, s);
         return ok({ stopped: true });
@@ -354,13 +361,37 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       if (name === "list_windows")
         return ok({ windows: await native("list_windows", args, key, s, input.signal) });
       if (name === "request_access") {
-        const status = await native("request_access", {}, key, s, input.signal);
-        return ok({ status });
+        // 修复原因：返回值原先包成 { status }，而 SDK 的 requestAccess() 直接把首个文本块解析成
+        // AccessStatus（ready / accessibility / screenRecording），三项读出来都是 undefined；桌面
+        // 的权限观察只读 _meta 里的权限事实，原先也从未写入，授权引导因此不会出现。
+        // native 始终申请全部权限，capabilities 只做校验。
+        const report = await native("request_access", {}, key, s, input.signal);
+        const known = (value: unknown) =>
+          value === "granted" || value === "denied" ? value : "unknown";
+        const accessibility = known(report?.accessibility);
+        const screenRecording = known(report?.screen_recording);
+        const facts = cuaRequestAccessStatusSchema.safeParse({
+          schemaVersion: 1,
+          platform: "darwin",
+          grantOwner: report?.grant_owner,
+          accessibility,
+          screenRecording,
+        });
+        return ok(
+          {
+            ready: accessibility === "granted" && screenRecording === "granted",
+            accessibility,
+            screenRecording,
+            ...(report?.desktop_availability === "locked"
+              ? { message: "The desktop is locked; unlock it to continue." }
+              : {}),
+          },
+          undefined,
+          facts.success ? { [CUA_REQUEST_ACCESS_STATUS_META_KEY]: facts.data } : undefined,
+        );
       }
       let method: string,
         params: Bag = { app_ref: args.app_ref };
-      // 主动作之前要先派发的步骤（type 带 target 时先聚焦或点击），与主动作同属一次在途输入。
-      const before: Array<{ method: string; params: Bag }> = [];
       const target = args.target ? resolveTarget(args.target, args.app_ref, s) : undefined;
       if (target) params.app_ref = target.appRef;
       if (name === "left_click") {
@@ -432,10 +463,11 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       } else if (["set_value", "select_text", "perform_action"].includes(name)) {
         if (!target?.native)
           throw new RequestError("invalid_request", "Semantic action requires an observed element");
-        if (args.strategy === "event")
+        // 三个动作都只走辅助功能路径；公开签名里只有 set_value 接受 strategy。
+        if (name === "set_value" && args.strategy === "event")
           throw new RequestError(
             "invalid_request",
-            `${name} only works through the accessibility path; strategy event is not supported`,
+            "set_value only works through the accessibility path; strategy event is not supported",
           );
         method = {
           set_value: "element_set_value",
@@ -447,11 +479,14 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
           native: target.native,
           ...(name === "set_value"
             ? { value: args.value }
-            : name === "select_text"
-              ? // 文档约定不带 text_range 时选中整个值；长度取自最近一次观测到的元素值（UTF-16，与原生一致）。
-                { text_range: args.text_range ?? [0, target.valueLength ?? 0] }
-              : { action: args.action }),
+            : name === "perform_action"
+              ? { action: args.action }
+              : {}),
         };
+        // 文档约定不带 text_range 时选中整个值。长度由原生层按元素当前值计算：观测到的值会被截到
+        // 16,384 个码元，按它算会漏选尾部。
+        if (name === "select_text" && args.text_range !== undefined)
+          params.text_range = args.text_range;
       } else if (name === "key") {
         if (args.strategy === "ax")
           throw new RequestError("invalid_request", "key only sends input events; strategy a11y is not supported");
@@ -464,23 +499,17 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       } else if (name === "type") {
         if (args.strategy === "ax")
           throw new RequestError("invalid_request", "type only sends input events; strategy a11y is not supported");
-        // 文档约定 type 可带 target：元素先聚焦，坐标先点一下，再输入。
-        if (target)
-          before.push(
-            target.native
-              ? { method: "element_focus", params: { ...params, native: target.native } }
-              : {
-                  method: "click",
-                  params: {
-                    ...params,
-                    ...target.guards,
-                    point: target.point,
-                    button: "left",
-                    clicks: 1,
-                    modifiers: [],
-                  },
-                },
-          );
+        // 文档约定 type 可带 target。定位与输入交给同一次原生操作完成：Host 侧拆成两步时，并发调用
+        // 会交错成“聚焦 A → 聚焦 B → 输入 A 的文本”，两段文本都落进 B。
+        // 缺省用 AX 聚焦元素；显式 event 改为点击元素当前位置，不碰辅助功能焦点；坐标目标先点击。
+        if (target) {
+          if (target.native) {
+            params[args.strategy === "event" ? "click_native" : "focus_native"] =
+              target.native;
+          } else {
+            Object.assign(params, target.guards, { click_point: target.point });
+          }
+        }
         method = "type_text_to_app";
         params = { ...params, text: args.text };
       } else {
@@ -491,20 +520,47 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
       s.frame = undefined;
       s.frameRequest = undefined;
       s.activeInputs++;
+      // 修复原因：多步骤动作（key 的 repeat）只保留最后一步的结果。第一步已发送、后一步在派发前
+      // 后一步在派发前取消或失败时，整次回执会报成 action_sent:false / not_sent，调用方据此以为
+      // 界面还没收到按键而重发。这里累计每一步的派发事实。
+      let dispatched = false;
+      let lastStatus: string | undefined;
+      const dispatch = async (stepMethod: string, stepParams: Bag) => {
+        try {
+          const result = await native(stepMethod, stepParams, key, s, input.signal);
+          dispatched ||=
+            result?.action_sent === true || result?.dispatch_status === "possibly_sent";
+          lastStatus = result?.dispatch_status;
+          return result;
+        } catch (error) {
+          if (!dispatched) throw error;
+          const e = error as { code?: string; message?: string; details?: Bag };
+          throw Object.assign(new Error(e.message ?? "Computer-use request failed"), {
+            code: e.code ?? "internal",
+            details: {
+              ...(e.details ?? {}),
+              action_sent: true,
+              dispatch_status: "possibly_sent",
+              partial_dispatch: true,
+            },
+          });
+        }
+      };
       let action;
       try {
-        for (const step of before) await native(step.method, step.params, key, s, input.signal);
         // 文档约定 key 用 repeat 重发和弦；全部重发计入同一次在途输入。
-        for (let i = 1; i < (args.repeat ?? 1); i++)
-          await native(method, params, key, s, input.signal);
-        action = await native(method, params, key, s, input.signal);
+        for (let i = 1; i < (args.repeat ?? 1); i++) await dispatch(method, params);
+        action = await dispatch(method, params);
       } finally {
         s.activeInputs--;
       }
       const receipt = {
         schema_version: "zcode-cua-action-receipt-v1",
-        action_sent: action?.action_sent === true,
-        dispatch_status: action?.dispatch_status ?? "possibly_sent",
+        action_sent: dispatched || action?.action_sent === true,
+        dispatch_status:
+          dispatched && lastStatus === "not_sent"
+            ? "possibly_sent"
+            : (action?.dispatch_status ?? "possibly_sent"),
         retry_action: false,
       };
       const result = ok({ action_receipt: receipt });

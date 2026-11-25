@@ -302,12 +302,33 @@ describe("transport boundary validation", () => {
     cleanup.push(async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(dir, { recursive: true });
+      await rm(dir, { recursive: true, force: true });
     });
     const client = createBrokerClient({ socketPath: path, timeoutMs: 300 });
     cleanup.push(() => client.close());
     await expect(client.call("list_windows", {})).rejects.toMatchObject({
       code: "invalid_response",
+    });
+  });
+  // 修复回归：长按的原生回包在松开之后才到。夹具的请求预算是 300ms，按住 0.5 秒时回包约 520ms 后才到；
+  // deadline 不加按住时长的话，客户端会先超时并取消已经派发的按键。
+  it("extends the request deadline by the key hold duration", async () => {
+    const client = await fixture((request, socket) => {
+      setTimeout(
+        () =>
+          socket.end(
+            JSON.stringify({ id: request.id, ok: true, result: { action_sent: true } }) +
+              "\n",
+          ),
+        520,
+      );
+    });
+    await expect(
+      client.call("hold_key_to_app", { text: "shift", duration: 0.5 }),
+    ).resolves.toMatchObject({ action_sent: true });
+    // 普通请求仍按原预算超时。
+    await expect(client.call("list_windows", {})).rejects.toMatchObject({
+      code: "timeout",
     });
   });
   it("rejects an oversized request before dispatch", async () => {

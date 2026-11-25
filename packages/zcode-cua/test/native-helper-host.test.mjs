@@ -10,6 +10,10 @@ import { createComputerUseRuntime } from "../dist/adapters/runtime-factory.js";
 import { createBrokerClient } from "../dist/adapters/broker-client.js";
 import { resolveBrokerSocketPath } from "../dist/adapters/socket-path.js";
 import { findLiveHelper, retireProcess } from "../dist/adapters/process-identity.js";
+import {
+  CUA_REQUEST_ACCESS_STATUS_META_KEY,
+  cuaRequestAccessStatusSchema,
+} from "../request-access-contract.js";
 const sourceApp = resolve(
   import.meta.dirname,
   "../dist/native/darwin-arm64/KCode Computer Use.app",
@@ -116,14 +120,15 @@ test(
     env.ZCODE_CUA_PERMISSION_BROKER_SOCKET = socketPath;
     const runtime = createComputerUseRuntime({ env, brokerSocketPath: socketPath });
     let pid;
-    const queryPid = async () => {
+    const brokerCall = async (method) => {
       const client = createBrokerClient({ socketPath });
       try {
-        return (await client.call("broker_info")).pid;
+        return await client.call(method);
       } finally {
         await client.close();
       }
     };
+    const queryPid = async () => (await brokerCall("broker_info")).pid;
     const run = () =>
       runtime.execute({
         // 此用例验证传输入口，不验证 GUI。M2 锁屏时 list_apps 正确拒绝，不能误报为未启动。
@@ -135,9 +140,20 @@ test(
     try {
       const first = await run();
       assert.notEqual(first.isError, true, "Injected transport prevented lazy Helper startup");
-      assert.equal(first.structuredContent.status.grant_owner, "dev.zcode.cua-helper.kcode");
-      assert.equal(first.structuredContent.status.prompted, false);
+      // 真实 Helper 的权限事实：SDK 读首个文本块里的 AccessStatus，桌面权限观察读 _meta。
+      // 本机两项权限是否授予随环境变化，只断言取值范围与两处一致。
+      const status = JSON.parse(first.content[0].text);
+      for (const key of ["accessibility", "screenRecording"])
+        assert.ok(["granted", "denied"].includes(status[key]), `${key} is not a known state`);
+      assert.deepEqual(status, first.structuredContent);
+      const facts = first._meta[CUA_REQUEST_ACCESS_STATUS_META_KEY];
+      assert.equal(facts.grantOwner, "dev.zcode.cua-helper.kcode");
+      assert.equal(facts.accessibility, status.accessibility);
+      assert.equal(facts.screenRecording, status.screenRecording);
+      assert.equal(cuaRequestAccessStatusSchema.safeParse(facts).success, true);
       pid = await queryPid();
+      // 源码 request_access 只读取权限事实，不触发系统授权弹窗。
+      assert.equal((await brokerCall("permission_status")).prompted, false);
       const previous = pid;
       process.kill(pid, "SIGKILL");
       const deadline = Date.now() + 3000;

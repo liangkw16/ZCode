@@ -23,6 +23,7 @@ struct HeldInput {
 };
 static std::vector<HeldInput> holds;
 static NSArray *savedClipboard;
+static NSPasteboard *ownedBoard;
 static NSInteger ownedClipboardCount = -1;
 static NSString *safetyPath;
 static bool recoveryPending = false;
@@ -109,7 +110,7 @@ void KCUAPersistInputSafety(void) {
   });
 }
 static void restoreClipboard(NSArray *saved, NSInteger ownerCount) {
-  NSPasteboard *board = NSPasteboard.generalPasteboard;
+  NSPasteboard *board = ownedBoard ?: NSPasteboard.generalPasteboard;
   if (!saved || board.changeCount != ownerCount)
     return;
   NSMutableArray *items = [NSMutableArray array];
@@ -339,6 +340,7 @@ void KCUAInputCleanup(const KCUAOp &op) {
     } @finally {
       restoreClipboard(savedClipboard, ownedClipboardCount);
       savedClipboard = nil;
+      ownedBoard = nil;
       ownedClipboardCount = -1;
       KCUAPersistInputSafety();
       if (op->cancelled)
@@ -346,13 +348,17 @@ void KCUAInputCleanup(const KCUAOp &op) {
     }
   }
 }
-static void paste(const KCUATargetRef &target, NSString *text, NSString *format,
-                  const KCUAOp &op) {
+// 粘贴事务：保存剪贴板、写入待粘贴内容、发送 ⌘V，并在操作清理时恢复。
+// board 由调用方给出（运行时是系统剪贴板），便于用独立剪贴板做回归。
+void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
+                   NSString *text, NSString *format, const KCUAOp &op) {
   if (![text isKindOfClass:NSString.class] || text.length > 1024 * 1024 ||
       ![@[ @"text", @"md", @"html" ] containsObject:format])
     KCUAFail(@"invalid_request",
              @"Paste requires bounded text and format text, md or html");
-  NSPasteboard *board = NSPasteboard.generalPasteboard;
+  // 修复原因：接管剪贴板前要确认读取快照期间没有别人写入。否则用户此时复制的内容会被清空并覆盖，
+  // 而事务清理时还能“成功”恢复成更早的快照，用户新复制的内容就此丢失。
+  NSInteger observedChangeCount = board.changeCount;
   NSMutableArray *snapshot = [NSMutableArray array];
   NSUInteger bytes = 0;
   for (NSPasteboardItem *item in board.pasteboardItems) {
@@ -368,7 +374,6 @@ static void paste(const KCUATargetRef &target, NSString *text, NSString *format,
     }
     [snapshot addObject:record];
   }
-  savedClipboard = snapshot;
   KCUAPasteProvider *provider = [KCUAPasteProvider new];
   NSData *utf8 = [KCUAScalarString(text, 1024 * 1024)
       dataUsingEncoding:NSUTF8StringEncoding];
@@ -382,6 +387,13 @@ static void paste(const KCUATargetRef &target, NSString *text, NSString *format,
   provider.payload = payload;
   NSPasteboardItem *item = [NSPasteboardItem new];
   [item setDataProvider:provider forTypes:payload.allKeys];
+  if (board.changeCount != observedChangeCount)
+    KCUAFail(@"action_unavailable",
+             @"Clipboard changed while it was being saved; nothing was sent",
+             @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
+  // 通过复核后才接管：此前 savedClipboard 保持为空，清理时不会用旧快照覆盖用户刚复制的内容。
+  ownedBoard = board;
+  savedClipboard = snapshot;
   [board clearContents];
   [board writeObjects:@[ item ]];
   ownedClipboardCount = board.changeCount;
@@ -423,6 +435,67 @@ static CGPoint pointParam(id value, CGRect allowed) {
         @"Coordinate lies outside the verified target window",
         @{@"action_sent" : @NO});
   return p;
+}
+// 输入前的定位点击：一次无修饰键的左键单击，与 click 方法的单次点击同一条路径。
+static void clickOnce(const KCUATargetRef &target, CGPoint point,
+                      const KCUAOp &op) {
+  holds.push_back(
+      {target, 0, 0, true, kCGMouseButtonLeft, CGPointZero, 1});
+  KCUAPersistInputSafety();
+  CGEventRef event =
+      CGEventCreateMouseEvent(nullptr, kCGEventLeftMouseDown, point,
+                              kCGMouseButtonLeft);
+  CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1);
+  post(event, target, op);
+  releaseLastInput(true);
+}
+void KCUAPositionTyping(NSDictionary *params, const KCUATargetRef &target,
+                        const KCUAOp &op) {
+  // 修复原因：带目标的 type 原先由 Host 拆成“定位”和“输入”两次原生请求。两次请求之间 worker
+  // 可以处理别的请求，并发时交错成“聚焦 A → 聚焦 B → 输入 A 的文本”，两段文本都落进 B。
+  // 定位与输入放进同一次原生操作后，中间不会再插入其他操作。
+  id focus = params[@"focus_native"], click = params[@"click_native"],
+    pointValue = params[@"click_point"];
+  if ((focus ? 1 : 0) + (click ? 1 : 0) + (pointValue ? 1 : 0) > 1)
+    KCUAFail(@"invalid_request",
+             @"Pass only one of focus_native, click_native and click_point",
+             @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
+  if (focus || click) {
+    // 复用 observation 的元素解析：令牌必须仍是本 peer、本会话观察到的元素。
+    KCUATargetRef owner;
+    AXUIElementRef element = KCUAResolveElement(
+        @{@"native" : focus ? focus : click}, op, &owner);
+    if (!element || !owner || owner->pid != target->pid ||
+        owner->windowId != target->windowId ||
+        ![owner->birth isEqual:target->birth])
+      KCUAFail(@"element_unavailable", @"Typing target belongs to another window",
+               @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
+    KCUACheck(op);
+    KCUARequireDesktop();
+    if (focus) {
+      op->dispatched = true;
+      AXError error = AXUIElementSetAttributeValue(
+          element, kAXFocusedAttribute, kCFBooleanTrue);
+      if (error != kAXErrorSuccess)
+        KCUAFail(@"action_unavailable",
+                 @"Accessibility focus failed; inspect before retrying", @{
+                   @"action_sent" : @YES,
+                   @"dispatch_status" : @"possibly_sent",
+                   @"ax_error" : @(error)
+                 });
+      return;
+    }
+    // 显式事件路径：按元素当前的位置点击定位，不改动辅助功能焦点。
+    CGRect bounds = KCUAAXBounds(element);
+    if (CGRectIsEmpty(bounds))
+      KCUAFail(@"element_unavailable", @"Typing target has no bounds",
+               @{@"action_sent" : @NO});
+    clickOnce(target, CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds)),
+              op);
+    return;
+  }
+  if (pointValue)
+    clickOnce(target, pointParam(pointValue, target->bounds), op);
 }
 id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
   KCUACheck(op);
@@ -596,9 +669,12 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
     return @{@"action_sent" : @YES, @"dispatch_status" : @"accepted"};
   }
   if ([method isEqual:@"paste"] || [method isEqual:@"type_text"] ||
-      [method isEqual:@"type_text_to_app"])
-    paste(target, params[@"text"], params[@"format"] ?: @"text", op);
-  else if ([method isEqual:@"press_key"] ||
+      [method isEqual:@"type_text_to_app"]) {
+    if ([method isEqual:@"type_text_to_app"])
+      KCUAPositionTyping(params, target, op);
+    KCUAPasteText(NSPasteboard.generalPasteboard, target, params[@"text"],
+                  params[@"format"] ?: @"text", op);
+  } else if ([method isEqual:@"press_key"] ||
            [method isEqual:@"press_key_to_app"] ||
            [method isEqual:@"hold_key"] ||
            [method isEqual:@"hold_key_to_app"]) {

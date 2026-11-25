@@ -107,8 +107,11 @@ const schemas: Record<string, string[]> = {
   key: ["app_ref", "text", "repeat", "hold_seconds", "strategy", "return_state"],
   perform_action: ["app_ref", "target", "action", "return_state"],
   paste: ["app_ref", "text", "format", "return_state"],
-  request_access: [],
-  stop_computer_control: [],
+  // 文档与 SDK 的签名：request_access({capabilities?})、stop_computer_control({reason?})。
+  // 原先两者都是空键集合，SDK 原样发来的 reason / capabilities 被判成 unknown key，
+  // stop("…") 的停止逻辑因此根本没有执行。
+  request_access: ["capabilities"],
+  stop_computer_control: ["reason"],
 };
 const MODIFIER_NAMES = [
   "cmd",
@@ -195,6 +198,18 @@ export function validateRequest(name: string, input: unknown): Bag {
     fail("text_range must be [start,length] integers");
   if (args.format !== undefined && !["text", "md", "html"].includes(args.format))
     fail("format must be text, md or html");
+  if (
+    args.reason !== undefined &&
+    (typeof args.reason !== "string" || args.reason.length > 1024)
+  )
+    fail("reason must be text of at most 1024 characters");
+  if (args.capabilities !== undefined) {
+    if (!Array.isArray(args.capabilities) || args.capabilities.length > 16)
+      fail("capabilities must be a list");
+    for (const capability of args.capabilities)
+      if (typeof capability !== "string" || !capability.trim() || capability.length > 64)
+        fail("capabilities must be a list of names");
+  }
   args.modifiers = modifiers(args.modifiers);
   return args;
 }

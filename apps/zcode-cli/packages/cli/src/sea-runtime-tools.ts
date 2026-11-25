@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts";
+// 修复原因：同 clipboard-image.ts——本模块在 CLI 入口即被求值，不能经 contracts 桶文件把
+// Agent 入口带进插件宿主，改走不依赖 @zcode/shared 的窄入口。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";

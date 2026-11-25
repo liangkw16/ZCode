@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts";
+// 修复原因：本模块在 CLI 入口即被求值，包括 __zcode-plugin-host 这条运行第三方插件代码的
+// 隔离路径。从 contracts 桶文件取常量会把 @zcode/shared（Agent 入口）一并加载进插件宿主
+// （tests/plugin-host-entry.test.mjs 的回归因此变红）。改走不依赖 shared 的窄入口。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";

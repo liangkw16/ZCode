@@ -166,6 +166,9 @@ const originalDesktopApplicationName = process.env["ZCODE_DESKTOP_APPLICATION_NA
 const originalDesktopHomeDir = process.env["ZCODE_DESKTOP_HOME_DIR"];
 const originalDesktopUserDataDir = process.env["ZCODE_DESKTOP_USER_DATA_DIR"];
 const originalDesktopSessionDataDir = process.env["ZCODE_DESKTOP_SESSION_DATA_DIR"];
+// 修复原因：在 ZCode 桌面应用里启动的终端会继承它注入的 ZCODE_CUA_BUNDLED_HELPER_APP_PATH，
+// 而 buildHostProcessEnv 读真实 process.env 且优先于入参，dev bundle 的断言随宿主环境漂移。
+const originalCuaBundledHelperAppPath = process.env["ZCODE_CUA_BUNDLED_HELPER_APP_PATH"];
 const originalDesktopUseElectronDefaultUserData =
   process.env["ZCODE_DESKTOP_USE_ELECTRON_DEFAULT_USER_DATA"];
 const originalCwd = process.cwd();
@@ -434,12 +437,14 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
     delete process.env["ZCODE_BASE_URL"];
     delete process.env["ZCODE_ENDPOINT_ORIGIN"];
     delete process.env["ZCODE_DYNAMIC_WORKFLOW_MODE"];
+    delete process.env["ZCODE_CUA_BUNDLED_HELPER_APP_PATH"];
     productFlavorMock.value = "preview";
     process.chdir(originalCwd);
   });
 
   afterAll(() => {
     restoreEnvValue("NODE_NO_WARNINGS", originalNodeNoWarnings);
+    restoreEnvValue("ZCODE_CUA_BUNDLED_HELPER_APP_PATH", originalCuaBundledHelperAppPath);
     restoreEnvValue("ZCODE_DYNAMIC_WORKFLOW_MODE", originalDynamicWorkflowMode);
     productFlavorMock.value = "preview";
     restoreEnvValue("NODE_ENV", originalNodeEnv);
@@ -579,7 +584,8 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
   // 根因：bundledCuaHelperAppPath 只在 darwin 上计算（desktopRuntimeEnv.ts:474 直接
   // `process.platform !== "darwin" ? undefined : ...`），其他平台不写这个键，继承值原样穿透。
   // Windows CUA 走独立的 Node Helper，不使用 .app bundle，所以下面几条 dev bundle 断言
-  // 只在 darwin 上有意义。
+  // 只在 darwin 上有意义。Helper 应用名随源码自建改造改为 KCode 前缀（2d643163），
+  // 与并排安装的 ZCode 正式版 Helper 区分，这里按字面量钉住。
   it.skipIf(process.platform !== "darwin")(
     "本地免签 CUA 使用 dev Helper bundle，且不回退网络下载",
     async () => {
@@ -592,7 +598,7 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
       });
 
       expect(env.ZCODE_CUA_BUNDLED_HELPER_APP_PATH).toBe(
-        join("/tmp/zcode-cua-dev-home", "computer-use", "dev", "ZCode Computer Use Dev.app"),
+        join("/tmp/zcode-cua-dev-home", "computer-use", "dev", "KCode Computer Use Dev.app"),
       );
     },
   );
@@ -628,7 +634,7 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
       });
 
       expect(env.ZCODE_CUA_BUNDLED_HELPER_APP_PATH).toBe(
-        join("/tmp/zcode-cua-dev-home", "computer-use", "dev", "ZCode Computer Use Dev.app"),
+        join("/tmp/zcode-cua-dev-home", "computer-use", "dev", "KCode Computer Use Dev.app"),
       );
     },
   );
@@ -697,7 +703,7 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
       });
 
       expect(env.ZCODE_CUA_BUNDLED_HELPER_APP_PATH).toBe(
-        join("/mock/resources", "cua-helper", "ZCode Computer Use.app"),
+        join("/mock/resources", "cua-helper", "KCode Computer Use.app"),
       );
     },
   );

@@ -154,6 +154,8 @@ static NSString *displayTopology(void) {
                                                      error:nil]
           encoding:NSUTF8StringEncoding];
 }
+// 坐标派发前核对截图时记录的显示拓扑：与 capture 写进结果的 topology_fingerprint 是同一份。
+NSString *KCUADisplayTopologyFingerprint(void) { return displayTopology(); }
 // ScreenCaptureKit 的单帧请求没有取消 API，只有回调能确认框架工作已结束。
 void KCUAWaitForCaptureCompletion(dispatch_semaphore_t ready,
                                   void (^check)(void)) {

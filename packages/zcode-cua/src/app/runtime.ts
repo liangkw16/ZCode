@@ -329,6 +329,14 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         expected_window_bounds: f.raw.window.bounds,
         expected_desktop_epoch: f.raw.desktop_epoch,
         expected_cancellation_epoch: f.raw.cancellation_epoch,
+        // 修复原因：截图记录的进程出生身份与显示拓扑原先没有带到派发。PID 被别的进程复用，或显示器
+        // 拓扑变化而目标窗口矩形没变时，旧帧仍能通过 PID、窗口号与矩形的检查。
+        ...(f.raw.surface_identity?.process_birth
+          ? { expected_process_birth: f.raw.surface_identity.process_birth }
+          : {}),
+        ...(f.raw.display?.topology_fingerprint
+          ? { expected_display_topology: f.raw.display.topology_fingerprint }
+          : {}),
       },
     };
   }
@@ -366,10 +374,19 @@ export function createRuntime(ports: RuntimePorts): ComputerUseRuntime {
         // 的权限观察只读 _meta 里的权限事实，原先也从未写入，授权引导因此不会出现。
         // native 始终申请全部权限，capabilities 只做校验。
         const report = await native("request_access", {}, key, s, input.signal);
+        // 修复原因：常驻 Helper 进程里的录屏 preflight 在系统撤销授权后仍可能返回旧的 granted
+        // （规范 §8.3）。提供新鲜采样时以同一 bundle 的短命进程为准；采样失败按规范为 unknown，
+        // 不能沿用常驻进程的 granted。
+        const fresh = ports.freshPermissions
+          ? await ports.freshPermissions().catch(() => undefined)
+          : undefined;
+        const sampled = ports.freshPermissions !== undefined;
         const known = (value: unknown) =>
           value === "granted" || value === "denied" ? value : "unknown";
-        const accessibility = known(report?.accessibility);
-        const screenRecording = known(report?.screen_recording);
+        const accessibility = known(sampled ? fresh?.accessibility : report?.accessibility);
+        const screenRecording = known(
+          sampled ? fresh?.screen_recording : report?.screen_recording,
+        );
         const facts = cuaRequestAccessStatusSchema.safeParse({
           schemaVersion: 1,
           platform: "darwin",

@@ -31,6 +31,7 @@ extern "C" void CGEventPostToPid(pid_t pid, CGEventRef event) {
 NSString *KCUAProcessBirth(pid_t pid) { return pid == original->pid ? original->birth : nil; }
 NSString *KCUAGeneration(void) { return @"paste-test"; }
 uint64_t KCUADesktopEpoch(void) { return 0; }
+NSString *KCUADisplayTopologyFingerprint(void) { return @"fixture-topology"; }
 void KCUACheck(const KCUAOp &op) {
   if (op->cancelled)
     KCUAFail(@"cancelled", @"fixture cancellation");

@@ -9,6 +9,10 @@ export function createComputerUseRuntime(options: ComputerUseRuntimeOptions = {}
   const path = options.brokerSocketPath ?? resolveBrokerSocketPath({ env });
   const broker = createBrokerClient({ socketPath: path });
   let host: ReturnType<typeof createProductCuaHelperHost> | undefined;
+  const managesHelper =
+    !options.ensureBrokerAvailable &&
+    (!options.brokerSocketPath ||
+      options.brokerSocketPath === env.ZCODE_CUA_PERMISSION_BROKER_SOCKET?.trim());
   return createRuntime({
     broker,
     id: randomUUID,
@@ -27,5 +31,15 @@ export function createComputerUseRuntime(options: ComputerUseRuntimeOptions = {}
         await host.start();
       }
     },
+    // 托管路径下权限事实由同一 bundle 的短命进程重新采样（规范 §8.3）：常驻进程的录屏 preflight
+    // 在系统撤销授权后仍可能是旧值。其余传输没有可验证的 bundle，只能沿用常驻进程的快照。
+    ...(managesHelper
+      ? {
+          async freshPermissions() {
+            await host?.start();
+            return host?.queryPermissionStatus();
+          },
+        }
+      : {}),
   });
 }

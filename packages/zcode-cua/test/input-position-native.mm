@@ -30,6 +30,7 @@ extern "C" AXError AXUIElementSetAttributeValue(AXUIElementRef element,
 NSString *KCUAProcessBirth(pid_t pid) { return pid == original->pid ? original->birth : nil; }
 NSString *KCUAGeneration(void) { return @"position-test"; }
 uint64_t KCUADesktopEpoch(void) { return 0; }
+NSString *KCUADisplayTopologyFingerprint(void) { return @"fixture-topology"; }
 void KCUACheck(const KCUAOp &op) {
   if (op->cancelled)
     KCUAFail(@"cancelled", @"fixture cancellation");

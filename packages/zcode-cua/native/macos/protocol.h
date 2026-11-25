@@ -54,6 +54,8 @@ void KCUAStopServer(void);
 NSString *KCUAGeneration(void);
 
 NSString *KCUADesktopAvailability(void);
+// 当前显示器拓扑的指纹；与截图结果里的 display.topology_fingerprint 同一份。
+NSString *KCUADisplayTopologyFingerprint(void);
 // 返回 nil 表示可以接纳；否则是 {ok, error} 形式的拒绝原因。
 NSDictionary *KCUADesktopAdmissionError(NSString *availability);
 void KCUARequireDesktop(void);

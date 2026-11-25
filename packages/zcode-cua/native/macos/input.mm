@@ -596,6 +596,20 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
         @"element_unavailable",
         @"expected_window_id differs from target window",
         @{@"action_sent" : @NO});
+  // 修复原因：截图记录的进程出生身份与显示拓扑原先没有参与核对。PID 被别的进程复用，或显示器
+  // 拓扑变化而目标窗口矩形没变时，旧帧仍能通过上面 PID、窗口号与矩形的检查。
+  if (params[@"expected_process_birth"] &&
+      ![params[@"expected_process_birth"] isEqual:target->birth])
+    KCUAFail(
+        @"element_unavailable",
+        @"expected_process_birth differs from target app",
+        @{@"action_sent" : @NO});
+  if (params[@"expected_display_topology"] &&
+      ![params[@"expected_display_topology"]
+          isEqual:KCUADisplayTopologyFingerprint()])
+    KCUAFail(
+        @"element_unavailable", @"Frame display topology is stale",
+        @{@"action_sent" : @NO});
   if (element) {
     AXError error;
     if ([method isEqual:@"element_set_value"]) {

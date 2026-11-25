@@ -37,6 +37,7 @@ NSString *KCUAProcessBirth(pid_t pid) {
 }
 NSString *KCUAGeneration(void) { return @"input-test"; }
 uint64_t KCUADesktopEpoch(void) { return 0; }
+NSString *KCUADisplayTopologyFingerprint(void) { return @"fixture-topology"; }
 void KCUACheck(const KCUAOp &op) {
   if (op->cancelled)
     KCUAFail(@"cancelled", @"fixture cancellation");
@@ -214,6 +215,39 @@ int main(int argc, const char **argv) {
     targetGone = true;
     KCUAInputCleanup(op);
     assert(deliveries.size() == 1 && deliveries[0].type == kCGEventKeyDown);
+
+    // 坐标派发核对截图时记录的进程出生身份与显示拓扑：不一致时在发出任何事件之前拒绝。
+    {
+      auto click = [](NSDictionary *guards) -> NSException * {
+        auto clickOp = operation();
+        @try {
+          NSMutableDictionary *params =
+              [@{ @"point" : @{ @"x" : @130, @"y" : @240 } } mutableCopy];
+          [params addEntriesFromDictionary:guards];
+          KCUAInput(@"click", params, clickOp);
+          KCUAInputCleanup(clickOp);
+        } @catch (NSException *error) {
+          return error;
+        }
+        return nil;
+      };
+      const auto before = deliveries.size();
+      assert(!click(@{
+        @"expected_process_birth" : original->birth,
+        @"expected_display_topology" : @"fixture-topology"
+      }));
+      assert(deliveries.size() == before + 2);
+      deliveries.erase(deliveries.begin() + before, deliveries.end());
+      for (NSDictionary *stale in @[
+             @{ @"expected_process_birth" : @"reused-pid-birth" },
+             @{ @"expected_display_topology" : @"changed-topology" }
+           ]) {
+        NSException *error = click(stale);
+        assert(error && [error.name isEqual:@"element_unavailable"]);
+        assert([error.userInfo[@"action_sent"] isEqual:@NO]);
+      }
+      assert(deliveries.size() == before && "stale coordinates must not dispatch");
+    }
     puts("targeted normal and cancelled release passed");
   }
 }

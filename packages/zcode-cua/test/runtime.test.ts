@@ -149,6 +149,7 @@ async function fixture(options: {
             },
             pointer: { x: -100, y: 20, width: 200, height: 100 },
             surface_identity: { pid: 700, window_id: 10, process_birth: "b1" },
+            display: { topology_fingerprint: "topo-1" },
           });
         }
         socket.end(JSON.stringify({ id: r.id, ok: true, result }) + "\n");
@@ -440,6 +441,10 @@ it("projects only the latest delivered raster to native points and keeps it acro
       expected_pid: 700,
       expected_window_id: 10,
       expected_desktop_epoch: 0,
+      // 截图时记录的进程出生身份与显示拓扑一并交给原生层核对：PID 被复用或显示器拓扑变化
+      // 而窗口矩形没变时，仅凭 PID、窗口号和矩形识不破旧帧。
+      expected_process_birth: "b1",
+      expected_display_topology: "topo-1",
     },
   });
   // 新的像素观察撤销旧帧。
@@ -721,7 +726,9 @@ it.each(["error", "not_sent"] as const)(
 );
 
 describe("stop latch with an injected runtime", () => {
-  async function runtimeFixture() {
+  async function runtimeFixture(
+    options: { freshPermissions?: () => Promise<unknown> } = {},
+  ) {
     const { createRuntime } = await import("../src/app/runtime.js");
     const dispatched: string[] = [];
     let failPrepare = true;
@@ -737,10 +744,18 @@ describe("stop latch with an injected runtime", () => {
         epoch: () => 0,
         call: async (method: string) => {
           dispatched.push(method);
+          if (method === "request_access")
+            return {
+              grant_owner: "dev.zcode.cua-helper.kcode",
+              accessibility: "granted",
+              screen_recording: "granted",
+              desktop_availability: "unlocked",
+            };
           return { action_sent: true, dispatch_status: "accepted" };
         },
         close: async () => {},
       },
+      ...(options.freshPermissions ? { freshPermissions: options.freshPermissions } : {}),
     } as any);
     cleanups.push(() => runtime.dispose());
     const run = (toolName: string, args: unknown = {}) =>
@@ -782,5 +797,42 @@ describe("stop latch with an injected runtime", () => {
     const key = await blocked;
     expect(key.structuredContent).toMatchObject({ error: { code: "stopped" } });
     expect(f.dispatched).not.toContain("press_key_to_app");
+  });
+  it("reports freshly sampled permissions instead of the resident Helper snapshot", async () => {
+    // 常驻进程的录屏 preflight 在系统撤销授权后仍可能是旧的 granted（规范 §8.3）。
+    const f = await runtimeFixture({
+      freshPermissions: async () => ({ accessibility: "granted", screen_recording: "denied" }),
+    });
+    f.recoverPrepare();
+    const access = await f.run("request_access", {});
+    expect(access.structuredContent).toMatchObject({
+      ready: false,
+      accessibility: "granted",
+      screenRecording: "denied",
+    });
+  });
+  it("reports unknown permissions when the fresh sample fails", async () => {
+    const f = await runtimeFixture({
+      freshPermissions: async () => {
+        throw new Error("fresh preflight did not reply");
+      },
+    });
+    f.recoverPrepare();
+    const access = await f.run("request_access", {});
+    expect(access.structuredContent).toMatchObject({
+      ready: false,
+      accessibility: "unknown",
+      screenRecording: "unknown",
+    });
+  });
+  it("keeps the resident snapshot when no fresh sampler is wired", async () => {
+    const f = await runtimeFixture();
+    f.recoverPrepare();
+    const access = await f.run("request_access", {});
+    expect(access.structuredContent).toMatchObject({
+      ready: true,
+      accessibility: "granted",
+      screenRecording: "granted",
+    });
   });
 });

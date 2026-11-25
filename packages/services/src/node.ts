@@ -1946,15 +1946,11 @@ export function createLocalServices(options: {
   // 编译期门自动生效，不需要再回来改这里。
 
   const cuaStatusLaunchLog = createServiceLogger("cua-status-launch");
-  const launchStandaloneCuaHelperForStatus = async (): Promise<string | null> => {
+  const resolveStandaloneStatusAppPath = async (): Promise<string | null> => {
     if (process.platform !== "darwin") return null;
     const { existsSync } = await import("node:fs");
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const socketPath = resolveBrokerSocketPath();
-    let appPath: string | null;
     try {
-      appPath = await resolveStandaloneStatusLaunchAppPath({
+      return await resolveStandaloneStatusLaunchAppPath({
         env: process.env,
         bundledAppPath: resolveBundledCuaHelperAppPath(),
         exists: existsSync,
@@ -1971,6 +1967,13 @@ export function createLocalServices(options: {
       });
       return null;
     }
+  };
+  const launchStandaloneCuaHelperForStatus = async (): Promise<string | null> => {
+    if (process.platform !== "darwin") return null;
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const socketPath = resolveBrokerSocketPath();
+    const appPath = await resolveStandaloneStatusAppPath();
     if (!appPath) return null;
     // Helper 启动参数统一由 buildHelperOpenArgs 构造，避免多处手写导致漏传或漂移。
     // 设置页只读权限探测不承载 PiP，不传 --launcher-pid 和 --pip-mode；
@@ -2096,7 +2099,8 @@ export function createLocalServices(options: {
         }
         // standalone Helper 上直接查权限真值（身份模式，无 token）。
         try {
-          const { callBrokerMethod } = await import("@zcode/zcode-cua/broker/helperHealth");
+          const { callBrokerMethod, readFreshHelperPermissions } =
+            await import("@zcode/zcode-cua/broker/helperHealth");
           const report = await callBrokerMethod<{
             grant_owner: string;
             owner?: { display_name?: string };
@@ -2108,12 +2112,21 @@ export function createLocalServices(options: {
             method: "permission_status",
             timeoutMs: 3000,
           });
+          // 修复原因：常驻 standalone Helper 的 permission_status 读的是它进程内的 preflight，系统撤销
+          // 录屏授权后仍可能返回旧的 granted（规范 §8.3）。与托管路径一样，用同一 bundle 的短命进程
+          // 重新采样；采样失败或拿不到 bundle 一律 unknown，不能沿用常驻进程的 granted。
+          const appPath = await resolveStandaloneStatusAppPath();
+          const fresh = appPath
+            ? await readFreshHelperPermissions({ appPath, env: process.env }).catch(() => null)
+            : null;
+          const state = (value: unknown): CuaPermissionState =>
+            value === "granted" || value === "denied" || value === "stale" ? value : "unknown";
           return {
             grantOwner: report.grant_owner,
             grantOwnerDisplayName: report.owner?.display_name ?? report.grant_owner,
-            accessibility: report.accessibility,
-            accessibilityProbeOk: report.accessibility_probe_ok === true,
-            screenRecording: report.screen_recording,
+            accessibility: state(fresh?.accessibility),
+            accessibilityProbeOk: false,
+            screenRecording: state(fresh?.screen_recording),
             screenCaptureProbeOk: false,
           };
         } catch {

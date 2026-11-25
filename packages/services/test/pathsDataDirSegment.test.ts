@@ -18,7 +18,9 @@ describe("data dir segment（KCode 镜像根）", () => {
     const paths = await importFreshPaths();
     expect(paths.getZCodeDataRootDir()).toBe(join("/tmp/kcode-base", ".kcode"));
     expect(paths.getAppConfigDir()).toBe(join("/tmp/kcode-base", ".kcode", "v2"));
-    expect(paths.getConversationWorkspaceDir()).toBe(join("/tmp/kcode-base", ".kcode", "workspace", "default"));
+    expect(paths.getConversationWorkspaceDir()).toBe(
+      join("/tmp/kcode-base", ".kcode", "workspace", "default"),
+    );
     expect(paths.getProviderWorkspaceConfigDir()).toBe(join("/tmp/kcode-base", ".kcode", "cli"));
   });
 

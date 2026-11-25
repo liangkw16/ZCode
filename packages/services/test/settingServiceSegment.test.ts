@@ -16,6 +16,8 @@ describe("settingService 路径 segment", () => {
     vi.stubGlobal("__ZCODE_DATA_DIR_SEGMENT__", undefined);
     vi.resetModules();
     const fallback = await import("../src/setting/settingService.js");
-    expect(fallback.resolveSettingsFilePath()).toBe(join("/tmp/kcode-home", ".zcode", "v2", "setting.json"));
+    expect(fallback.resolveSettingsFilePath()).toBe(
+      join("/tmp/kcode-home", ".zcode", "v2", "setting.json"),
+    );
   });
 });

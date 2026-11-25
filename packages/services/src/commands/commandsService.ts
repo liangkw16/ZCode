@@ -19,10 +19,7 @@ import {
   type UserCommand,
   type ZCodeCommand,
 } from "@zcode/shared";
-import {
-  DEFAULT_ENABLED_OFFICIAL_PLUGIN_IDS,
-  ZCODE_DATA_DIR_SEGMENT,
-} from "@zcode/shared";
+import { DEFAULT_ENABLED_OFFICIAL_PLUGIN_IDS, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { ICommandsService } from "./commands.js";
 import { CommandFileParser, type CommandFileFormat } from "./commandFileParser.js";
 import { readInstalledPluginRoots } from "#src/plugins/installedPluginRoots.js";

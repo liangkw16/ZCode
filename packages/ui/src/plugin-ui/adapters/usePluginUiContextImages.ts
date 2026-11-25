@@ -100,8 +100,7 @@ function decodeBase64(dataBase64: string): ArrayBuffer {
   const binary = atob(dataBase64);
   const buffer = new ArrayBuffer(binary.length);
   const bytes = new Uint8Array(buffer);
-  for (let index = 0; index < binary.length; index += 1)
-    bytes[index] = binary.charCodeAt(index);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return buffer;
 }
 
@@ -126,10 +125,7 @@ function pluginUiContextImageFiles(context: PluginUiModelContext): File[] {
 // v3.18 的通用 useContextImageAttachments 仍用组件级 useRef 映射且 "current" 策略卸载不清理，
 // 重挂载后同一上下文的图片会被再次 addAttachmentFiles（重复上传/发送/占用附件名额）。插件路径
 // 维持我们的模块级映射（与上下文 store 同生命周期）；网页元素 chip 走上游通用 hook（卸载撤、重挂补）。
-const materialized = new Map<
-  string,
-  { context: PluginUiModelContext; ids: string[] }
->();
+const materialized = new Map<string, { context: PluginUiModelContext; ids: string[] }>();
 
 /** 上下文 → 附件的同步核心；独立导出以便单测模拟"重挂载后再次同步"（映射在模块级存续）。 */
 export function syncPluginUiContextImages(

@@ -74,7 +74,9 @@ const { environment: zcodeEnv } = await loadBuiltinProviderConfig();
 // 安装包身份与后端环境分轴：ZCODE_PREVIEW_IDENTITY=1 让生产后端的构建仍以 ZCode Preview 身份打包运行。
 const zcodeProductFlavor = resolveDesktopProductFlavor({ ...process.env, ZCODE_ENV: zcodeEnv });
 const zcodeDataDirSegment = resolveDesktopDataDirSegment({ ...process.env, ZCODE_ENV: zcodeEnv });
-console.log(`[tsup] ZCODE_ENV=${zcodeEnv} ZCODE_PRODUCT_FLAVOR=${zcodeProductFlavor} ZCODE_DATA_DIR_SEGMENT=${zcodeDataDirSegment}`);
+console.log(
+  `[tsup] ZCODE_ENV=${zcodeEnv} ZCODE_PRODUCT_FLAVOR=${zcodeProductFlavor} ZCODE_DATA_DIR_SEGMENT=${zcodeDataDirSegment}`,
+);
 
 function parseCsvEnv(value: string | undefined): string[] {
   return (value ?? "")

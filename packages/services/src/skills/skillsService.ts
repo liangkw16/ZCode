@@ -15,10 +15,7 @@ import type {
   SkillsListResult,
   SkillsCapability,
 } from "@zcode/shared";
-import {
-  DEFAULT_ENABLED_OFFICIAL_PLUGIN_IDS,
-  ZCODE_DATA_DIR_SEGMENT,
-} from "@zcode/shared";
+import { DEFAULT_ENABLED_OFFICIAL_PLUGIN_IDS, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { ISkillsService } from "./skills.js";
 import { SKILL_FILE_NAME, walkSkillMarkdownPaths } from "./skillDiscoveryWalk.js";
 import { readInstalledPluginRoots } from "#src/plugins/installedPluginRoots.js";

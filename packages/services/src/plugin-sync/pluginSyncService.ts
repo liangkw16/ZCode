@@ -4,20 +4,14 @@ import { cp, lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { PluginSyncMarketplaceMirrorInspection } from "@zcode/shared";
-import {
-  PLUGIN_DATA_SYNC_MAX_ITEM_BYTES,
-  ZCODE_DATA_DIR_SEGMENT,
-} from "@zcode/shared";
+import { PLUGIN_DATA_SYNC_MAX_ITEM_BYTES, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { IPluginSyncService } from "./pluginSync.js";
 import {
   createPluginSyncArchive,
   extractPluginSyncArchive,
   PLUGIN_SYNC_METADATA_ARCHIVE_PATH,
 } from "./pluginSyncArchive.js";
-import {
-  normalizePluginSyncRelativePath,
-  resolvePluginSyncPathWithin,
-} from "./pluginSyncPath.js";
+import { normalizePluginSyncRelativePath, resolvePluginSyncPathWithin } from "./pluginSyncPath.js";
 import { createInlinePluginDataSyncMethods } from "../data-sync/node.js";
 
 export interface PluginManifestInfo {
@@ -80,10 +74,7 @@ export function createPluginSyncService(options?: {
     // 数据同步：单个 inline 插件目录上限 50MB；marketplace 来源镜像归档也用同一上限。
     ...createInlinePluginDataSyncMethods({ maxItemBytes: maxArchiveBytes }),
     async exportMarketplaceSourceArchive(params) {
-      const result = await exportMarketplaceSourceArchiveInternal(
-        params,
-        maxArchiveBytes,
-      );
+      const result = await exportMarketplaceSourceArchiveInternal(params, maxArchiveBytes);
       if (result.archive.byteLength > maxArchiveBytes) {
         throw new Error(
           `plugin marketplace source archive exceeds limit: ${result.archive.byteLength}/${maxArchiveBytes}`,
@@ -97,9 +88,7 @@ export function createPluginSyncService(options?: {
       const blocked: PluginSyncMarketplaceMirrorInspection["blocked"] = {};
       for (const pluginName of new Set(params.pluginNames)) {
         try {
-          resolveMarketplacePluginClosure(loaded.manifest, marketplaceId, [
-            pluginName,
-          ]);
+          resolveMarketplacePluginClosure(loaded.manifest, marketplaceId, [pluginName]);
         } catch (error) {
           if (error instanceof CrossMarketplaceDependencyError) {
             blocked[pluginName] = "cross-marketplace-dependency";
@@ -118,27 +107,17 @@ export function createPluginSyncService(options?: {
           `plugin marketplace source archive exceeds limit: ${params.archive.byteLength}/${maxArchiveBytes}`,
         );
       }
-      return await importMarketplaceSourceArchiveInternal(
-        params.archive,
-        maxArchiveBytes,
-      );
+      return await importMarketplaceSourceArchiveInternal(params.archive, maxArchiveBytes);
     },
   };
 }
 
 export function resolveUserHomeDir(): string {
-  return (
-    process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir()
-  );
+  return process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
 }
 
 export function getUserZcodeConfigPath(): string {
-  return join(
-    resolveUserHomeDir(),
-    ZCODE_DATA_DIR_SEGMENT,
-    "cli",
-    "config.json",
-  );
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
 }
 
 export function getUserZcodePluginRoot(): string {
@@ -155,40 +134,27 @@ async function exportMarketplaceSourceArchiveInternal(
 ) {
   const marketplaceId = normalizeMarketplaceId(params.marketplaceId);
   const pluginNames = Array.from(
-    new Set(
-      params.pluginNames.map((name) => readRequiredString(name, "plugin name")),
-    ),
+    new Set(params.pluginNames.map((name) => readRequiredString(name, "plugin name"))),
   );
   if (pluginNames.length === 0) {
     throw new Error("missing marketplace plugin names");
   }
   const loaded = await loadMarketplaceSource(params.source);
   if (loaded.manifest.name !== marketplaceId) {
-    throw new Error(
-      `marketplace id mismatch: ${loaded.manifest.name} !== ${marketplaceId}`,
-    );
+    throw new Error(`marketplace id mismatch: ${loaded.manifest.name} !== ${marketplaceId}`);
   }
-  const closure = resolveMarketplacePluginClosure(
-    loaded.manifest,
-    marketplaceId,
-    pluginNames,
-  );
+  const closure = resolveMarketplacePluginClosure(loaded.manifest, marketplaceId, pluginNames);
   const mirrorEntries = await Promise.all(
     closure.map((entry) => buildMarketplaceSourceMirrorEntry(loaded, entry)),
   );
-  const manifest = buildMirroredMarketplaceManifest(
-    loaded.manifest,
-    mirrorEntries,
-  );
+  const manifest = buildMirroredMarketplaceManifest(loaded.manifest, mirrorEntries);
   const manifestContent = `${JSON.stringify(manifest, null, 2)}\n`;
   const selectedBytes =
     Buffer.byteLength(manifestContent, "utf-8") +
     (
       await Promise.all(
         mirrorEntries.map((entry) =>
-          entry.mirroredSourcePath
-            ? computeRecursiveSize(entry.mirroredSourcePath)
-            : 0,
+          entry.mirroredSourcePath ? computeRecursiveSize(entry.mirroredSourcePath) : 0,
         ),
       )
     ).reduce((total, bytes) => total + bytes, 0);
@@ -221,8 +187,7 @@ async function exportMarketplaceSourceArchiveInternal(
         ): entry is MarketplaceSourceMirrorEntry & {
           mirroredSourcePath: string;
           mirroredSourceRelativePath: string;
-        } =>
-          Boolean(entry.mirroredSourcePath && entry.mirroredSourceRelativePath),
+        } => Boolean(entry.mirroredSourcePath && entry.mirroredSourceRelativePath),
       )
       .map((entry) => ({
         archivePath: `${directoryName}/${entry.mirroredSourceRelativePath}`,
@@ -253,31 +218,21 @@ async function importMarketplaceSourceArchiveInternal(
   archive: Uint8Array,
   maxArchiveBytes: number,
 ) {
-  const tempRoot = join(
-    tmpdir(),
-    `zcode-plugin-marketplace-source-${randomUUID()}`,
-  );
+  const tempRoot = join(tmpdir(), `zcode-plugin-marketplace-source-${randomUUID()}`);
   try {
     await extractPluginSyncArchive(archive, tempRoot, {
       maxExtractedBytes: maxArchiveBytes,
     });
     const metadata = await readMarketplaceSourceArchiveMetadata(tempRoot);
-    const directoryName = normalizePluginSyncRelativePath(
-      metadata.directoryName,
-    );
+    const directoryName = normalizePluginSyncRelativePath(metadata.directoryName);
     const extractedPath = resolvePluginSyncPathWithin(tempRoot, directoryName);
-    const manifest = await readMarketplaceManifest(
-      join(extractedPath, "marketplace.json"),
-    );
+    const manifest = await readMarketplaceManifest(join(extractedPath, "marketplace.json"));
     if (manifest.name !== metadata.marketplaceId) {
       throw new Error(
         `marketplace source archive id mismatch: ${manifest.name} !== ${metadata.marketplaceId}`,
       );
     }
-    const targetRoot = join(
-      getUserZcodePluginRoot(),
-      MARKETPLACE_SOURCE_ROOT_DIRECTORY,
-    );
+    const targetRoot = join(getUserZcodePluginRoot(), MARKETPLACE_SOURCE_ROOT_DIRECTORY);
     const targetPath = resolvePluginSyncPathWithin(targetRoot, directoryName);
     if (existsSync(targetPath)) {
       return {
@@ -305,9 +260,7 @@ async function importMarketplaceSourceArchiveInternal(
 export async function readUserPluginConfigState(): Promise<UserPluginConfigState> {
   const parsed = await readJsonFileOrEmpty(getUserZcodeConfigPath());
   const plugins = isRecord(parsed.plugins) ? parsed.plugins : {};
-  const enabledPlugins = isRecord(plugins.enabledPlugins)
-    ? plugins.enabledPlugins
-    : {};
+  const enabledPlugins = isRecord(plugins.enabledPlugins) ? plugins.enabledPlugins : {};
   const enabledOverrides = new Map<string, boolean>();
   for (const [pluginId, enabled] of Object.entries(enabledPlugins)) {
     if (typeof enabled === "boolean") {
@@ -325,18 +278,13 @@ async function readMarketplaceSourceArchiveMetadata(tempRoot: string): Promise<{
   directoryName: string;
   marketplaceId: string;
 }> {
-  const raw = await readFile(
-    join(tempRoot, PLUGIN_SYNC_METADATA_ARCHIVE_PATH),
-    "utf-8",
-  );
+  const raw = await readFile(join(tempRoot, PLUGIN_SYNC_METADATA_ARCHIVE_PATH), "utf-8");
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || !Array.isArray(parsed.marketplaceSources)) {
     throw new Error("invalid plugin marketplace source archive metadata");
   }
   if (parsed.marketplaceSources.length !== 1) {
-    throw new Error(
-      "plugin marketplace source archive must contain one marketplace",
-    );
+    throw new Error("plugin marketplace source archive must contain one marketplace");
   }
   const item = parsed.marketplaceSources[0];
   if (!isRecord(item)) {
@@ -357,25 +305,17 @@ async function loadMarketplaceSource(
 ): Promise<MarketplaceSourceLoadResult> {
   const sourceKind = typeof source.source === "string" ? source.source : "";
   if (sourceKind === "file") {
-    const filePath = readRequiredString(
-      source.path,
-      "marketplace source file path",
-    );
+    const filePath = readRequiredString(source.path, "marketplace source file path");
     return {
       manifest: await readMarketplaceManifest(filePath),
       sourceRoot: dirname(filePath),
     };
   }
   if (sourceKind === "directory") {
-    const sourceRoot = readRequiredString(
-      source.path,
-      "marketplace source directory path",
-    );
+    const sourceRoot = readRequiredString(source.path, "marketplace source directory path");
     const manifestPath = findMarketplaceManifestPath(sourceRoot);
     if (!manifestPath) {
-      throw new Error(
-        `marketplace manifest not found in directory: ${sourceRoot}`,
-      );
+      throw new Error(`marketplace manifest not found in directory: ${sourceRoot}`);
     }
     return {
       manifest: await readMarketplaceManifest(manifestPath),
@@ -384,22 +324,16 @@ async function loadMarketplaceSource(
   }
   if (sourceKind === "settings") {
     if (!isRecord(source.marketplace)) {
-      throw new Error(
-        "settings marketplace source is missing marketplace manifest",
-      );
+      throw new Error("settings marketplace source is missing marketplace manifest");
     }
     return {
       manifest: parseMarketplaceManifest(source.marketplace),
     };
   }
-  throw new Error(
-    `unsupported marketplace source for SSH sync: ${sourceKind || "unknown"}`,
-  );
+  throw new Error(`unsupported marketplace source for SSH sync: ${sourceKind || "unknown"}`);
 }
 
-async function readMarketplaceManifest(
-  filePath: string,
-): Promise<MarketplaceManifestInfo> {
+async function readMarketplaceManifest(filePath: string): Promise<MarketplaceManifestInfo> {
   const parsed = JSON.parse(await readFile(filePath, "utf-8")) as unknown;
   return parseMarketplaceManifest(parsed);
 }
@@ -414,36 +348,27 @@ function parseMarketplaceManifest(value: unknown): MarketplaceManifestInfo {
     ? rawPlugins
     : isRecord(rawPlugins)
       ? Object.entries(rawPlugins).map(([pluginName, plugin]) =>
-          isRecord(plugin)
-            ? { name: pluginName, ...plugin }
-            : { name: pluginName },
+          isRecord(plugin) ? { name: pluginName, ...plugin } : { name: pluginName },
         )
       : [];
-  const plugins = pluginValues
-    .filter(isRecord)
-    .map((plugin): MarketplacePluginEntryInfo => {
-      const pluginName = readRequiredString(
-        plugin.name,
-        "marketplace plugin name",
-      );
-      const dependencies = Array.isArray(plugin.dependencies)
-        ? plugin.dependencies.filter(
-            (dependency): dependency is string =>
-              typeof dependency === "string" && dependency.trim().length > 0,
-          )
-        : [];
-      return {
-        name: pluginName,
-        dependencies,
-        raw: plugin,
-        ...(plugin.source !== undefined ? { source: plugin.source } : {}),
-      };
-    });
+  const plugins = pluginValues.filter(isRecord).map((plugin): MarketplacePluginEntryInfo => {
+    const pluginName = readRequiredString(plugin.name, "marketplace plugin name");
+    const dependencies = Array.isArray(plugin.dependencies)
+      ? plugin.dependencies.filter(
+          (dependency): dependency is string =>
+            typeof dependency === "string" && dependency.trim().length > 0,
+        )
+      : [];
+    return {
+      name: pluginName,
+      dependencies,
+      raw: plugin,
+      ...(plugin.source !== undefined ? { source: plugin.source } : {}),
+    };
+  });
   return {
     name,
-    ...(typeof value.description === "string"
-      ? { description: value.description }
-      : {}),
+    ...(typeof value.description === "string" ? { description: value.description } : {}),
     ...readMarketplacePluginRoot(value),
     plugins,
     raw: value,
@@ -480,10 +405,7 @@ function resolveMarketplacePluginClosure(
   const visited = new Set<string>();
   const result: MarketplacePluginEntryInfo[] = [];
   const visit = (pluginName: string, requiredBy: string) => {
-    const normalizedName = readRequiredString(
-      pluginName,
-      "marketplace plugin name",
-    );
+    const normalizedName = readRequiredString(pluginName, "marketplace plugin name");
     if (visited.has(normalizedName)) {
       return;
     }
@@ -494,10 +416,7 @@ function resolveMarketplacePluginClosure(
     visited.add(normalizedName);
     result.push(entry);
     for (const dependency of entry.dependencies) {
-      visit(
-        normalizeMarketplaceDependency(dependency, marketplaceId, requiredBy),
-        entry.name,
-      );
+      visit(normalizeMarketplaceDependency(dependency, marketplaceId, requiredBy), entry.name);
     }
   };
   for (const pluginName of pluginNames) {
@@ -554,9 +473,7 @@ function isRemoteMarketplacePluginSource(source: unknown): boolean {
     return false;
   }
   const sourceKind = typeof source.source === "string" ? source.source : "";
-  return ["github", "git", "url", "git-subdir", "npm", "pip"].includes(
-    sourceKind,
-  );
+  return ["github", "git", "url", "git-subdir", "npm", "pip"].includes(sourceKind);
 }
 
 async function resolveLocalMarketplacePluginSource(
@@ -571,8 +488,7 @@ async function resolveLocalMarketplacePluginSource(
     );
   }
   if (isRecord(entry.source)) {
-    const sourceKind =
-      typeof entry.source.source === "string" ? entry.source.source : "";
+    const sourceKind = typeof entry.source.source === "string" ? entry.source.source : "";
     if (sourceKind === "directory" && typeof entry.source.path === "string") {
       return await resolveLocalMarketplacePluginSourcePath(
         loaded,
@@ -602,9 +518,7 @@ async function resolveLocalMarketplacePluginFallback(
   if (await directoryExists(fallbackPath)) {
     return await assertLocalMarketplacePluginSourceRoot(fallbackPath);
   }
-  throw new Error(
-    `local marketplace plugin source does not exist: ${fallbackPath}`,
-  );
+  throw new Error(`local marketplace plugin source does not exist: ${fallbackPath}`);
 }
 
 async function resolveLocalMarketplacePluginSourcePath(
@@ -625,9 +539,7 @@ async function resolveLocalMarketplacePluginSourcePath(
     if (await directoryExists(absolutePath)) {
       return await assertLocalMarketplacePluginSourceRoot(absolutePath);
     }
-    throw new Error(
-      `local marketplace plugin source does not exist: ${sourcePath}`,
-    );
+    throw new Error(`local marketplace plugin source does not exist: ${sourcePath}`);
   }
   if (!loaded.sourceRoot) {
     throw new Error(
@@ -635,38 +547,26 @@ async function resolveLocalMarketplacePluginSourcePath(
     );
   }
   const pluginBaseDir = resolveMarketplacePluginBaseDir(loaded);
-  const relativePath = resolvePluginSyncPathWithin(
-    pluginBaseDir,
-    relativeSourcePath,
-    {
-      unsafePathLabel: "unsafe marketplace plugin source path",
-    },
-  );
+  const relativePath = resolvePluginSyncPathWithin(pluginBaseDir, relativeSourcePath, {
+    unsafePathLabel: "unsafe marketplace plugin source path",
+  });
   if (await directoryExists(relativePath)) {
     return await assertLocalMarketplacePluginSourceRoot(relativePath);
   }
-  throw new Error(
-    `local marketplace plugin source does not exist: ${sourcePath}`,
-  );
+  throw new Error(`local marketplace plugin source does not exist: ${sourcePath}`);
 }
 
-async function assertLocalMarketplacePluginSourceRoot(
-  pluginRoot: string,
-): Promise<string> {
+async function assertLocalMarketplacePluginSourceRoot(pluginRoot: string): Promise<string> {
   const manifest = await readPluginManifestInfo(pluginRoot);
   if (!manifest) {
     // marketplace source mirror 只能复制选中插件目录。先验证 plugin manifest，避免被篡改的 marketplace entry
     // 指向普通目录后，把本机敏感文件作为“插件源码”打包发送到 SSH 远端。
-    throw new Error(
-      `local marketplace plugin source is missing plugin manifest: ${pluginRoot}`,
-    );
+    throw new Error(`local marketplace plugin source is missing plugin manifest: ${pluginRoot}`);
   }
   return pluginRoot;
 }
 
-function resolveMarketplacePluginBaseDir(
-  loaded: MarketplaceSourceLoadResult,
-): string {
+function resolveMarketplacePluginBaseDir(loaded: MarketplaceSourceLoadResult): string {
   const sourceRoot = loaded.sourceRoot;
   if (!sourceRoot) {
     throw new Error("cannot resolve marketplace plugin source root");
@@ -674,13 +574,9 @@ function resolveMarketplacePluginBaseDir(
   if (!loaded.manifest.pluginRoot) {
     return sourceRoot;
   }
-  const pluginRoot = resolvePluginSyncPathWithin(
-    sourceRoot,
-    loaded.manifest.pluginRoot,
-    {
-      unsafePathLabel: "unsafe marketplace pluginRoot",
-    },
-  );
+  const pluginRoot = resolvePluginSyncPathWithin(sourceRoot, loaded.manifest.pluginRoot, {
+    unsafePathLabel: "unsafe marketplace pluginRoot",
+  });
   return existsSync(pluginRoot) ? pluginRoot : sourceRoot;
 }
 
@@ -688,12 +584,8 @@ function buildMirroredMarketplaceManifest(
   manifest: MarketplaceManifestInfo,
   entries: readonly MarketplaceSourceMirrorEntry[],
 ): Record<string, unknown> {
-  const hasMirroredLocalSource = entries.some(
-    (entry) => entry.mirroredSourceRelativePath,
-  );
-  const rawMetadata = isRecord(manifest.raw.metadata)
-    ? manifest.raw.metadata
-    : {};
+  const hasMirroredLocalSource = entries.some((entry) => entry.mirroredSourceRelativePath);
+  const rawMetadata = isRecord(manifest.raw.metadata) ? manifest.raw.metadata : {};
   const rawManifest = { ...manifest.raw };
   delete rawManifest.pluginRoot;
   return {
@@ -789,9 +681,7 @@ async function computeRecursiveSize(path: string): Promise<number> {
   return total;
 }
 
-async function computeRecursiveContentFingerprint(
-  path: string,
-): Promise<string> {
+async function computeRecursiveContentFingerprint(path: string): Promise<string> {
   const pathStat = await lstat(path);
   const hash = createHash("sha256");
   if (pathStat.isFile()) {
@@ -803,15 +693,13 @@ async function computeRecursiveContentFingerprint(
     throw new Error(`unsupported plugin archive source: ${path}`);
   }
   hash.update("dir\0");
-  const children = (await readdir(path, { withFileTypes: true })).sort(
-    (left, right) => left.name.localeCompare(right.name),
+  const children = (await readdir(path, { withFileTypes: true })).sort((left, right) =>
+    left.name.localeCompare(right.name),
   );
   for (const child of children) {
     hash.update(child.name);
     hash.update("\0");
-    hash.update(
-      await computeRecursiveContentFingerprint(join(path, child.name)),
-    );
+    hash.update(await computeRecursiveContentFingerprint(join(path, child.name)));
     hash.update("\0");
   }
   return hash.digest("hex");
@@ -853,9 +741,7 @@ function readRequiredString(value: unknown, label: string): string {
   return value.trim();
 }
 
-async function readJsonFileOrEmpty(
-  filePath: string,
-): Promise<Record<string, unknown>> {
+async function readJsonFileOrEmpty(filePath: string): Promise<Record<string, unknown>> {
   let raw: string;
   try {
     raw = await readFile(filePath, "utf-8");
@@ -874,10 +760,7 @@ async function readJsonFileOrEmpty(
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter(
-        (item): item is string =>
-          typeof item === "string" && item.trim().length > 0,
-      )
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
 }
 

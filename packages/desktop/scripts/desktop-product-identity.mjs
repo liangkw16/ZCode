@@ -141,7 +141,8 @@ export function resolveWindowsAppUserModelIdForFlavor(flavor, runtime = { isPack
   if (runtime.isPackaged === false) {
     return "cn.aminer.zcode";
   }
-  const normalizedFlavor = flavor === "production" ? "production" : flavor === "kcode" ? "kcode" : "preview";
+  const normalizedFlavor =
+    flavor === "production" ? "production" : flavor === "kcode" ? "kcode" : "preview";
   return desktopProductIdentities[normalizedFlavor].appId;
 }
 

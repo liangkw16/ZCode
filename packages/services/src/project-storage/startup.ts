@@ -30,23 +30,15 @@ const LOCK_WAIT_MS = 60 * 60_000;
 /** 由 Host Worker 调用，SQL 和迁移后修复与旧 Repo 共用，只有获取写锁异步等待。 */
 export async function prepareTasksIndexStorage(
   path: string,
-  onProgress: (
-    phase: TasksStoragePhase,
-    migration?: DatabaseMigrationFacts,
-  ) => void,
+  onProgress: (phase: TasksStoragePhase, migration?: DatabaseMigrationFacts) => void,
   settings?: Pick<
     AppSettings,
-    | "lastWorkspaceSession"
-    | "recentProjects"
-    | "sourceServers"
-    | "connectionProfiles"
+    "lastWorkspaceSession" | "recentProjects" | "sourceServers" | "connectionProfiles"
   >,
 ): Promise<void> {
   // 回调拿到的是当时事实，不共享后续执行会继续递增的内部对象。
-  const report = (
-    phase: TasksStoragePhase,
-    migration?: DatabaseMigrationFacts,
-  ) => onProgress(phase, migration ? { ...migration } : undefined);
+  const report = (phase: TasksStoragePhase, migration?: DatabaseMigrationFacts) =>
+    onProgress(phase, migration ? { ...migration } : undefined);
   report("checking");
   await mkdir(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
@@ -68,12 +60,9 @@ export async function prepareTasksIndexStorage(
           const code = (error as { errcode?: number }).errcode;
           if (typeof code !== "number" || (code & 0xff) !== 5) throw error;
           if (Date.now() >= deadline)
-            throw Object.assign(
-              new Error("Task storage lock wait expired", { cause: error }),
-              {
-                kind: "lock_timeout",
-              },
-            );
+            throw Object.assign(new Error("Task storage lock wait expired", { cause: error }), {
+              kind: "lock_timeout",
+            });
           if (!waiting) {
             waiting = true;
             report("waiting_for_lock", migration);

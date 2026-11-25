@@ -3,10 +3,7 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
-import {
-  SKILL_DATA_SYNC_MAX_ITEM_BYTES,
-  ZCODE_DATA_DIR_SEGMENT,
-} from "@zcode/shared";
+import { SKILL_DATA_SYNC_MAX_ITEM_BYTES, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { ISkillSyncService } from "./skillSync.js";
 import {
   MAX_SKILL_SCAN_DEPTH,
@@ -26,18 +23,14 @@ export interface UserSkillCandidate {
   path: string;
 }
 
-export function createSkillSyncService(options?: {
-  maxArchiveBytes?: number;
-}): ISkillSyncService {
+export function createSkillSyncService(options?: { maxArchiveBytes?: number }): ISkillSyncService {
   const maxArchiveBytes = options?.maxArchiveBytes ?? DEFAULT_MAX_ARCHIVE_BYTES;
   // 数据同步：单个技能目录的大小上限，默认 20MB。
   return createSkillDataSyncMethods({ maxItemBytes: maxArchiveBytes });
 }
 
 export function resolveUserHomeDir(): string {
-  return (
-    process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir()
-  );
+  return process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
 }
 
 export function getUserZcodeSkillRoot(): string {
@@ -52,19 +45,13 @@ function getUserAgentsSkillRoot(): string {
  * 用户级技能候选：`~/.zcode/skills` 优先，`~/.agents/skills` 中同目录名或同 name 的项剔除，再按 realpath 去重。
  * 文件数与字节签名由数据同步的 list 自己计算。
  */
-export async function collectUserSkillCandidates(): Promise<
-  UserSkillCandidate[]
-> {
+export async function collectUserSkillCandidates(): Promise<UserSkillCandidate[]> {
   const seenSkillRealpaths = new Set<string>();
   const userZcodeSkillRoot = getUserZcodeSkillRoot();
-  const rawZcodeCandidates =
-    await collectUserSkillCandidatesInRoot(userZcodeSkillRoot);
-  const zcodeDirectoryNames =
-    await collectCoveredSkillDirectoryNamesInRoot(userZcodeSkillRoot);
+  const rawZcodeCandidates = await collectUserSkillCandidatesInRoot(userZcodeSkillRoot);
+  const zcodeDirectoryNames = await collectCoveredSkillDirectoryNamesInRoot(userZcodeSkillRoot);
   const zcodeSkillNameKeys = new Set(
-    rawZcodeCandidates.map((candidate) =>
-      normalizeSkillNameKey(candidate.name),
-    ),
+    rawZcodeCandidates.map((candidate) => normalizeSkillNameKey(candidate.name)),
   );
   const zcodeCandidates = await dedupeCandidatesByCanonicalSkillPath(
     rawZcodeCandidates,
@@ -90,9 +77,7 @@ async function dedupeCandidatesByCanonicalSkillPath(
 ): Promise<UserSkillCandidate[]> {
   const result: UserSkillCandidate[] = [];
   for (const candidate of candidates) {
-    const canonicalPath = await realpath(candidate.path).catch(
-      () => candidate.path,
-    );
+    const canonicalPath = await realpath(candidate.path).catch(() => candidate.path);
     if (seenSkillRealpaths.has(canonicalPath)) {
       continue;
     }
@@ -102,19 +87,14 @@ async function dedupeCandidatesByCanonicalSkillPath(
   return result;
 }
 
-async function collectUserSkillCandidatesInRoot(
-  root: string,
-): Promise<UserSkillCandidate[]> {
+async function collectUserSkillCandidatesInRoot(root: string): Promise<UserSkillCandidate[]> {
   if (!existsSync(root)) {
     return [];
   }
   const candidates: UserSkillCandidate[] = [];
   for await (const skillPath of walkSkillMarkdownPaths(root)) {
     const directoryPath = dirname(skillPath);
-    const relativePath = normalizeSkillDirectoryRelativePath(
-      root,
-      directoryPath,
-    );
+    const relativePath = normalizeSkillDirectoryRelativePath(root, directoryPath);
     if (!relativePath) {
       continue;
     }
@@ -132,14 +112,10 @@ async function collectUserSkillCandidatesInRoot(
 
   // 远端同步候选必须复用设置页已有的有界扫描策略；
   // 自己维护递归会漏掉 MAX_SKILL_SCAN_DEPTH 和软链 realpath 去重，遇到环形目录软链会卡住。
-  return candidates.sort((left, right) =>
-    left.directoryName.localeCompare(right.directoryName),
-  );
+  return candidates.sort((left, right) => left.directoryName.localeCompare(right.directoryName));
 }
 
-async function collectCoveredSkillDirectoryNamesInRoot(
-  root: string,
-): Promise<Set<string>> {
+async function collectCoveredSkillDirectoryNamesInRoot(root: string): Promise<Set<string>> {
   const directoryNames = new Set<string>();
   if (!existsSync(root)) {
     return directoryNames;
@@ -178,8 +154,7 @@ async function collectCoveredSkillDirectoryNamesInRoot(
       const entryPath = join(current.directoryPath, entry.name);
       const isDirectory =
         entry.isDirectory() ||
-        (entry.isSymbolicLink() &&
-          (await stat(entryPath).catch(() => undefined))?.isDirectory());
+        (entry.isSymbolicLink() && (await stat(entryPath).catch(() => undefined))?.isDirectory());
       if (!isDirectory) {
         continue;
       }
@@ -194,10 +169,7 @@ async function collectCoveredSkillDirectoryNamesInRoot(
   return directoryNames;
 }
 
-function normalizeSkillDirectoryRelativePath(
-  root: string,
-  directoryPath: string,
-): string {
+function normalizeSkillDirectoryRelativePath(root: string, directoryPath: string): string {
   return relative(root, directoryPath).replaceAll("\\", "/");
 }
 
@@ -209,9 +181,7 @@ function joinSkillRelativePath(parent: string, child: string): string {
   return parent ? `${parent}/${child}` : child;
 }
 
-export async function readSkillFileOrNull(
-  skillPath: string,
-): Promise<string | null> {
+export async function readSkillFileOrNull(skillPath: string): Promise<string | null> {
   try {
     return await readFile(skillPath, "utf-8");
   } catch (error) {
@@ -240,15 +210,9 @@ export function parseSkillMetadata(
   } catch {
     return { name: fallbackName, description: "" };
   }
-  const metadata =
-    parsed && typeof parsed === "object"
-      ? (parsed as Record<string, unknown>)
-      : {};
+  const metadata = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   const name =
-    typeof metadata.name === "string" && metadata.name.trim()
-      ? metadata.name.trim()
-      : fallbackName;
-  const description =
-    typeof metadata.description === "string" ? metadata.description.trim() : "";
+    typeof metadata.name === "string" && metadata.name.trim() ? metadata.name.trim() : fallbackName;
+  const description = typeof metadata.description === "string" ? metadata.description.trim() : "";
   return { name, description };
 }

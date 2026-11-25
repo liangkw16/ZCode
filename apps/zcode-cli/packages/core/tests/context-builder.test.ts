@@ -320,6 +320,13 @@ describe("ContextBuilder meta user context", () => {
     expect(dynamicSystem).toContain(
       "Reuse the user's authorization for the same target, scope, and effects",
     );
+    // 合同「Authorization paragraph」：实质扩大或未授权的破坏性/对外操作要先确认；仅“重新评估”不算。
+    // 工具审批前不加口头关卡、既有授权沿用，这两条与确认要求并存。
+    expect(dynamicSystem).toContain(
+      "confirm first when effects materially expand or differ, especially unauthorized irreversible or outward-facing actions",
+    );
+    expect(dynamicSystem).toContain("Do not add a verbal gate before a tool approval");
+    expect(dynamicSystem).not.toContain("reassess materially expanded");
     expect(dynamicSystem).not.toContain("Sending content to an external service publishes it");
     expect(dynamicSystem).toContain("Distinguish public reading and authorized services");
     expect(dynamicSystem).toContain("Before deleting or overwriting, inspect the target");

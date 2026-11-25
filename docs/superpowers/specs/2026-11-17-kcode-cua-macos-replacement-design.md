@@ -385,7 +385,7 @@ sequenceDiagram
 
 `type` / `paste` 的 ⌘V 粘贴路径在此基础上核对落地：派发后读取应用焦点元素的 `AXValue`，值与派发前不同或包含文本才算 `accepted`；值可读但没变则如实报告没有落地——目标不在前台时返回 `foreground_required`，提示把窗口切到前台后重试或对元素 `set_value`；目标在前台时返回 `action_unavailable`。两者都是 `action_sent=true`、`dispatch_status=possibly_sent`、`reason_code=text_insertion_not_observed`。读不到落点元素的值或格式为 html 时，沿用“目标进程读取了剪贴板”这一条证据。
 
-实测边界（macOS 27.2）：投递给 AppKit 应用的 ⌘V 只有在该应用处于前台时才会被当作菜单快捷键处理；应用不在前台时按键送达窗口、剪贴板也被读取，输入框不变，合成 target focus 改变不了这一点。Chromium 应用在前台可以落地。因此后台键盘输入（M08）尚未成立，回执不再把它报告成成功。
+实测边界（macOS 27.2）：投递给应用的 ⌘V 只有在该应用真正在前台、窗口能接收按键时才会被当作菜单快捷键处理。应用不在前台时按键送达窗口、剪贴板也被读取，输入框不变，合成 target focus 改变不了这一点；AppKit（原生夹具、文本编辑）和 Chromium（隔离 Chrome）都是如此。用 `NSRunningApplication` 按 PID 激活成前台的 Chrome 同样没有插入，自然启动到前台的同一页面可以。因此后台键盘输入（M08）尚未成立，回执不再把它报告成成功。实验与实测见 [M2 验证记录](../../cua/validation/2026-11-17-kcode-cua-m2.md)。
 
 验收中的人工协助边界：M07 可在单独标记的前台限定正向用例中由用户预先切换前台，并单独验证未满足条件时的 `foreground_required`；不能把这算成后台输入通过。M08 的后台窗口隔离用例必须在另一个应用仍处前台时真正完成点击、输入和滚动。M09 从任务开始到提交不允许人工点击、输入或前台化来补足能力，只允许测试约定的取消/继续和人工锁屏/解锁；系统授权与账户登录应在任务计时前完成。后台能力缺失导致 M08/M09 失败就修实现，不能追加人工步骤绕过。
 
@@ -394,6 +394,8 @@ sequenceDiagram
 源码实现既有 PiP session contract、会话焦点/turn 事件去重、目标窗口缩略图和 dismiss 状态；只接受 presentation capability。ghost cursor 为可见反馈，不成为输入目标或焦点 owner。锁屏、turn 结束、session close、取消和 helper recovery 时按既有规则隐藏/更新；多显示器/Space 坐标变化不得使用旧表面。视觉功能出错不能造成额外 controller 或绕过权限。
 
 macOS 上启动 Helper 的每条路径都带 `--pip-mode`，包括设置页只读探测拉起的常驻 Helper：它是进程级能力开关，之后的真实操作会复用同一进程，漏传则 PiP 握手返回 `version_mismatch`。握手不匹配的传输只禁用到当前回合结束，下一个 `turn-started` 重新握手一次；同一 socket 背后的 Helper 进程会在 Host 存活期间被替换。
+
+PiP 目标只在 Helper 持有控制 lease 时登记：只做观察、没有任何写操作的回合不出现面板。
 
 Helper 由回合内的首个 CUA 调用懒启动，而 `turn-started` 与带会话 id 的 `focus-changed` 都早于它。这两条没能送达的事件在回合内保持待补发，直到同一回合的 `turn-ended` / `session-closed`、新的 `turn-started` 或服务销毁；不设固定过期时间。凭据可用后先补 `turn-started`、再补最近一条 `focus-changed`，Helper 才同时有开着的回合和活动会话来承接随后的截图。
 

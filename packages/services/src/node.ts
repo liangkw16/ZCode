@@ -1976,17 +1976,20 @@ export function createLocalServices(options: {
     const appPath = await resolveStandaloneStatusAppPath();
     if (!appPath) return null;
     // Helper 启动参数统一由 buildHelperOpenArgs 构造，避免多处手写导致漏传或漂移。
-    // 设置页只读权限探测不承载 PiP，不传 --launcher-pid 和 --pip-mode；
     // exit-log 使用 .settings.exit.log。新增参数应定义在 HelperLaunchSpec 中供调用方共用。
     // ghostCursorOverlay 必须传：overlay 是进程级开关，Helper 常驻，设置页先拉起后
     // 真实 CUA 动作会复用同一进程 —— 漏传则整轮操作没有虚拟光标（2026-10-27 本机实测，
     // 第 6 次 argv 漏传，见 docs/cua/producer/ghost-cursor-revival-and-polish.md §0）。
-    // PiP 不同：它依赖 --launcher-pid 的生命周期绑定，按原设计仍不传。
+    // pipMode 同理（修复原因）：原先以"PiP 依赖 --launcher-pid 的生命周期绑定"为由不传，
+    // 但源码构建的 Helper 不读 --launcher-pid，PiP 只剩进程级开关这一道门。设置页先拉起
+    // 的常驻 Helper 不带它，随后 PiP 握手返回 version_mismatch，服务把这条传输禁用到
+    // 回合结束，之后真实 CUA 操作复用的还是这个进程 —— 先开过设置页的那一轮没有 PiP。
     const args = buildHelperOpenArgs({
       appPath,
       socketPath,
       exitLogPath: `${socketPath}.settings.exit.log`,
       ghostCursorOverlay: true,
+      pipMode: true,
       ...(isCuaLocalDevelopmentRuntime(process.env)
         ? { allowUnsignedLauncherLocalDev: true, allowExternalBrokerClientLocalDev: true }
         : {}),

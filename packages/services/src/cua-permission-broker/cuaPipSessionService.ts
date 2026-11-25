@@ -76,22 +76,32 @@ export function createCuaPipSessionService(options: {
    */
   let pendingTurnStarted: { event: PipSessionEvent; turnId: string } | null = null;
   /**
+   * 最近一条没能送达、且带会话 id 的 focus-changed。
+   *
+   * 修复原因：Helper 只在 `activeSession` 等于当前会话时才起 PiP，而 `activeSession` 只由
+   * focus-changed 设定。焦点事件在用户选中会话或窗口获得焦点时发出，必然早于回合内的首个
+   * CUA 调用，也就是早于 Helper 被拉起。只补发 turn-started 时 Helper 记下了回合却没有活动
+   * 会话，用户在回合内不切换会话就一直没有 PiP（M2 上要切到别的应用再切回才出现）。
+   * 不带会话 id 的 focus-changed（窗口失焦、会话取消选中）代表最新状态是"没有活动会话"，
+   * 同样要记下：它清掉待补发的上一条。
+   */
+  let pendingFocus: Extract<PipSessionEvent, { kind: "focus-changed" }> | null = null;
+  /**
    * 补发重试定时器。
    *
-   * 为什么不能只等"下一个恰好发生的事件"来触发补发
-   *   20:18:15.628  turn-started → credentials-unavailable（Helper 未起）
-   *   20:18:23      Helper 起来 → 首次 capture_app → bindCapture → pending-turn
-   *                 （协调器侧 PIP_SESSION_CAPTURE_PENDING_TTL_MS = 2s，约 20:18:25 过期）
-   *   20:18:30.420  下一个事件才来，补发成功 applied:true —— 但已晚了 5 秒
-   * 结果 turn 开起来时暂存的 capture 已过期，captureAccepted 不再触发，窗口仍然不起。
+   * 为什么不能只等"下一个恰好发生的事件"来触发补发：回合内可能长时间没有下一个事件，
+   * 而下一次截图就要 PiP。所以凭据一可用就要立刻补发：暂存的同时起轮询，命中即停。
    *
-   * 所以凭据一可用就要立刻补发：暂存的同时起一个有界轮询，命中即停。间隔取 250ms，
-   * 远小于协调器那 2s 的 TTL；上限 30s 覆盖 Helper 冷启动（含首次 TCC 授权对话框）。
+   * 待补发的事件以回合为生命周期：turn-ended / session-closed、新的 turn-started 或服务销毁
+   * 才作废。修复原因：原先 30 秒后过期，可模型常常先推理或调用别的工具几十秒才发起首个
+   * CUA 调用，Helper 这时才被懒启动，过期的 turn-started 已被丢弃，第一轮注定没有 PiP。
+   * 回合可以很长，轮询在 2 秒后放慢到每秒一次；定时器 unref，不会拖住进程。
    */
   let replayTimer: ReturnType<typeof setTimeout> | null = null;
-  const REPLAY_RETRY_MS = 250;
-  const REPLAY_DEADLINE_MS = 30_000;
-  let replayDeadline = 0;
+  const REPLAY_FAST_RETRY_MS = 250;
+  const REPLAY_SLOW_RETRY_MS = 1_000;
+  const REPLAY_FAST_ATTEMPTS = 8;
+  let replayAttempts = 0;
 
   const cancelReplayRetry = () => {
     if (replayTimer !== null) {
@@ -134,19 +144,59 @@ export function createCuaPipSessionService(options: {
   };
 
   /**
-   * 有界轮询：凭据一可用就把暂存的 turn-started 发出去，不等下一个事件。
+   * 把暂存的事件按顺序补发：先 turn-started，再 focus-changed。
+   *
+   * `current` 是马上要发送的事件。它与某条暂存事件同类时，那条已被它取代，不补。
+   * 补发失败不拖垮当前事件：当前事件仍要发出去，最坏退回 turn-mismatch。
+   */
+  const replayDeferred = async (
+    client: PipSessionClient,
+    current?: PipSessionEvent,
+  ): Promise<void> => {
+    const deferred: Array<{ event: PipSessionEvent; restore: () => void }> = [];
+    if (current?.kind !== "turn-started" && pendingTurnStarted) {
+      const pending = pendingTurnStarted;
+      deferred.push({ event: pending.event, restore: () => (pendingTurnStarted = pending) });
+    }
+    if (current?.kind !== "focus-changed" && pendingFocus) {
+      const pending = pendingFocus;
+      deferred.push({ event: pending, restore: () => (pendingFocus = pending) });
+    }
+    pendingTurnStarted = null;
+    pendingFocus = null;
+    for (const [index, item] of deferred.entries()) {
+      const event = item.event;
+      const label = event.kind;
+      try {
+        const result = await client.send(event);
+        logger.info(undefined, `[cua-pip-session] replayed deferred ${label}`, {
+          ...eventLogContext(event),
+          applied: result.applied,
+          reason: result.reason,
+        });
+      } catch (error) {
+        logger.warn(undefined, `[cua-pip-session] replay of deferred ${label} failed`, {
+          ...eventLogContext(event),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        // 轮询补发时连接可能刚断开：这一条及之后的留到下一次重试。随 publish 补发时当前事件
+        // 仍要发出，不留。
+        if (!current) for (const rest of deferred.slice(index)) rest.restore();
+        return;
+      }
+    }
+  };
+
+  /**
+   * 轮询：凭据一可用就把暂存的 turn-started 和 focus-changed 发出去，不等下一个事件。
    * 经同一条 `tail` 串行，避免与 publish 竞态导致补发排到当前事件之后。
    */
   const scheduleReplayRetry = (): void => {
     cancelReplayRetry();
     if (disposed || pendingTurnStarted === null) return;
-    if (Date.now() >= replayDeadline) {
-      logger.warn(undefined, "[cua-pip-session] deferred turn-started expired before transport", {
-        ...eventLogContext(pendingTurnStarted.event),
-      });
-      pendingTurnStarted = null;
-      return;
-    }
+    const delay =
+      replayAttempts < REPLAY_FAST_ATTEMPTS ? REPLAY_FAST_RETRY_MS : REPLAY_SLOW_RETRY_MS;
+    replayAttempts += 1;
     replayTimer = setTimeout(() => {
       replayTimer = null;
       if (disposed || pendingTurnStarted === null) return;
@@ -161,27 +211,16 @@ export function createCuaPipSessionService(options: {
           return;
         }
         if (!resolution.client) {
-          scheduleReplayRetry();
+          // 握手被拒的传输在本回合内不会再被接受，下一个 turn-started 才重新握手；轮询没有可等的。
+          if (resolution.skipReason !== "transport-disabled") scheduleReplayRetry();
           return;
         }
-        const replay = pendingTurnStarted;
-        pendingTurnStarted = null;
-        try {
-          const result = await resolution.client.send(replay.event);
-          logger.info(undefined, "[cua-pip-session] replayed deferred turn-started", {
-            ...eventLogContext(replay.event),
-            applied: result.applied,
-            reason: result.reason,
-          });
-        } catch (error) {
-          logger.warn(undefined, "[cua-pip-session] replay of deferred turn-started failed", {
-            ...eventLogContext(replay.event),
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
-        }
+        await replayDeferred(resolution.client);
+        // 补发遇到传输错误时事件已放回暂存，继续等下一次。
+        if (pendingTurnStarted !== null) scheduleReplayRetry();
       });
       tail = operation;
-    }, REPLAY_RETRY_MS);
+    }, delay);
     // 轮询定时器不应该让进程活着：它只是在等一个可能永远不出现的 Helper。
     replayTimer.unref?.();
   };
@@ -189,6 +228,9 @@ export function createCuaPipSessionService(options: {
   const publish = (event: PipSessionEvent): Promise<void> => {
     if (disposed) return Promise.resolve();
     const operation = tail.then(async () => {
+      // 每个新回合给握手被拒的传输一次重新握手的机会。Helper 进程会在 Host 存活期间被替换，
+      // 按 socket 路径永久禁用会让换上来的新进程也用不了 PiP。
+      if (event.kind === "turn-started") disabledTransportKey = null;
       try {
         const resolution = await getClient();
         if (!resolution.client) {
@@ -201,8 +243,10 @@ export function createCuaPipSessionService(options: {
             // 没有传输的窗口里走完，补发只会开一个早该关闭的 turn。
             if (event.kind === "turn-started") {
               pendingTurnStarted = { event, turnId: event.turnId };
-              replayDeadline = Date.now() + REPLAY_DEADLINE_MS;
+              replayAttempts = 0;
               scheduleReplayRetry();
+            } else if (event.kind === "focus-changed") {
+              pendingFocus = event.sessionId ? event : null;
             } else if (
               (event.kind === "turn-ended" || event.kind === "session-closed") &&
               pendingTurnStarted !== null &&
@@ -230,27 +274,10 @@ export function createCuaPipSessionService(options: {
           }
           return;
         }
-        // 凭据到位了：先把开场那条补上，协调器才有一个开着的 turn 可以承接后面的事件。
-        // 当前事件本身就是 turn-started 时不补发（它已经顶掉了缓存）。
+        // 凭据到位了：先把开场那两条补上，Helper 才有一个开着的 turn 和一个活动会话
+        // 来承接后面的事件。
         cancelReplayRetry();
-        const replay = event.kind === "turn-started" ? null : pendingTurnStarted;
-        pendingTurnStarted = null;
-        if (replay !== null) {
-          try {
-            const replayed = await resolution.client.send(replay.event);
-            logger.info(undefined, "[cua-pip-session] replayed deferred turn-started", {
-              ...eventLogContext(replay.event),
-              applied: replayed.applied,
-              reason: replayed.reason,
-            });
-          } catch (error) {
-            // 补发失败不能拖垮当前事件：当前事件仍要发出去，最坏退回 turn-mismatch。
-            logger.warn(undefined, "[cua-pip-session] replay of deferred turn-started failed", {
-              ...eventLogContext(replay.event),
-              errorMessage: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
+        await replayDeferred(resolution.client, event);
         const result = await resolution.client.send(event);
         // Bug 诊断：PiP 切组跨 Main、Host、broker 三个进程；成功与幂等拒绝 ACK 若只写
         // debug，生产包无法区分 turn-started 未发送和 stale-sequence/turn-mismatch。

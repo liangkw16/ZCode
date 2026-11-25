@@ -387,6 +387,11 @@ sequenceDiagram
 
 源码实现既有 PiP session contract、会话焦点/turn 事件去重、目标窗口缩略图和 dismiss 状态；只接受 presentation capability。ghost cursor 为可见反馈，不成为输入目标或焦点 owner。锁屏、turn 结束、session close、取消和 helper recovery 时按既有规则隐藏/更新；多显示器/Space 坐标变化不得使用旧表面。视觉功能出错不能造成额外 controller 或绕过权限。
 
+macOS 上启动 Helper 的每条路径都带 `--pip-mode`，包括设置页只读探测拉起的常驻 Helper：它是进程级能力开关，之后的真实操作会复用同一进程，漏传则 PiP 握手返回 `version_mismatch`。握手不匹配的传输只禁用到当前回合结束，下一个 `turn-started` 重新握手一次；同一 socket 背后的 Helper 进程会在 Host 存活期间被替换。
+
+Helper 由回合内的首个 CUA 调用懒启动，而 `turn-started` 与带会话 id 的 `focus-changed` 都早于它。这两条没能送达的事件在回合内保持待补发，直到同一回合的 `turn-ended` / `session-closed`、新的 `turn-started` 或服务销毁；不设固定过期时间。凭据可用后先补 `turn-started`、再补最近一条 `focus-changed`，Helper 才同时有开着的回合和活动会话来承接随后的截图。
+
+
 ## 10. 构建、签名、安装与切换
 
 当前 `pnpm build:cua` 改为真正构建 workspace package；新增的 native/helper 构建和测试入口必须写入目标 package 的 package.json，再在文档中引用。不能把尚不存在的命令报告为已可运行。

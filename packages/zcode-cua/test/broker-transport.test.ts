@@ -278,6 +278,38 @@ describe("transport boundary validation", () => {
       code: "invalid_response",
     });
   });
+  // 修复回归：JSON 合法但不是对象（如 "null"）时，原先直接取 .id 会在 data 回调里抛 TypeError，
+  // 冒泡成进程级未捕获异常，而不是可捕获的 NativeBrokerError。
+  it.each(["null", "[]", "1", '"text"'])(
+    "rejects a valid-JSON non-object reply (%s)",
+    async (frame) => {
+      const client = await fixture((_r, s) => s.end(`${frame}\n`));
+      await expect(client.call("list_windows", {})).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+    },
+  );
+  it("rejects a non-object reply during authentication without throwing out of the data handler", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kcua-"));
+    const path = join(dir, "broker.sock");
+    const sockets = new Set<Socket>();
+    const server: Server = createServer((socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.end("null\n");
+    });
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    cleanup.push(async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(dir, { recursive: true });
+    });
+    const client = createBrokerClient({ socketPath: path, timeoutMs: 300 });
+    cleanup.push(() => client.close());
+    await expect(client.call("list_windows", {})).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+  });
   it("rejects an oversized request before dispatch", async () => {
     let called = false;
     const client = await fixture((_r, s) => {

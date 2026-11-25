@@ -112,9 +112,17 @@ export function createCuaHelperInstaller(
       exists = false;
     }
     if (exists) {
-      await verifyInstalled(destination);
-      if ((await helperManifest(source)).buildId === (await helperManifest(destination)).buildId)
-        return destination;
+      // 修复原因：已安装的 Helper 校验失败（被开发版 ad-hoc 包覆盖过、证书轮换、安装损坏）时，
+      // 原先直接抛错终止，正式版此后永久 not_authorized，只能手工删除。校验失败恰恰说明它需要被
+      // 替换；只有校验结论（NativeBrokerError）才触发替换，IO 类错误照旧上抛。
+      let installedBuildId: string | undefined;
+      try {
+        await verifyInstalled(destination);
+        installedBuildId = (await helperManifest(destination)).buildId;
+      } catch (error) {
+        if (!(error instanceof NativeBrokerError)) throw error;
+      }
+      if (installedBuildId === (await helperManifest(source)).buildId) return destination;
       const live = await findLiveHelper(executablePath(source), executablePath(destination));
       if (live)
         throw new NativeBrokerError(
@@ -126,13 +134,18 @@ export function createCuaHelperInstaller(
     await mkdir(installRoot, { recursive: true });
     const stagingRoot = await mkdtemp(join(installRoot, ".kcode-cua-install-"));
     const staging = join(stagingRoot, HELPER_NAME);
-    const backup = join(stagingRoot, "previous.app");
+    // 可回滚副本放在暂存目录之外：设计要求“发现同路径已有安装则保存可回滚副本”，固定保留
+    // 最近一次被替换的安装；新安装失败时由它恢复。原先它随暂存目录在 finally 里被一并删除。
+    const rollbackRoot = join(installRoot, ".kcode-cua-rollback");
+    const backup = join(rollbackRoot, HELPER_NAME);
     let moved = false;
     try {
       await cp(source, staging, { recursive: true, preserveTimestamps: true, dereference: false });
       await verifyInstalled(staging);
       try {
         await access(destination);
+        await rm(rollbackRoot, { recursive: true, force: true });
+        await mkdir(rollbackRoot, { recursive: true });
         await rename(destination, backup);
         moved = true;
       } catch (error) {

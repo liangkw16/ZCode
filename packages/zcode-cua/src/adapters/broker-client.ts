@@ -113,6 +113,12 @@ function exchange<T>(
           return;
         }
         buffer = buffer.slice(i + 1);
+        // 修复原因：JSON 合法不代表是响应对象（"null" 会解析成 null），直接取 .id 会在 data
+        // 事件回调里抛 TypeError；它不在 Promise 的捕获范围内，会冒泡成 Host 进程的未捕获异常。
+        if (response === null || typeof response !== "object" || Array.isArray(response)) {
+          finish(new NativeBrokerError("invalid_response", "CUA response is not an object"));
+          return;
+        }
         if (response.id !== (authenticated ? 1 : 0) || typeof response.ok !== "boolean") {
           finish(new NativeBrokerError("invalid_response", "CUA response identity mismatch"));
           return;

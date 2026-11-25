@@ -114,15 +114,13 @@ static NSDictionary *readLease(void) {
   if (lstat(path.fileSystemRepresentation, &st) != 0)
     return nil;
   checkPrivatePath(path, false);
-  // lease 只在派发前读取，这里的拒绝都发生在任何输入发出之前。
-  NSDictionary *notSent =
-      @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"};
   if (st.st_size > 8192)
-    KCUAFail(@"controller_busy", @"CUA lease exceeds size limit", notSent);
+    KCUAFail(@"controller_busy", @"CUA lease exceeds size limit");
   int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
   if (fd < 0)
-    KCUAFail(@"controller_busy", @"CUA lease cannot be read safely", notSent);
+    KCUAFail(@"controller_busy", @"CUA lease cannot be read safely");
   // 坏文件无法确认归属，只能保留并拒绝新的控制会话；消息带上路径，便于人工处理。
+  // 回执字段（not_sent）由 acquireLeaseBeforeDispatch 统一补上。
   NSString *malformedLeaseMessage = [NSString
       stringWithFormat:
           @"CUA lease at %@ is malformed; remove it to let a new controller start",
@@ -131,7 +129,7 @@ static NSDictionary *readLease(void) {
   ssize_t count = read(fd, bytes, 8192);
   close(fd);
   if (count <= 0)
-    KCUAFail(@"controller_busy", malformedLeaseMessage, notSent);
+    KCUAFail(@"controller_busy", malformedLeaseMessage);
   id record = [NSJSONSerialization
       JSONObjectWithData:[NSData dataWithBytes:bytes length:(NSUInteger)count]
                  options:0
@@ -140,7 +138,7 @@ static NSDictionary *readLease(void) {
       [record[@"schema"] intValue] != 1 ||
       ![record[@"pid"] isKindOfClass:[NSNumber class]] ||
       [record[@"pid"] intValue] < 1)
-    KCUAFail(@"controller_busy", malformedLeaseMessage, notSent);
+    KCUAFail(@"controller_busy", malformedLeaseMessage);
   return record;
 }
 // 读不到或解析不了的 lease 无法确认归属：状态查询如实报告，释放与后台回收都不碰它。
@@ -346,6 +344,21 @@ void KCUAReleaseLease(void) {
       [owner[@"processIdentity"] isEqual:leaseIdentity])
     unlink(leaseFile().fileSystemRepresentation);
 }
+// 修复原因：另一台 Helper 活着并持有 lease 时，拒绝只带 action_sent，没有 dispatch_status
+// （跨进程 lease 夹具首先在这里失败）。回执契约要求“已证明未派发”的拒绝同时给出
+// action_sent=false 与 dispatch_status=not_sent。lease 只在派发前获取，获取失败一律发生在
+// 任何输入发出之前，所以在这里统一补上，不逐条依赖各个拒绝分支自带的字段。
+static void acquireLeaseBeforeDispatch(void) {
+  @try {
+    KCUAAcquireLease();
+  } @catch (NSException *error) {
+    NSMutableDictionary *details =
+        [error.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+    details[@"action_sent"] = @NO;
+    details[@"dispatch_status"] = @"not_sent";
+    KCUAFail(error.name, error.reason, details);
+  }
+}
 static void releaseLeaseIfIdle(void) {
   if (!activeScopes.empty())
     return;
@@ -487,7 +500,7 @@ void KCUACoordinatorStart(NSString *runtimeDir, NSString *socketPath) {
           KCUACheck(op);
           if (!KCUAIsReadOnly(op->method) &&
               ![op->method isEqual:@"pip_session_event"])
-            KCUAAcquireLease();
+            acquireLeaseBeforeDispatch();
           id result = KCUADispatch(op->method, op->params, op);
           response = KCUAOK(result);
         } @catch (NSException *error) {

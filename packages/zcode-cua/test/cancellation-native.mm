@@ -1,6 +1,8 @@
 #import "../native/macos/protocol.h"
+#include <mach-o/dyld.h>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <signal.h>
@@ -8,6 +10,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 static std::atomic<int> dispatchCount{0};
 static bool fixtureStall = false;
 extern size_t KCUAActiveOperationCount(void);
@@ -37,10 +40,120 @@ static void idleUntilParentExits(void) {
     sleep(1);
   _exit(0);
 }
+// 跨进程 lease 竞争：同一台电脑上有两个 Helper 进程（见 --lease-rival）。子进程是一个独立的
+// 协调器，按父进程经 stdin 下的命令尝试写操作，把结果经 stdout 报告：held / busy。
+static constexpr const char *rivalHolderMode = "--lease-rival-holder";
+static constexpr const char *rivalQuit = "quit\n";
+static int rivalHolderMain(const char *runtimeDir) {
+  @autoreleasepool {
+    NSString *path = [NSString stringWithUTF8String:runtimeDir];
+    KCUACoordinatorStart(
+        path, [path stringByAppendingPathComponent:@"holder-socket"]);
+    std::atomic<bool> closed{false};
+    bool held = false;
+    int round = 0;
+    char line[16];
+    while (fgets(line, sizeof line, stdin)) {
+      if (strncmp(line, "go", 2) != 0)
+        break;
+      // 每次尝试都用新的操作号：同一个号会按幂等键取回上一次的回执。
+      auto result = KCUASubmit(
+          @"fixture_count", @{}, @"rival-peer",
+          @{@"session" : @"rival",
+            @"operationId" : [NSString stringWithFormat:@"round-%d", round++],
+            @"epoch" : @0},
+          &closed);
+      NSDictionary *error = result[@"error"];
+      bool ok = [result[@"ok"] boolValue];
+      if (ok)
+        held = true;
+      else {
+        // 输给另一台 Helper 时，在任何输入发出之前拒绝，并带上对方的确切身份。
+        assert([error[@"code"] isEqual:@"controller_busy"]);
+        assert([error[@"details"][@"action_sent"] isEqual:@NO]);
+        assert([error[@"details"][@"dispatch_status"] isEqual:@"not_sent"]);
+        assert([error[@"details"][@"controller"][@"pid"] intValue] > 1);
+        assert(dispatchCount == 0);
+      }
+      printf("%s\n", ok ? "held" : "busy");
+      fflush(stdout);
+    }
+    // 父进程退出（含断言失败）时 stdin 关闭，走到这里：正常释放自己持有的 lease 再退出。
+    if (held) {
+      auto release = KCUAControl(@"session_release", @{}, @"rival-peer",
+                                 @{@"session" : @"rival"});
+      assert([release[@"result"][@"cleanup_complete"] boolValue]);
+    }
+    KCUACoordinatorStop();
+  }
+  return 0;
+}
+struct Rival {
+  pid_t pid = 0;
+  FILE *toChild = nullptr;
+  FILE *fromChild = nullptr;
+};
+static NSString *executablePath(void) {
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::vector<char> buffer(size);
+  assert(_NSGetExecutablePath(buffer.data(), &size) == 0);
+  return [NSString stringWithUTF8String:buffer.data()];
+}
+static Rival spawnRival(NSString *runtimeDir) {
+  // fork 之后到 exec 之前不再分配内存：路径先在父进程里取好。
+  const char *self = executablePath().UTF8String;
+  const char *directory = runtimeDir.UTF8String;
+  int toChild[2], fromChild[2];
+  assert(pipe(toChild) == 0 && pipe(fromChild) == 0);
+  pid_t pid = fork();
+  assert(pid >= 0);
+  if (pid == 0) {
+    dup2(toChild[0], STDIN_FILENO);
+    dup2(fromChild[1], STDOUT_FILENO);
+    close(toChild[0]);
+    close(toChild[1]);
+    close(fromChild[0]);
+    close(fromChild[1]);
+    const char *arguments[] = {self, rivalHolderMode, directory, nullptr};
+    execv(arguments[0], (char *const *)arguments);
+    _exit(127);
+  }
+  close(toChild[0]);
+  close(fromChild[1]);
+  return {pid, fdopen(toChild[1], "w"), fdopen(fromChild[0], "r")};
+}
+static void tell(const Rival &rival, const char *command) {
+  assert(fputs(command, rival.toChild) >= 0);
+  fflush(rival.toChild);
+}
+static NSString *hear(const Rival &rival) {
+  char line[16];
+  assert(fgets(line, sizeof line, rival.fromChild) &&
+         "the rival Helper exited before reporting");
+  NSString *report = [NSString stringWithUTF8String:line];
+  return [report stringByTrimmingCharactersInSet:
+                    NSCharacterSet.newlineCharacterSet];
+}
+static void finishRival(Rival &rival) {
+  tell(rival, rivalQuit);
+  int status = 0;
+  assert(waitpid(rival.pid, &status, 0) == rival.pid);
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  fclose(rival.toChild);
+  fclose(rival.fromChild);
+}
+static void expectNoStagingLeftovers(NSString *path) {
+  for (NSString *entry in
+       [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:nil])
+    assert(![entry hasSuffix:@".tmp"] && "lease staging file left behind");
+}
 int main(int argc, const char *argv[]) {
   fixtureStall = argc > 1 && strcmp(argv[1], "--stall") == 0;
   if (fixtureStall)
     signal(SIGTERM, SIG_IGN);
+  if (argc > 2 && strcmp(argv[1], rivalHolderMode) == 0)
+    return rivalHolderMain(argv[2]);
   @autoreleasepool {
     char dir[] = "/tmp/kcua-coordinator-XXXXXX";
     assert(mkdtemp(dir));
@@ -229,6 +342,105 @@ int main(int argc, const char *argv[]) {
       KCUACoordinatorStop();
       [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
       puts("queued cancellation settles without dispatch or process recovery");
+      return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--lease-rival") == 0) {
+      // 同一个 runtime 目录上跑着两个 Helper 进程（本进程 B 与子进程 A/C/D/E/F）。
+      // 物理控制器只有一份：另一台 Helper 活着时，本进程的写操作在任何输入发出之前被拒绝。
+      NSString *lease = [path stringByAppendingPathComponent:@"controller-lease.json"];
+      std::atomic<bool> closed{false};
+      // 会话释放后即封口，之后的提交换一个新会话。
+      NSString *session = @"first";
+      auto context = [&session](NSString *operationId) {
+        return @{@"session" : session, @"operationId" : operationId, @"epoch" : @0};
+      };
+      // 每次提交用新的操作号：同一个号会按幂等键取回上一次的回执。
+      int attempts = 0;
+      auto submit = [&] {
+        return KCUASubmit(
+            @"fixture_count", @{}, @"peer",
+            context([NSString stringWithFormat:@"input-%d", ++attempts]), &closed);
+      };
+      auto releaseSession = [&] {
+        assert([KCUAControl(@"session_release", @{}, @"peer", context(@"release"))[@"result"]
+                    [@"cleanup_complete"] boolValue]);
+        session = [session stringByAppendingString:@"-next"];
+      };
+      auto expectOwnerIsThisHelper = [&] {
+        assert([KCUALeaseStatus()[@"is_owner"] boolValue]);
+        NSDictionary *record = [NSJSONSerialization
+            JSONObjectWithData:[NSData dataWithContentsOfFile:lease]
+                         options:0
+                           error:nil];
+        assert([record[@"pid"] intValue] == getpid());
+      };
+      Rival a = spawnRival(path);
+      tell(a, "go\n");
+      assert([hear(a) isEqual:@"held"]);
+      NSDictionary *status = KCUALeaseStatus();
+      assert([status[@"controlled"] boolValue] && ![status[@"is_owner"] boolValue]);
+      assert([status[@"owner"][@"pid"] intValue] == a.pid);
+      NSData *before = [NSData dataWithContentsOfFile:lease];
+      auto refused = submit();
+      assert(![refused[@"ok"] boolValue] && dispatchCount == 0);
+      assert([refused[@"error"][@"code"] isEqual:@"controller_busy"]);
+      assert([refused[@"error"][@"details"][@"action_sent"] isEqual:@NO]);
+      assert([refused[@"error"][@"details"][@"dispatch_status"] isEqual:@"not_sent"]);
+      assert([refused[@"error"][@"details"][@"controller"][@"pid"] intValue] == a.pid);
+      // 只读观察不争控制器；对方的 lease 文件原样保留。
+      assert([KCUASubmit(@"list_windows", @{}, @"peer", context(@"observe"), &closed)[@"ok"]
+                 boolValue]);
+      assert([before isEqual:[NSData dataWithContentsOfFile:lease]]);
+      expectNoStagingLeftovers(path);
+      // 对方正常退出、释放 lease 之后，本进程才拿得到。
+      finishRival(a);
+      assert(![[NSFileManager defaultManager] fileExistsAtPath:lease]);
+      assert([submit()[@"ok"] boolValue] && dispatchCount == 1);
+      expectOwnerIsThisHelper();
+
+      // 反过来：本进程持有时，新启动的 Helper 被拒绝（子进程内部已核对拒绝形状与零派发）。
+      Rival c = spawnRival(path);
+      tell(c, "go\n");
+      assert([hear(c) isEqual:@"busy"]);
+      finishRival(c);
+      expectOwnerIsThisHelper();
+      releaseSession();
+      assert(![[NSFileManager defaultManager] fileExistsAtPath:lease]);
+
+      // 持有者被强杀：lease 文件留在原地，状态如实报告它已不占用，本进程回收后接管。
+      Rival d = spawnRival(path);
+      tell(d, "go\n");
+      assert([hear(d) isEqual:@"held"]);
+      assert(kill(d.pid, SIGKILL) == 0);
+      int killed = 0;
+      assert(waitpid(d.pid, &killed, 0) == d.pid && WIFSIGNALED(killed));
+      fclose(d.toChild);
+      fclose(d.fromChild);
+      status = KCUALeaseStatus();
+      assert(![status[@"controlled"] boolValue] && ![status[@"is_owner"] boolValue]);
+      assert([status[@"owner"][@"pid"] intValue] == d.pid);
+      assert([submit()[@"ok"] boolValue] && dispatchCount == 2);
+      expectOwnerIsThisHelper();
+      releaseSession();
+      assert(dispatchCount == 2 && ![[NSFileManager defaultManager] fileExistsAtPath:lease]);
+
+      // 两台新 Helper 同时起步：恰好一台拿到 lease。赢家退出后，输家重试成功。
+      Rival e = spawnRival(path), f = spawnRival(path);
+      tell(e, "go\n");
+      tell(f, "go\n");
+      bool eHeld = [hear(e) isEqual:@"held"], fHeld = [hear(f) isEqual:@"held"];
+      assert(eHeld != fHeld && "exactly one Helper may own the controller");
+      finishRival(eHeld ? e : f);
+      Rival &loser = eHeld ? f : e;
+      tell(loser, "go\n");
+      assert([hear(loser) isEqual:@"held"]);
+      finishRival(loser);
+      assert(![[NSFileManager defaultManager] fileExistsAtPath:lease]);
+      expectNoStagingLeftovers(path);
+      KCUACoordinatorStop();
+      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+      puts("cross-process lease: a live rival is refused, a dead owner is "
+           "reclaimed, a simultaneous start has one winner");
       return 0;
     }
     if (argc > 1 && strcmp(argv[1], "--malformed-lease") == 0) {

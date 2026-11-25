@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 const exec = promisify(execFile);
 test(
   "native coordinator drains before ACK and bounds a stalled operation without replay",
-  { skip: process.platform !== "darwin", timeout: 20000 },
+  { skip: process.platform !== "darwin", timeout: 30000 },
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "kcua-test-build-"));
     const binary = join(dir, "coordinator");
@@ -42,10 +42,16 @@ test(
         ["--malformed-lease", /malformed lease is reported and kept without stopping the Helper/],
         ["--lease-pid-reuse", /a lease whose recorded owner exited is reclaimed despite PID reuse/],
         ["--read-only-peer-death", /dead host ledger reclaimed for read-only and write sessions/],
+        // 起五台 Helper 进程并多次用 ps 核对进程身份，比其它模式慢。
+        [
+          "--lease-rival",
+          /cross-process lease: a live rival is refused, a dead owner is reclaimed, a simultaneous start has one winner/,
+          15000,
+        ],
       ];
       const leaseResults = await Promise.allSettled(
-        leaseModes.map(async ([mode, expected]) =>
-          assert.match((await exec(binary, [mode], { timeout: 3000 })).stdout, expected),
+        leaseModes.map(async ([mode, expected, timeout = 3000]) =>
+          assert.match((await exec(binary, [mode], { timeout })).stdout, expected),
         ),
       );
       assert.ok(

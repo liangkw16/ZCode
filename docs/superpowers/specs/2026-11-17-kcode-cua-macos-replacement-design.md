@@ -134,6 +134,8 @@ Main 仍只处理原生窗口、调度与转发；不新增 task/session 业务�
 
 controller lease 保留现有私有 runtime 目录解析和 `controller-lease.json` 的互斥边界，迁移时兼容旧 owner 的身份判定。目录 0700、文件 0600，拒绝 symlink 和错误 owner。以 PID 加进程启动身份、helper 路径等判定 owner；无 TTL 自动失效。旧 ZCode 或其他活 owner 占用时返回 busy，不擅自终止。替换安装只停止经过身份校验的旧 KCode Helper。
 
+lease 只在派发前获取，所以获取失败的写操作一定没有发出任何输入：这类拒绝一律是 `controller_busy`，回执固定带 `action_sent=false`、`dispatch_status=not_sent`，占用方仍活着时附上它的 lease 记录（PID、进程启动身份、socket、版本）。字段由 lease 获取这一处统一补上，不依赖各条拒绝分支各自携带；读不到或无法确认归属的 lease 原样保留，只拒绝、不删除。工程层用两个真实进程争同一份 lease 覆盖：活着的对手被拒、对手退出后才能取得、持有者被强杀后可回收、两台同时起步只有一个赢家。
+
 只读观察可以受限并发；mutation 包含输入、焦点变更、激活屏蔽与有桌面副作用的控制操作，必须跨 socket 串行。取消、健康查询和清理使用独立控制队列，不排在待取消的长操作后。AX 单次调用配置有界 messaging timeout；不得在主线程执行可能阻塞的 AX 调用。
 
 ## 6. 协议、身份与恢复栅栏

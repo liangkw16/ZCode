@@ -31,7 +31,9 @@ import { DatabaseSync } from "node:sqlite";
  * 一律上抛由 UI 保守判不弹——读不了 ≠ 没有。
  */
 
-const DEFAULT_SESSION_DB_PATH = "~/.zcode/cli/db/db.sqlite";
+// 修复原因：默认会话库路径原先写死 "~/.zcode"，kcode 构建下新手引导会读到 ZCode 的会话库，
+// 把老用户判成已有使用记录（同文件下方的用户配置路径早已按 segment 解析）。
+const DEFAULT_SESSION_DB_PATH = `~/${ZCODE_DATA_DIR_SEGMENT}/cli/db/db.sqlite`;
 
 /** 目录非空。仅 ENOENT 视为"无证据"；其他异常上抛，由 UI 侧保守判不弹。 */
 async function hasDirEntry(dir: string): Promise<boolean> {

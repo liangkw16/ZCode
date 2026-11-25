@@ -399,7 +399,7 @@ interface ManagedWorktreeCreation {
 ### 6.3 目录布局与受管判定
 
 ```text
-<受管根目录>/                    = <数据根目录>/.zcode/worktrees
+<受管根目录>/                    = <数据根目录>/<segment>/worktrees（segment 为产品数据目录段：ZCode 是 .zcode，KCode 是 .kcode）
   .metadata_never_index         仅 macOS：阻止 Spotlight 索引
   <bucket>/                     4 位小写十六进制，用非递归 mkdir 原子占用；冲突时重新随机
     <仓库名>/                    linked worktree，`.git` 是一个文件

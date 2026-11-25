@@ -355,10 +355,10 @@ MR !2636 合入后 bug scanner 报出两项，均成立，本轮修正：
 | 新增变量 | `ZCODE_KCODE_IDENTITY=1`（与 Preview 开关同套严格 `1`/`0` 语义，其它拼写构建期失败） | 构建期开关，只控制身份；优先级高于 `ZCODE_PREVIEW_IDENTITY` |
 | 身份 | flavor `kcode`：appId `dev.zcode.app.kcode`、productName `KCode`、Linux `kcode`、Helper variant `kcode` | 与 Preview 同构的隔离档；electron-builder / tsup / vite 全部经 `resolveDesktopProductIdentity` 自动消费 |
 | Electron 运行数据 | `runtimeApplicationName = "KCode"` → 独立 `userData` 与单实例锁 | 与正式版/Preview 可同时运行 |
-| 业务数据 | 继续共享 `${ZCODE_HOME:-$HOME/.zcode}` | 凭据共享 = 免登录；根配置 schema 为 passthrough，正式版读到新配置键（如 `compact`）不会报错；并发/互写风险与 Preview 同等，accepted |
+| 业务数据 | ~~继续共享 `${ZCODE_HOME:-$HOME/.zcode}`~~ 已被 ZKCODE-007 取代：全局数据落 `~/.kcode` 镜像根 | 最初的并排安装方案共享业务数据（凭据共享 = 免登录）；随后按 `kcode-full-isolation` 设计改为完全独立，见下文「数据层镜像隔离」一节与 `docs/superpowers/specs/2026-10-20-kcode-full-isolation-design.md` |
 | 更新 | 非 production flavor → updater / 强更 / 更新入口全关（既有门控） | 自用包由重新构建替换，不走 stable feed |
-| 业务语义 | Dynamic Workflow 等灰度跟随 production 分支（不借用 Preview 的强制 `alwaysOn`） | KCode 只隔离身份，不改变功能行为 |
-| Deep link | 继续共用 `zcode://`（与 Preview 相同的 accepted limitation） | 凭据共享后无需在 KCode 内重新走 OAuth |
+| 业务语义 | Dynamic Workflow 等灰度跟随 production 分支（不借用 Preview 的强制 `alwaysOn`） | KCode 只隔离身份与数据根，不改变功能行为 |
+| Deep link | 继续共用 `zcode://`（与 Preview 相同的 accepted limitation） | 凭据不再共享；登录发起时由 kcode 重新接管 handler（`ensureDeepLinkHandlerForLogin`），见 ZKCODE-007 |
 | CI / 发布 | 不新增 CI 入口；本地 `ZCODE_ENV=production ZCODE_KCODE_IDENTITY=1` 构建 | 自用不分发，tag/release 流水线不识别该开关即可 |
 
 ### 改动位置
@@ -384,7 +384,7 @@ MR !2636 合入后 bug scanner 报出两项，均成立，本轮修正：
 ### 本机构建要点（ZKCODE-006 实测记录）
 
 - 依赖收集器：仓库根同时存在 `pnpm-lock.yaml` 与 `package-lock.json`，electron-builder 锁文件探测歧义后回落环境探测。直接 `node cli.js` 调用会被识别为 npm collector，在 pnpm hoisted 布局下解析不到依赖树（node-pty 等进不了 asar，afterPack 重打包断言失败）。本地打包必须带 `npm_config_user_agent=pnpm/<version>`（或经 `pnpm exec` 调用）走 pnpm collector。
-- 版本号：electron-builder 在应用 `extraMetadata.version` 前校验 `packages/desktop/package.json` 的 `version`，缺失直接失败；本分支已补 `3.16.1`（与根版本一致）。
+- 版本号：electron-builder 在应用 `extraMetadata.version` 前校验 `packages/desktop/package.json` 的 `version`，缺失直接失败；本分支补了该字段。它只是通过校验的占位值（写入时根版本是 `3.16.1`），产物版本以 `extraMetadata.version`（取自根 `package.json`）为准，不需要随根版本手工同步——KCode-3.18.2 的产物即来自这条路径。
 - DMG：`electronDownload.mirror` 默认 npmmirror，其 CDN 缺少 `dmgbuild-bundle-arm64` 二进制（404），本地构建用 `--mac zip` 产出 zip 后解压安装，效果等同。
 
 ## 追记 2026-10-20（二）：KCode 数据层镜像隔离（完全独立）

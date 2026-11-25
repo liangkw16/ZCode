@@ -7,6 +7,7 @@ import type {
   DataSyncImportResultItem,
   DataSyncListItem,
 } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import { CommandFileParser } from "#src/commands/commandFileParser.js";
 import {
   readCommandEnabledOverridesFromUserConfig,
@@ -34,8 +35,14 @@ interface ResolvedUserCommand {
   content: Buffer;
 }
 
+// 修复原因：用户级命令根与 CLI 配置目录硬编码 ".zcode"，kcode 构建下远端同步会读写 ZCode 的
+// 数据而不是自己的（kcode-full-isolation 设计 §2）。".agents" 是跨产品兼容目录，保持不变。
 function commandsRoot(source: CommandRootSource): string {
-  return join(resolveUserHomeDir(), source === "zcode" ? ".zcode" : ".agents", "commands");
+  return join(
+    resolveUserHomeDir(),
+    source === "zcode" ? ZCODE_DATA_DIR_SEGMENT : ".agents",
+    "commands",
+  );
 }
 
 function hashContent(content: Uint8Array): string {
@@ -229,7 +236,7 @@ export function createCommandDataSyncMethods(): IDataSyncCategoryService<Command
     async checkSyncWriteAccess() {
       return await checkRemoteSyncDirectoriesWriteAccess([
         commandsRoot("zcode"),
-        join(resolveUserHomeDir(), ".zcode", "cli"),
+        join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli"),
       ]);
     },
 

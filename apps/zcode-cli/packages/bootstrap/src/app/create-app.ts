@@ -52,6 +52,9 @@ import {
   type ExecutionShellSelection,
   type MessageId,
 } from "@zcode/contracts";
+// 修复原因：会话 mailbox 的默认根硬编码 "~/.zcode"，kcode 构建下消息会写进 ZCode 的目录，
+// 违反 kcode-full-isolation 设计 §2。走窄入口，不拉 contracts 桶文件。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import { isRemoteWorkspaceIdentity, resolveZCodeRuntimeEnv } from "@zcode/shared";
 import {
   ZCODE_ATTACHMENT_FAULT_CODES,
@@ -542,7 +545,8 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       (messageEnabled
         ? createNodeSessionMailboxAdapter({
             rootDir: resolvePath(
-              (options.env ?? process.env).ZCODE_MAILBOX_ROOT ?? "~/.zcode/mailbox",
+              (options.env ?? process.env).ZCODE_MAILBOX_ROOT ??
+                `~/${ZCODE_DATA_DIR_SEGMENT}/mailbox`,
             ),
           })
         : undefined);

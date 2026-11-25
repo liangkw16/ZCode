@@ -7,6 +7,7 @@ import { useSettingsSync } from "@/hooks/useSettingsSync.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { getPathLeaf } from "@/lib/path.js";
 import { logger } from "@/logger.js";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import {
   getOnboardingStepMessageKey,
   OnboardingWizardSidebar,
@@ -312,7 +313,9 @@ export function OnboardingDialog(props: {
           { id: "onboarding.agentsFile.confirmDescription" },
           {
             source: agentsFileMigration.status?.sourcePath ?? "~/.claude/CLAUDE.md",
-            target: agentsFileMigration.status?.targetPath ?? "~/.zcode/AGENTS.md",
+            // 回退提示随产品 segment；实际落点以服务的 targetPath 为准。
+            target:
+              agentsFileMigration.status?.targetPath ?? `~/${ZCODE_DATA_DIR_SEGMENT}/AGENTS.md`,
           },
         ),
         confirmLabel: intl.formatMessage({ id: "onboarding.agentsFile.confirmAction" }),

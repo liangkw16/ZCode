@@ -33,6 +33,7 @@ import {
   RUNTIME_ZCODE_DEBUG,
   serializeLaunchMarks,
   ZCODE_DESKTOP_CONTEXT_PROMPT_ENABLED_ENV,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 import type {
   PluginSandboxHandle,
@@ -357,9 +358,11 @@ export function spawnHostProcess(
       // 修复原因（ZCT-2120723935487688704）：切换数据存储路径只复制凭据文件，新根缺少系统条目，
       // 重启后掉登录且无法重新登录。Host 只提供数据根；凭据路径由 Main 按 copyDataDirectory 的
       // 目标布局推导，密钥不离开 Main，也不开放对目标目录的加解密。
+      // 修复原因：copyDataDirectory 已按 segment（.zcode | .kcode）落盘，这里仍写死 ".zcode"，
+      // kcode 构建下切换数据目录后凭据文件与密钥条目分属两个目录，重启即掉登录。
       const share = isAbsolute(targetBaseDir)
         ? credentialCipher.shareKeyWithCopiedCredentials(
-            join(targetBaseDir, ".zcode", "v2", "credentials.json"),
+            join(targetBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2", "credentials.json"),
           )
         : Promise.reject(new Error("Data root must be absolute"));
       void share

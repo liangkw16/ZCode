@@ -5,6 +5,9 @@ import { Session } from "node:inspector";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { getHeapStatistics } from "node:v8";
+// 修复原因：诊断落盘目录硬编码 ".zcode"，kcode 构建下写进 ZCode 的目录，导出日志与反馈包
+// 却按 segment 读 ~/.kcode，读不到自己的诊断。走窄入口，不拉 contracts 桶文件。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import { CLI_MEMORY_DIAGNOSTIC_DIRECTORY, ZCODE_COMMIT, ZCODE_VERSION } from "@zcode/shared";
 import {
   createMemoryDiagnosticRecorder,
@@ -93,7 +96,8 @@ export function startCliMemoryDiagnostics(
     }),
     write: (record) =>
       writeMemoryDiagnostic(
-        options.directory ?? join(homedir(), ".zcode", "cli", CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
+        options.directory ??
+          join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
         record,
       ),
   });

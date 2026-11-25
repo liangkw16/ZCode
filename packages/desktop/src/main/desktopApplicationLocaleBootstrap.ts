@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isLocale, resolvePersistedUiLocale } from "@zcode/shared";
+import { isLocale, resolvePersistedUiLocale, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { Locale } from "@zcode/shared";
 
 /**
@@ -19,7 +19,9 @@ function resolveBootstrapHomeDir(): string {
 export function resolveApplicationLocaleBootstrapSettingsFile(
   homePath: string = resolveBootstrapHomeDir(),
 ): string {
-  return join(homePath, ".zcode", "v2", "setting.json");
+  // 修复原因：同目录的数据根与凭据 bootstrap 已按 segment 解析，这里漏改会让 kcode 启动时
+  // 读 ZCode 的 setting.json 来决定界面语言（kcode-full-isolation 设计 §2）。
+  return join(homePath, ZCODE_DATA_DIR_SEGMENT, "v2", "setting.json");
 }
 
 export function extractBootstrapApplicationLocale(rawValue: unknown): Locale | undefined {

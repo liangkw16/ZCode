@@ -3,6 +3,9 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+// 修复原因：调试服务默认读 "~/.zcode" 的日志和会话库，kcode 构建下会读到 ZCode 的数据而不是
+// 自己的。按 kcode-full-isolation 设计 §2 走 segment；本包只依赖 @zcode/shared。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type {
   DbMessageRecord,
   DbObservation,
@@ -16,11 +19,11 @@ import type {
 } from "./types.js";
 
 export function defaultLogDir(): string {
-  return join(homedir(), ".zcode", "cli", "log");
+  return join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", "log");
 }
 
 export function defaultDbPath(): string {
-  return join(homedir(), ".zcode", "cli", "db", "db.sqlite");
+  return join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", "db", "db.sqlite");
 }
 
 export async function loadLogs(options: ObservationOptions): Promise<SourceLoadResult<LogRecord>> {

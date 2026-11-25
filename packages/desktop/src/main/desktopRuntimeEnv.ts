@@ -588,7 +588,9 @@ export function buildHostProcessEnv(hostProcessLocalEnv: Record<string, string>)
     ZCODE_ENV,
     // Preview 与生产版共享任务、配置和凭据，但不同版本的 Helper 不能互相覆盖或触发降级保护。
     // 只隔离 computer-use 下的运行组件，不改写 ZCODE_HOME / ZCODE_DATA_BASE_DIR 业务数据根。
-    // KCode 同理：与正式版/Preview 共享业务数据，仅用独立 variant 隔离 Helper 安装目录。
+    // KCode 的业务数据根已按 segment（~/.kcode）独立，见 kcode-full-isolation 设计；这里同样
+    // 给 Helper 单独的安装 variant，避免与同机 ZCode / Preview 的 Helper 安装目录互相覆盖。
+    // （勘误：此前的注释写成“与正式版/Preview 共享业务数据”，与隔离设计相反。）
     ...(isPreviewPackagedRuntime ? { ZCODE_CUA_HELPER_INSTALL_VARIANT: "preview" } : {}),
     ...(isKcodePackagedRuntime ? { ZCODE_CUA_HELPER_INSTALL_VARIANT: "kcode" } : {}),
     // Dynamic Workflow 灰度的本地覆盖：Main 决策后写入，production 包为空对象（继承值已在上面删除）。

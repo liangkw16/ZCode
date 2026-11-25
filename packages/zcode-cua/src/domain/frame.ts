@@ -39,9 +39,22 @@ export function parseOfficialCuaImageRef(
 export function isOfficialCuaImageRefText(text: string) {
   return !!parseOfficialCuaImageRef({ type: "text", text });
 }
+// 帧凭据的结构特征：完整的 image_ref JSON、给 frame_id 赋一个规范形态的帧 id 字面量、或内嵌的
+// <image_ref 标记。只认带具体帧 id 的字面量：构造凭据的源码（frame_id: binding.frameId）不是凭据。
+// 修复原因：这里原先按裸词 image_ref / frame_id 命中。该函数被用在所有工具结果的投影上，于是 Grep、
+// Read 等普通工具只要返回提到这两个词的代码或文档（例如本仓自己的源码），整条结果就会被判成
+// “携带帧凭据而栅格不可投递”并替换成报错。只认凭据结构后，说明文字里夹带凭据仍会被拦住。
+const EMBEDDED_FRAME_CREDENTIAL =
+  /["'`]?frame_id["'`]?\s*[:=]\s*["'`]frame-[A-Za-z0-9_-]{1,180}["'`]?|<image_ref\b/;
 export function containsOfficialCuaImageRefCredentialText(text: string) {
   // 字符预算耗尽时拒绝把内容降级为普通文本，避免截断绕过 authority 检查。
-  return text.length > 263168 || /image_ref|frame_id/.test(text);
+  return (
+    text.length > 263168 ||
+    // parseOfficialCuaImageRef 对“含 image_ref 但不是合法 JSON”的文本也返回 null，这里只认合法的完整凭据；
+    // 残缺的凭据由下面的结构特征兜住。
+    isOfficialCuaImageRefText(text) ||
+    EMBEDDED_FRAME_CREDENTIAL.test(text)
+  );
 }
 export function containsImageRefAuthority(value: unknown): boolean {
   const seen = new Set<object>();

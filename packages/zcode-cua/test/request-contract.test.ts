@@ -1,6 +1,41 @@
 import { expect, it } from "vitest";
 import { validateRequest } from "../src/domain/request.js";
-import { truncateUtf16 } from "../src/domain/frame.js";
+import {
+  containsOfficialCuaImageRefCredentialText,
+  truncateUtf16,
+} from "../src/domain/frame.js";
+
+it("frame credential detection matches credential structures, not bare words", () => {
+  // 普通工具结果（代码、文档）里提到这两个词不是凭据；原先按裸词命中会让整条结果被替换成报错。
+  for (const plain of [
+    "The frame_id column is optional.",
+    "See image_ref in the docs for the frame contract.",
+    'const frame_id: string = "column";',
+    "image_ref = readJson(result)",
+    "frame-${ports.id()}",
+    // 构造凭据的源码：帧 id 是变量，不是具体凭据。
+    "image_ref: { frame_id: binding.frameId, width: raster.width, height: raster.height }",
+    "image_ref: {\n            frame_id: frameId,",
+  ]) {
+    expect(containsOfficialCuaImageRefCredentialText(plain), plain).toBe(false);
+  }
+  const ref = JSON.stringify({
+    image_ref: { actionable: true, frame_id: "frame-abc123", height: 1, width: 1 },
+  });
+  for (const credential of [
+    ref,
+    `Result: ${ref}`,
+    'image_ref: {"frame_id":"frame-abc123","width":1,"height":1,"actionable":true}',
+    'frame_id = "frame-abc123"',
+    "<image_ref frame_id=\"frame-abc123\">",
+    '{"image_ref":{"frame_id":"frame-exact_001"', // 残缺的凭据同样拦截
+  ]) {
+    expect(containsOfficialCuaImageRefCredentialText(credential), credential).toBe(true);
+  }
+  // 超长文本仍然 fail-closed。
+  expect(containsOfficialCuaImageRefCredentialText("a".repeat(263_169))).toBe(true);
+  expect(containsOfficialCuaImageRefCredentialText("a".repeat(263_168))).toBe(false);
+});
 
 // 给模型看的工具文档（apps/zcode-cli/packages/zcode-cua-plugin/docs/computer-use.md）是请求契约；
 // 校验器原先比它窄，SDK 透传的字符串和弦、"a11y"、repeat 等在派发前就被拒绝。

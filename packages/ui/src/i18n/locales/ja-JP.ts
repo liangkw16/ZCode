@@ -8615,6 +8615,8 @@ const jaJP: Record<string, string> = {
   "cuaPermission.status.unavailable": "コンピューター操作の権限を確認できません",
   "cuaPermission.status.retry": "再確認",
   "cuaPermission.status.verifying": "許可済み、確認中",
+  "cuaPermission.status.locked":
+    "画面がロックされています。ロックを解除するとコンピュータ操作を再開できます",
   "cuaPermission.probeVerifyingHint":
     "システムの権限はあります。実際の操作と画面キャプチャを確認しています。",
   "cuaPermission.tools.preparing":

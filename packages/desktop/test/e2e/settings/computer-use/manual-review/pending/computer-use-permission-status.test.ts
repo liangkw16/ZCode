@@ -111,6 +111,8 @@ describe("电脑控制权限状态（候选）", () => {
     });
     expect((await page.getText()).match(/已授权/g)?.length).toBe(2);
     expect(await browser.execute(() => (window as any).__cuaPermissionProbeRequested)).toBe(false);
+    // 授权可用时没有任何锁屏说明。
+    expect(await page.getText()).not.toContain("已锁屏，解锁后可继续");
   });
 
   it("新 unknown/denied 事实覆盖旧 granted，锁屏不伪造未授权且不主动抓屏", async function () {
@@ -129,6 +131,9 @@ describe("电脑控制权限状态（候选）", () => {
         { timeout: 20_000 },
       );
       expect(await page.getText()).not.toContain("已授权，正在验证");
+      // 规范 §8.1：锁屏保留授权事实，另起一句说明解锁后才能继续；未授权或未知时不出现这句，
+      // 免得把 TCC 问题说成锁屏问题。
+      expect((await page.getText()).includes("已锁屏，解锁后可继续")).toBe(mode === "locked");
     }
     expect(await browser.execute(() => (window as any).__cuaPermissionProbeRequested)).toBe(false);
   });

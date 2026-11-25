@@ -8374,6 +8374,7 @@ const zhCN: Record<string, string> = {
   "cuaPermission.status.unavailable": "无法检查电脑控制权限",
   "cuaPermission.status.retry": "重新检查",
   "cuaPermission.status.verifying": "已授权，正在验证",
+  "cuaPermission.status.locked": "已锁屏，解锁后可继续使用电脑控制",
   "cuaPermission.probeVerifyingHint": "系统授权已存在，正在验证实际控制与截图能力。",
   "cuaPermission.tools.preparing":
     "系统权限与本机控制能力已就绪，正在等待当前会话加载电脑控制工具。",

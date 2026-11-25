@@ -8571,6 +8571,8 @@ const ruRU: Record<string, string> = {
   "cuaPermission.status.unavailable": "Не удалось проверить разрешения управления компьютером",
   "cuaPermission.status.retry": "Проверить снова",
   "cuaPermission.status.verifying": "Выдано, проверка",
+  "cuaPermission.status.locked":
+    "Экран заблокирован. Управление компьютером продолжится после разблокировки",
   "cuaPermission.probeVerifyingHint":
     "Системное разрешение есть. Проверяем реальное управление и захват экрана.",
   "cuaPermission.tools.preparing":

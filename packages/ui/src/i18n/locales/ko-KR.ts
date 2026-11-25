@@ -8415,6 +8415,8 @@ const koKR: Record<string, string> = {
   "cuaPermission.status.unavailable": "컴퓨터 제어 권한을 확인할 수 없습니다",
   "cuaPermission.status.retry": "다시 확인",
   "cuaPermission.status.verifying": "허용됨, 확인 중",
+  "cuaPermission.status.locked":
+    "화면이 잠겨 있습니다. 잠금을 해제하면 컴퓨터 제어를 계속할 수 있습니다",
   "cuaPermission.probeVerifyingHint":
     "시스템 권한이 있습니다. 실제 제어 및 화면 캡처를 확인하는 중입니다.",
   "cuaPermission.tools.preparing":

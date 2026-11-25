@@ -300,6 +300,8 @@ M04/M10 必须加入双 Host 场景：A 的正常取消不影响 B；A 的不可
 | grant 存在、AX 功能证明失效 | stale 或明确功能失败     | 显示需重新验证/修复，不把锁屏、无窗口或目标应用无 AX 归为 stale            |
 | 无 Helper 或握手中          | 无当前权限结论           | 启动中/未运行，不能永久显示“已授权，正在验证”                              |
 
+设置页在两项权限都已授权且 `desktopAvailability=locked` 时，在两行权限下单独显示“已锁屏，解锁后可继续”；未授权或锁屏状态未知时不显示，避免把 TCC 问题说成锁屏问题。
+
 Helper 显示名固定 `KCode Computer Use.app`，bundle ID 继续 `dev.zcode.cua-helper.kcode`，主应用 `dev.zcode.app.kcode`。CFBundleExecutable 改为源码构建的 KCode 可执行文件。查询返回真实 bundle/path/signing subject；不能显示旧 ZCode 的授权。保持身份可减少不必要的迁移，但不承诺 OS 一定沿用旧授权；需要系统重新授权时如实引导。
 
 ### 8.2 锁屏与解锁
@@ -385,7 +387,6 @@ sequenceDiagram
 
 实测边界（macOS 27.2）：投递给 AppKit 应用的 ⌘V 只有在该应用处于前台时才会被当作菜单快捷键处理；应用不在前台时按键送达窗口、剪贴板也被读取，输入框不变，合成 target focus 改变不了这一点。Chromium 应用在前台可以落地。因此后台键盘输入（M08）尚未成立，回执不再把它报告成成功。
 
-
 验收中的人工协助边界：M07 可在单独标记的前台限定正向用例中由用户预先切换前台，并单独验证未满足条件时的 `foreground_required`；不能把这算成后台输入通过。M08 的后台窗口隔离用例必须在另一个应用仍处前台时真正完成点击、输入和滚动。M09 从任务开始到提交不允许人工点击、输入或前台化来补足能力，只允许测试约定的取消/继续和人工锁屏/解锁；系统授权与账户登录应在任务计时前完成。后台能力缺失导致 M08/M09 失败就修实现，不能追加人工步骤绕过。
 
 ### 9.4 PiP 与 ghost cursor
@@ -395,7 +396,6 @@ sequenceDiagram
 macOS 上启动 Helper 的每条路径都带 `--pip-mode`，包括设置页只读探测拉起的常驻 Helper：它是进程级能力开关，之后的真实操作会复用同一进程，漏传则 PiP 握手返回 `version_mismatch`。握手不匹配的传输只禁用到当前回合结束，下一个 `turn-started` 重新握手一次；同一 socket 背后的 Helper 进程会在 Host 存活期间被替换。
 
 Helper 由回合内的首个 CUA 调用懒启动，而 `turn-started` 与带会话 id 的 `focus-changed` 都早于它。这两条没能送达的事件在回合内保持待补发，直到同一回合的 `turn-ended` / `session-closed`、新的 `turn-started` 或服务销毁；不设固定过期时间。凭据可用后先补 `turn-started`、再补最近一条 `focus-changed`，Helper 才同时有开着的回合和活动会话来承接随后的截图。
-
 
 ## 10. 构建、签名、安装与切换
 

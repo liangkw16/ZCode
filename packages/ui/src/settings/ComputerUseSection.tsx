@@ -619,6 +619,13 @@ export function ComputerUseSection({
   // 两项权限的状态视图（圆点 tone + 文案），与圆点同源，避免文案/颜色不同步。
   const acc = statusView(availableStatus?.accessibility);
   const screenPerm = statusView(availableStatus?.screenRecording);
+  // 规范 §8.1：锁屏不改变授权事实，但此时截图、观察和输入都会被拒绝。两项都已授权而桌面锁着时
+  // 单独说明一句，否则两行「已授权」会让用户以为可以马上操作；未授权或状态未知时不显示，
+  // 免得把 TCC 问题说成锁屏问题。
+  const desktopLocked =
+    availableStatus?.desktopAvailability === "locked" &&
+    availableStatus.accessibility === "granted" &&
+    availableStatus.screenRecording === "granted";
 
   // 输入框常驻入口的显隐。隐藏开关用 useSettings().update 写入
   // （直连 settingService 只落盘不刷新共享 snapshot，输入框按钮读不到新值）。
@@ -840,6 +847,19 @@ export function ComputerUseSection({
                       )
                 }
               />
+              {desktopLocked ? (
+                <SettingsRow
+                  label={
+                    <span className="inline-flex items-center gap-1.5 font-normal text-foreground-subtle">
+                      <StatusDot tone="amber" />
+                      <span role="status">
+                        {intl.formatMessage({ id: "cuaPermission.status.locked" })}
+                      </span>
+                    </span>
+                  }
+                  control={null}
+                />
+              ) : null}
             </SettingsGroupCard>
           ) : null}
         </>

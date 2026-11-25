@@ -8835,6 +8835,7 @@ const enUS: Record<string, string> = {
   "cuaPermission.status.unavailable": "Unable to check Computer Use permissions",
   "cuaPermission.status.retry": "Check again",
   "cuaPermission.status.verifying": "Granted, verifying",
+  "cuaPermission.status.locked": "Screen locked. Computer Use resumes after you unlock",
   "cuaPermission.probeVerifyingHint":
     "System permission is present. Verifying real control and screen capture now.",
   "cuaPermission.tools.preparing":

@@ -124,9 +124,7 @@ export async function appendEvent(
     phase = "session_event.record_usage";
     await recordToolUsageFromEvent(this, storedEvent, traceContext);
     phase = "session_event.notify_sinks";
-    options.sinkFailures?.push(
-      ...(await deliverSessionEventToSinks.call(this, storedEvent, traceContext)),
-    );
+    await publishSessionEventToSinks.call(this, storedEvent, traceContext, options);
     if (shouldLogLifecycle) {
       this.logger?.info("Session event persistence completed", {
         ...traceContextToLogContext(traceContext),
@@ -175,9 +173,25 @@ export async function resumeStoredSessionEventPublication(
 ): Promise<void> {
   await persistDurableSessionEvent.call(runtime, event, traceContext);
   await recordToolUsageFromEvent(runtime, event, traceContext);
-  options.sinkFailures?.push(
-    ...(await deliverSessionEventToSinks.call(runtime, event, traceContext)),
-  );
+  await publishSessionEventToSinks.call(runtime, event, traceContext, options);
+}
+
+// 修复原因：为收集失败的 sink 改写发布路径时出过两个问题。一是写成
+// `options.sinkFailures?.push(...(await deliverSessionEventToSinks(...)))`，可选链在收集参数缺席时连参数
+// 求值一起短路——普通路径只落库、不通知任何 sink，依赖 sink 取事件的 v4 网关收不到会话事件，
+// 对话帧不再产出，而模型照常运行。二是绕开运行时的 notifyEventSinks 直接投递，丢掉了这一层间接调用。
+// 现在不收集时与以往完全一致地走 notifyEventSinks；只有调用方要收集失败项时才逐个投递并返回结果。
+async function publishSessionEventToSinks(
+  this: AgentRuntimeInternal,
+  event: SessionEvent,
+  traceContext: TraceContext,
+  options: AppendSessionEventOptions,
+): Promise<void> {
+  if (!options.sinkFailures) {
+    await this.notifyEventSinks(event, traceContext);
+    return;
+  }
+  options.sinkFailures.push(...(await deliverSessionEventToSinks.call(this, event, traceContext)));
 }
 
 function recordSessionEventAppendAggregate(

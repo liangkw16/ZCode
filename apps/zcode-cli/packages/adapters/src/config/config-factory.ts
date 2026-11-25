@@ -83,6 +83,11 @@ export interface ConfigResult {
       hasMcpServers: boolean;
       hasUiLocale: boolean;
       hasUiTheme: boolean;
+      /**
+       * 用户配置文件是否显式写了 logging.level；合并后的 config 里系统默认值也算有值。
+       * 项目配置只开放扩展声明，写不了这一键，不需要同名标记。
+       */
+      hasLoggingLevel: boolean;
       mcpServerNames: string[];
     };
     project: {
@@ -353,6 +358,7 @@ function assembleConfig(options: ConfigFactoryOptions, sources: LoadedConfigSour
         hasMcpServers: userConfigResult.config.mcp?.servers !== undefined,
         hasUiLocale: userConfigResult.config.ui?.locale !== undefined,
         hasUiTheme: userConfigResult.config.ui?.theme !== undefined,
+        hasLoggingLevel: userConfigResult.config.logging?.level !== undefined,
         mcpServerNames: Object.keys(userConfigResult.config.mcp?.servers ?? {}),
       },
       project: {

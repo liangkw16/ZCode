@@ -73,6 +73,7 @@ import type {
 import {
   createConfigCliOverrides,
   isMessageEnabled,
+  resolveConfiguredLoggingLevel,
   resolveEffectiveLocale,
   resolveEffectiveConfigResult,
 } from "./app-config-options.js";
@@ -216,14 +217,15 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     }),
     options,
   );
-  // logging.level 在此接线：configResult 先于 logger 创建，显式配置的落盘级别
-  // （如 debug）优先于环境默认，否则该配置键没有消费方。
+  // logging.level 在此接线：configResult 先于 logger 创建，配置文件显式声明的落盘级别
+  // （如 debug）优先于环境默认，否则该配置键没有消费方。合并后的值总带着系统默认的 "info"，
+  // 只有配置文件真正写了这一键才算显式配置，开发态才不会丢掉默认的 Debug。
   const loggerFactory =
     options.loggerFactory ??
     createNodeLoggerFactory({
       env: options.env,
       minLevel: resolveFileLoggerMinLevel({
-        configLevel: configResult.config.logging?.level,
+        configLevel: resolveConfiguredLoggingLevel(configResult),
         env: options.env,
       }),
     });

@@ -125,13 +125,32 @@ function pluginUiContextImageFiles(context: PluginUiModelContext): File[] {
 // v3.18 的通用 useContextImageAttachments 仍用组件级 useRef 映射且 "current" 策略卸载不清理，
 // 重挂载后同一上下文的图片会被再次 addAttachmentFiles（重复上传/发送/占用附件名额）。插件路径
 // 维持我们的模块级映射（与上下文 store 同生命周期）；网页元素 chip 走上游通用 hook（卸载撤、重挂补）。
-const materialized = new Map<string, { context: PluginUiModelContext; ids: string[] }>();
+//
+// 修复原因：这张映射原先按上下文 id 全局共享。分屏下 A 为一条上下文附加了图片，B 同步空列表时
+// 会把这条映射清掉，而 B 的 removeAttachment 只作用于 B 的附件作用域；之后 A 再移除该上下文时
+// 已找不到要撤的附件 id，图片留在 A 的附件里随下一条消息发出。现在按 composer 的附件作用域
+// （workspace + 会话，与附件 store 同一个 key）各存一张表，每个 composer 只同步和清理自己的条目。
+interface MaterializedPluginContext {
+  context: PluginUiModelContext;
+  ids: string[];
+}
+const materializedByScope = new Map<string, Map<string, MaterializedPluginContext>>();
+
+export interface PluginContextImagePort extends ContextImageAttachmentsPort {
+  /** composer 的附件作用域 key（workspace + 会话）。 */
+  scopeKey: string;
+}
 
 /** 上下文 → 附件的同步核心；独立导出以便单测模拟"重挂载后再次同步"（映射在模块级存续）。 */
 export function syncPluginUiContextImages(
   contexts: readonly PluginUiModelContext[],
-  port: ContextImageAttachmentsPort,
+  port: PluginContextImagePort,
 ): void {
+  let materialized = materializedByScope.get(port.scopeKey);
+  if (!materialized) {
+    materialized = new Map();
+    materializedByScope.set(port.scopeKey, materialized);
+  }
   const seen = new Set<string>();
   for (const context of contexts) {
     seen.add(context.id);
@@ -157,13 +176,13 @@ export function syncPluginUiContextImages(
 
 /** 仅测试复位：模块级映射在用例间需要隔离（沿用仓库 *ForTest 导出惯例）。 */
 export function resetPluginUiContextImagesForTest(): void {
-  materialized.clear();
+  materializedByScope.clear();
 }
 
 /** 插件上下文里的 image 块 → 本条上下文名下的图片附件，随下一回合发送。 */
 export function usePluginUiContextImages(
   contexts: readonly PluginUiModelContext[],
-  port: ContextImageAttachmentsPort,
+  port: PluginContextImagePort,
 ): void {
   const portRef = useRef(port);
   portRef.current = port;

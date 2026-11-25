@@ -27,8 +27,7 @@ import { dispatchExtensionNotification, dispatchTaskNotification } from "./deskt
 import {
   clearOAuthRoutesForWindow,
   deliverPendingDeepLink,
-  parseOAuthStateRegistration,
-  registerOAuthState,
+  registerOAuthStateFromRenderer,
 } from "./desktopOAuthDeepLink.js";
 import {
   dispatchFinalArmsCustomEvent,
@@ -335,13 +334,9 @@ export function registerRemoteIpcHandlers(options: {
   });
 
   ipcMain.on(PlatformChannels.OAuthRegisterState, (event, payload: unknown) => {
-    const registration = parseOAuthStateRegistration(payload);
-    if (!registration) {
-      options.logger.warn("[oauth-register-state] invalid payload", payload);
-      return;
-    }
-
-    registerOAuthState(event.sender.id, registration);
+    // 真实登录入口：renderer 登记 state 后打开浏览器。kcode 打包态在登记前重新接管 zcode://。
+    if (registerOAuthStateFromRenderer(event.sender.id, payload, options.logger)) return;
+    options.logger.warn("[oauth-register-state] invalid payload", payload);
   });
 
   ipcMain.on(PlatformChannels.OpenExternal, (event, payload: unknown) => {

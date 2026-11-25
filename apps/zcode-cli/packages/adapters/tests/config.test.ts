@@ -826,6 +826,37 @@ describe("config adapters", () => {
     expect(config).toEqual({});
   });
 
+  it("accepts only positive integers for compact token environment overrides", () => {
+    expect(parseEnvConfig({ ZCODE_COMPACT_CONTEXT_WINDOW_TOKENS: "120000" })).toEqual({
+      compact: { contextWindowTokens: 120000 },
+    });
+    // 与文件 schema（positiveIntegerSchema）一致：小数、0、负数和非数字都跳过，
+    // 不能落成 0 去改变压缩行为。
+    for (const value of ["0.5", "0", "-1", "abc", ""]) {
+      expect(parseEnvConfig({ ZCODE_COMPACT_CONTEXT_WINDOW_TOKENS: value })).toEqual({});
+      expect(parseEnvConfig({ ZCODE_COMPACT_BUFFER_TOKENS: value })).toEqual({});
+      expect(parseEnvConfig({ ZCODE_COMPACT_KEEP_RECENT_TOKENS: value })).toEqual({});
+    }
+  });
+
+  it("reports whether the user config file declares logging.level", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zcode-log-level-source-"));
+    const path = join(dir, "config.json");
+    try {
+      await writeFile(path, JSON.stringify({}));
+      const plain = createConfig({ env: {}, userConfigPath: path });
+      // 合并后的值带着系统默认的 "info"；来源标记只认配置文件真正写出的键。
+      expect(plain.config.logging.level).toBe("info");
+      expect(plain.sources.user.hasLoggingLevel).toBe(false);
+      await writeFile(path, JSON.stringify({ logging: { level: "debug" } }));
+      expect(
+        createConfig({ env: {}, userConfigPath: path }).sources.user.hasLoggingLevel,
+      ).toBe(true);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
   it("loads yolo mode from file config", async () => {
     const dir = await mkdtemp(join(tmpdir(), "zcode-config-"));
     const path = join(dir, "config.json");

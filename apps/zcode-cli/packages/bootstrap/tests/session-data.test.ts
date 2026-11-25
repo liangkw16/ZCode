@@ -12,29 +12,34 @@ function harness(
     failFiles?: string[];
     referrers?: Record<string, string[]>;
     onRemoveSession?: (id: string) => void;
+    trees?: Record<string, string[]>;
   } = {},
 ) {
   const trees: Record<string, string[]> = {
     sess_a: ["sess_a", "sess_a_child"],
     sess_b: ["sess_b"],
     sess_c: ["sess_c"],
+    ...options.trees,
   };
   const sizes: Record<string, number> = { sess_a: 10, sess_a_child: 5, sess_b: 7, sess_gone: 3 };
   const calls: string[] = [];
   // 镜像真实 store 语义：行被 purgeSessions 删除后，其引用从后续查询中消失。
   const deletedRows = new Set<string>();
+  const counters = { referrerQueries: 0 };
   const host: SessionDataHost = {
     store: {
       listOwnedSessionTrees: async (ids) =>
         new Map(ids.map((id) => [id, trees[id] ?? []] as const)) as never,
-      listArtifactReferrers: async (ids) =>
-        new Map(
+      listArtifactReferrers: async (ids) => {
+        counters.referrerQueries += 1;
+        return new Map(
           ids.flatMap((id) =>
             options.referrers?.[id]
               ? [[id, options.referrers[id].filter((r) => !deletedRows.has(r))] as const]
               : [],
           ),
-        ) as never,
+        ) as never;
+      },
       purgeSessions: async (ids) => {
         calls.push(`purge:${ids.join(",")}`);
         for (const id of ids) deletedRows.add(id);
@@ -63,7 +68,7 @@ function harness(
       calls.push(`forget:${id}`);
     },
   };
-  return { host, calls };
+  return { host, calls, counters };
 }
 
 const directories = [{ workspacePath: "/work/a" }];
@@ -207,5 +212,37 @@ describe("session data", () => {
     const result = await purgeSessionDataWith(host, { sessionIds: ["sess_gone"], directories: [] });
     expect(result.deleted).toEqual([{ sessionId: "sess_gone", bytes: 3 }]);
     expect(calls).toEqual(["files:sess_gone", "purge:sess_gone", "forget:sess_gone"]);
+  });
+
+  it("deletes an idle tree whose child only references attachments inside the same tree", async () => {
+    // 回归：同树引用（子会话引用父会话附件）随树一起删除，不能被算作待删集合里的引用方；
+    // 否则这棵树被反复推迟，最后按“被引用”保留，重试也无法释放。
+    const { host } = harness({ referrers: { sess_a: ["sess_a_child"] } });
+    const result = await purgeSessionDataWith(host, { sessionIds: ["sess_a"], directories: [] });
+    expect(result).toEqual({
+      deleted: [{ sessionId: "sess_a", bytes: 15 }],
+      kept: [],
+      failed: [],
+      memory: [],
+    });
+  });
+
+  it("deletes a long reference chain from the referrer end with a single referrer scan", async () => {
+    // 回归：引用方先删。listArtifactReferrers 是对 part 表的全表 instr 扫描，按轮次重取快照会让
+    // 32 棵树的单向链扫描整库 32 次；引用关系只取一次，之后按本批的删除结果推进。
+    const depth = 32;
+    const names = Array.from({ length: depth }, (_, index) => `chain_${index}`);
+    const { host, counters } = harness({
+      trees: Object.fromEntries(names.map((name) => [name, [name]])),
+      // chain_(i+1) 引用 chain_(i) 的附件。
+      referrers: Object.fromEntries(
+        names.slice(1).map((name, index) => [names[index]!, [name]]),
+      ),
+    });
+    const result = await purgeSessionDataWith(host, { sessionIds: names, directories: [] });
+    expect(result.failed).toEqual([]);
+    expect(result.kept).toEqual([]);
+    expect(result.deleted.map((entry) => entry.sessionId)).toEqual(names.slice().reverse());
+    expect(counters.referrerQueries).toBe(1);
   });
 });

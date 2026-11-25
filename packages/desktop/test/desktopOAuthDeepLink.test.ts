@@ -44,6 +44,7 @@ vi.mock("electron", () => ({
 }));
 
 const tempDirs: string[] = [];
+const silentLogger = { info: vi.fn(), warn: vi.fn() };
 
 beforeEach(() => {
   vi.resetModules();
@@ -485,18 +486,20 @@ describe("desktopOAuthDeepLink share import routing", () => {
   });
 });
 
-describe("ensureDeepLinkHandlerForLogin（kcode 登录时接管 zcode:// handler）", () => {
+describe("登录登记 OAuth state 时接管 zcode:// handler（IPC OAuthRegisterState 的入口）", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     electronMocks.isPackaged = false;
   });
 
-  it("kcode 打包态调用时重新注册默认 handler", async () => {
+  it("kcode 打包态在登记 state 时重新注册默认 handler", async () => {
     electronMocks.isPackaged = true;
     vi.stubGlobal("__ZCODE_ENV__", "production");
     vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "kcode");
     const mod = await import("../src/main/desktopOAuthDeepLink.js");
-    mod.ensureDeepLinkHandlerForLogin();
+    // 走 renderer 发起登录的真实入口：此前接管挂在 loadWindow(…, "login") 上，从未被调用。
+    const registration = mod.registerOAuthStateFromRenderer(9, { state: "state-1" }, silentLogger);
+    expect(registration).toEqual({ state: "state-1" });
     expect(electronMocks.setAsDefaultProtocolClient).toHaveBeenCalledWith("zcode");
   });
 
@@ -504,12 +507,12 @@ describe("ensureDeepLinkHandlerForLogin（kcode 登录时接管 zcode:// handler
     vi.stubGlobal("__ZCODE_ENV__", "production");
     vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "production");
     const mod = await import("../src/main/desktopOAuthDeepLink.js");
-    mod.ensureDeepLinkHandlerForLogin();
+    mod.registerOAuthStateFromRenderer(9, { state: "state-1" }, silentLogger);
     expect(electronMocks.setAsDefaultProtocolClient).not.toHaveBeenCalled();
     vi.stubGlobal("__ZCODE_PRODUCT_FLAVOR__", "kcode");
     vi.resetModules();
     const mod2 = await import("../src/main/desktopOAuthDeepLink.js");
-    mod2.ensureDeepLinkHandlerForLogin();
+    mod2.registerOAuthStateFromRenderer(9, { state: "state-2" }, silentLogger);
     expect(electronMocks.setAsDefaultProtocolClient).not.toHaveBeenCalled();
   });
 });

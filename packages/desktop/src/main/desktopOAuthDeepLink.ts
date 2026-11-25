@@ -71,16 +71,45 @@ function enqueuePendingShareImport(
   }
 }
 
+interface DeepLinkLogger {
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+}
+
+// 启动期注册时记下平台选项（Linux 桌面文件的图标等），登录时重新接管沿用同一份。
+let protocolRegistrationOptions: { iconPath?: string } = {};
+
 /**
  * KCode 与 ZCode 共用 zcode:// scheme，系统默认 handler 是"最后注册者"。app 启动期的
  * 自注册只是初始态：若 KCode 先启动、ZCode 后启动，此时在 KCode 发起登录，OAuth 回调
- * 会落进 ZCode，而 state 只存在发起进程内，KCode 登录永远无法完成。因此在 kcode 打包态
- * 打开登录页前重新接管 handler（官方 ZCode 构建不受影响）。
+ * 会落进 ZCode，而 state 只存在发起进程内，KCode 登录永远无法完成。因此在 kcode 打包态，
+ * renderer 发起登录（登记 OAuth state）时重新接管 handler（官方 ZCode 构建不受影响）。
+ *
+ * 修复原因：接管原先挂在 loadWindow(…, "login") 上，而两处窗口加载都传 "index"，真实
+ * 登录入口（useOAuth 登记 state 后打开浏览器）从未触发接管。现在由 Main 处理
+ * OAuthRegisterState 时调用，并复用启动期的平台注册逻辑：Windows 保留 -- 参数边界，
+ * Linux 同步重写桌面集成，而不是只调一次 setAsDefaultProtocolClient。
  */
-export function ensureDeepLinkHandlerForLogin(): void {
+export function ensureDeepLinkHandlerForLogin(logger: DeepLinkLogger): void {
   if (!app.isPackaged || ZCODE_PRODUCT_FLAVOR !== "kcode") return;
-  // 注册失败时登录流程本身会因收不到回调而暴露，无需额外日志通道。
-  app.setAsDefaultProtocolClient("zcode");
+  // 注册失败时登录流程本身会因收不到回调而暴露；registerDeepLinkProtocol 自己会记日志。
+  registerDeepLinkProtocol(logger, protocolRegistrationOptions);
+}
+
+/**
+ * renderer 发起 OAuth 的入口：校验 state 登记请求，登记前重新接管 handler。
+ * IPC 的 OAuthRegisterState 直接委托到这里。返回 null 表示请求无效。
+ */
+export function registerOAuthStateFromRenderer(
+  windowId: number,
+  payload: unknown,
+  logger: DeepLinkLogger,
+): OAuthStateRegistration | null {
+  const registration = parseOAuthStateRegistration(payload);
+  if (!registration) return null;
+  ensureDeepLinkHandlerForLogin(logger);
+  registerOAuthState(windowId, registration);
+  return registration;
 }
 
 export function parseOAuthStateRegistration(payload: unknown): OAuthStateRegistration | null {
@@ -408,13 +437,8 @@ export function handleDeepLink(
   return false;
 }
 
-export function registerDeepLinkProtocol(
-  logger: {
-    info: (...args: unknown[]) => void;
-    warn: (...args: unknown[]) => void;
-  },
-  options: { iconPath?: string } = {},
-) {
+export function registerDeepLinkProtocol(logger: DeepLinkLogger, options: { iconPath?: string } = {}) {
+  protocolRegistrationOptions = options;
   const scheme = "zcode";
 
   // 外部 URL 必须位于 -- 后；否则 Windows 引号拆分可把 URL 内容变成 Electron 启动参数。

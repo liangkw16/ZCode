@@ -13,6 +13,7 @@ function makePort() {
     added,
     removed,
     port: {
+      scopeKey: "scope-1",
       addAttachmentFiles: (files: File[]) => {
         const ids = files.map(() => `att-${++seq}`);
         added.push(ids);

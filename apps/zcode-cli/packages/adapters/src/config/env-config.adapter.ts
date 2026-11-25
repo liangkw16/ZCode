@@ -130,8 +130,10 @@ function normalizeBoolean(value: string): boolean | undefined {
 
 function normalizePositiveInteger(value: string): number | undefined {
   const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return undefined;
-  return Math.floor(num);
+  // 修复原因：与文件 schema 的 positiveIntegerSchema 一致，只接受正整数。0.5 这类小数原先被
+  // 向下取整成 0，覆盖掉有效的低优先级配置，随后触发策略的默认窗口回退。
+  if (!Number.isInteger(num) || num <= 0) return undefined;
+  return num;
 }
 
 function normalizeLogFormat(value: string): "text" | "json" {

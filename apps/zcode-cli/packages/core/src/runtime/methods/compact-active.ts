@@ -78,6 +78,7 @@ import {
   persistCompactTimelineEvent,
   publishCommittedCompactEvents,
   recordCompactModelCompletion,
+  recordTruncatedCompactSummaryUsage,
 } from "./compact-active-helpers.js";
 import { runCompactSummaryModelRequest } from "./compact-summary-model-request.js";
 import { createRefreshRuntimeHeadersBeforeModelAttempt } from "./model-runtime-headers.js";
@@ -512,23 +513,15 @@ async function compactActiveConversationImpl(
           // 修复原因：第二次摘要已截断时，计量事件写入失败会先于“恢复已耗尽”的判定抛出，
           // 外层把它当成可重试错误，摘要模型被调用第三次（规范 §6：最多只重新生成一次）。
           // 现在先确定截断终态，再记录计量；写入失败保留为具体原因，终态仍然不可重试。
-          let usageRecordingError: unknown;
-          try {
-            await recordCompactModelCompletion(this, result, "", modelTraceContext, events);
-          } catch (error) {
-            usageRecordingError = error;
-            this.logger?.warn("Truncated compact summary usage could not be recorded", {
-              ...traceContextToLogContext(modelTraceContext),
-              event: "compact.summary.output_limit.usage_failed",
-              errorMessage: error instanceof Error ? error.message : String(error),
-              module: "core.runtime",
-              operationId: compactTimeline.operationId,
-            });
-          }
+          const usageRecordingError = await recordTruncatedCompactSummaryUsage(
+            this,
+            result,
+            modelTraceContext,
+            events,
+            compactTimeline.operationId,
+          );
           if (recoveryExhausted) {
-            throw createCompactSummaryOutputLimitError(result, {
-              usageRecordingError,
-            });
+            throw createCompactSummaryOutputLimitError(result, { usageRecordingError });
           }
           this.logger?.info("Compact summary output limit; regenerating a shorter handoff", {
             ...traceContextToLogContext(modelTraceContext),

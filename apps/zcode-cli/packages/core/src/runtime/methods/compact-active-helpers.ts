@@ -348,3 +348,29 @@ export async function recordCompactModelCompletion(
   await runtime.appendEvent(event, trace);
   events.push(event);
 }
+
+/**
+ * 截断摘要的用量入账。调用方先确定截断终态再调用：写入失败不能改变终态，也不能被外层当成
+ * 可重试错误，只把失败原因返回，由调用方带进不可重试的错误里。返回 undefined 表示已入账。
+ */
+export async function recordTruncatedCompactSummaryUsage(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  trace: TraceContext,
+  events: SessionEvent[],
+  operationId: string,
+): Promise<unknown> {
+  try {
+    await recordCompactModelCompletion(runtime, result, "", trace, events);
+    return undefined;
+  } catch (error) {
+    runtime.logger?.warn("Truncated compact summary usage could not be recorded", {
+      ...traceContextToLogContext(trace),
+      event: "compact.summary.output_limit.usage_failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      module: "core.runtime",
+      operationId,
+    });
+    return error;
+  }
+}

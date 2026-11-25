@@ -437,7 +437,10 @@ export function handleDeepLink(
   return false;
 }
 
-export function registerDeepLinkProtocol(logger: DeepLinkLogger, options: { iconPath?: string } = {}) {
+export function registerDeepLinkProtocol(
+  logger: DeepLinkLogger,
+  options: { iconPath?: string } = {},
+) {
   protocolRegistrationOptions = options;
   const scheme = "zcode";
 

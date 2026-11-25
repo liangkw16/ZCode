@@ -63,7 +63,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "@noble/hashes": "1.8.0"
+    "@noble/hashes": "1.8.0",
+    "sharp": "0.34.5"
   },
   "zcodeCuaProducer": {
     "kind": "source",

@@ -44,3 +44,11 @@ test("paste transaction keeps concurrent clipboard writes and restores its own t
     /paste transaction keeps concurrent clipboard writes/,
   );
 });
+
+test("paste receipt reports a focused field that never received the text", darwin, async () => {
+  await runFixture(
+    "text-landing",
+    "text-landing-native.mm",
+    /paste receipt reports a focused field that never received the text/,
+  );
+});

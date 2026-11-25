@@ -348,6 +348,18 @@ void KCUAInputCleanup(const KCUAOp &op) {
     }
   }
 }
+// 粘贴的落点是应用的焦点元素。返回它当前的值；读不到（没有焦点元素、不支持 AXValue、
+// 不是字符串）返回 nil。经 KCUAAXAttribute 读取，回归用例按同一入口替换。
+static NSString *landingValue(pid_t pid) {
+  AXUIElementRef app = AXUIElementCreateApplication(pid);
+  AXUIElementSetMessagingTimeout(app, 0.25);
+  id focused = KCUAAXAttribute(app, kAXFocusedUIElementAttribute);
+  CFRelease(app);
+  if (!focused || CFGetTypeID((__bridge CFTypeRef)focused) != AXUIElementGetTypeID())
+    return nil;
+  id value = KCUAAXAttribute((__bridge AXUIElementRef)focused, kAXValueAttribute);
+  return [value isKindOfClass:NSString.class] ? value : nil;
+}
 // 粘贴事务：保存剪贴板、写入待粘贴内容、发送 ⌘V，并在操作清理时恢复。
 // board 由调用方给出（运行时是系统剪贴板），便于用独立剪贴板做回归。
 void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
@@ -404,22 +416,69 @@ void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
     KCUAFail(
         @"action_unavailable", @"Clipboard changed before paste dispatch",
         @{@"action_sent" : @NO});
+  // 修复原因：回执原先只看"目标进程读取了剪贴板"。实测文本没有进入输入框时目标进程照样
+  // 会读剪贴板：AppKit 应用不在前台时不处理 ⌘V 这类菜单快捷键，按键却已经送达窗口
+  // （M2 的原生夹具与本机 keylab 一致，合成 target focus 也改变不了）。回执因此是
+  // accepted，模型只能靠事后观察发现。现在能读到落点元素的值时以值为准；HTML 的源码与
+  // 粘贴后的富文本内容不可比，仍只看剪贴板证据。
+  NSString *before = [format isEqual:@"html"] ? nil : landingValue(target->pid);
+  bool foreground = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier ==
+                    target->pid;
   provider.dispatched = YES;
   KCUAKeyChord chord = KCUAParseKeyChord(@"cmd+v");
   keyDown(target, chord, op);
   releaseLastInput(true);
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (!provider.provided) {
+  auto settleDeadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+  std::chrono::steady_clock::time_point consumedAt;
+  bool consumed = false;
+  auto notInserted = [&]() {
+    KCUAFail(
+        foreground ? @"action_unavailable" : @"foreground_required",
+        foreground
+            ? @"Text was sent but the focused field did not change; inspect it "
+              @"before retrying"
+            : @"Text was sent to the background app but its focused field did "
+              @"not change; bring the target window to the foreground and "
+              @"retry, or set the value on the element",
+        @{@"action_sent" : @YES,
+          @"dispatch_status" : @"possibly_sent",
+          @"reason_code" : @"text_insertion_not_observed"});
+  };
+  for (;;) {
     KCUACheck(op);
     KCUARequireDesktop();
-    if (std::chrono::steady_clock::now() >= deadline)
+    auto now = std::chrono::steady_clock::now();
+    if (before) {
+      NSString *after = landingValue(target->pid);
+      if (!after) {
+        // 元素中途不可读：无法再判断是否落地，退回只看剪贴板证据。
+        before = nil;
+      } else if (![after isEqual:before] || [after containsString:text]) {
+        break;
+      }
+    }
+    if (!consumed && provider.provided) {
+      consumed = true;
+      consumedAt = now;
+    }
+    if (consumed) {
+      if (!before)
+        break;
+      // 剪贴板已被读取而值没变：给目标一小段时间完成插入，仍没变就是没有落地。
+      if (now >= consumedAt + std::chrono::milliseconds(300))
+        notInserted();
+    } else if (now >= settleDeadline) {
+      if (before)
+        notInserted();
       KCUAFail(
           @"action_unavailable",
           @"Target clipboard consumption was not observed; inspect before "
           @"retrying",
           @{@"action_sent" : @YES,
             @"dispatch_status" : @"possibly_sent"});
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, true);
+    }
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
   }
 }
 static CGPoint pointParam(id value, CGRect allowed) {

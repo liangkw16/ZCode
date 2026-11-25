@@ -177,6 +177,8 @@
             @"pid" : @(getpid()),
             @"window" : @(self.window.windowNumber),
             @"hidden" : @(NSApp.isHidden),
+            @"active" : @(NSApp.isActive),
+            @"editing" : @(self.text.currentEditor != nil),
             @"primary_key" : @(self.window.isKeyWindow),
             @"input_events" : self.window.inputEvents,
             @"sibling_window" : @(self.second.windowNumber),

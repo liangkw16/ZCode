@@ -20,12 +20,15 @@ fi
 CUA_HELPER_INSTALL_SUBDIR="${CUA_HELPER_INSTALL_VARIANT:+$CUA_HELPER_INSTALL_VARIANT/}"
 # Shell cannot import producer TS constants. macosReleaseAppDoctor.test.ts locks these literals to
 # @zcode/zcode-cua/broker/helperConstants so a future producer rename fails loudly.
-ZCODE_HOME_HELPER_APP_PATH="${ZCODE_HOME_DIR:+$ZCODE_HOME_DIR/computer-use/${CUA_HELPER_INSTALL_SUBDIR}ZCode Computer Use.app}"
+# 修复原因：kcode 把 Helper 改名为 KCode Computer Use.app 之后，这里的默认值仍是 ZCode Computer Use，
+# 发布验收在默认路径下找不到 Helper 而失败（工程测试 macosReleaseAppDoctor.test.ts 如实报错）。
+# 与 producer 常量 HELPER_APP_NAME / HELPER_DISPLAY_NAME 保持一致；环境变量覆盖仍然可用。
+ZCODE_HOME_HELPER_APP_PATH="${ZCODE_HOME_DIR:+$ZCODE_HOME_DIR/computer-use/${CUA_HELPER_INSTALL_SUBDIR}KCode Computer Use.app}"
 HELPER_APP_PATH="${ZCODE_CUA_HELPER_APP_PATH:-$ZCODE_HOME_HELPER_APP_PATH}"
 APP_BUNDLE_NAME="$(basename "$APP_PATH")"
 APP_DISPLAY_NAME="${APP_BUNDLE_NAME%.app}"
 APP_EXECUTABLE_NAME="${ZCODE_APP_EXECUTABLE_NAME:-$APP_DISPLAY_NAME}"
-HELPER_EXECUTABLE_NAME="${ZCODE_CUA_HELPER_EXECUTABLE_NAME:-ZCode Computer Use}"
+HELPER_EXECUTABLE_NAME="${ZCODE_CUA_HELPER_EXECUTABLE_NAME:-KCode Computer Use}"
 REQUIRE_CUA_HELPER="${ZCODE_CUA_REQUIRE_HELPER:-0}"
 REQUIRE_CUA_HELPER_STAPLE=0
 if [[ "$REQUIRE_CUA_HELPER" =~ ^(1|true|on)$ ]]; then
@@ -49,11 +52,11 @@ also validates the independently signed Helper bundle selected below with the
 same codesign/spctl checks and a local notarization staple check.
 
 Helper lookup order:
-  1. ZCODE_CUA_HELPER_APP_PATH (CI passes the Helper bundled inside ZCode.app)
-  2. ${ZCODE_HOME:-$HOME/.zcode}/computer-use/<optional variant>/ZCode Computer Use.app
+  1. ZCODE_CUA_HELPER_APP_PATH (CI passes the Helper bundled inside the app)
+  2. ${ZCODE_HOME:-$HOME/.zcode}/computer-use/<optional variant>/KCode Computer Use.app
 
 CI release acceptance validates the copy actually shipped at
-ZCode.app/Contents/Resources/cua-helper/ZCode Computer Use.app. Post-install checks
+<app>/Contents/Resources/cua-helper/KCode Computer Use.app. Post-install checks
 may omit the override to validate the user-level installed copy. A missing selected
 Helper.app fails closed.
 USAGE

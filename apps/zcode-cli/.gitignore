@@ -24,3 +24,8 @@ vendor
 
 # Lowering 的人工可审查契约快照不是 tsc 产物，干净 checkout 也必须可运行测试。
 !packages/dynamic-workflow/tests/lowering/expected/*.js
+
+# 修复原因：测试以 ":memory:" 作为 dbPath 调用迁移 runner 时，备份目录按 dirname 解析成
+# 相对路径，落到 cwd/backup/ 下；在包目录跑测试后一次 git add 会把夹具备份带进提交
+# （8430e874 曾带入 packages/adapters/backup/cli-*/）。运行时数据根在用户目录，不受影响。
+**/backup/cli-*/

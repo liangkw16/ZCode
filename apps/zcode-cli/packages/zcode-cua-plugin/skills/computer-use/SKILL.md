@@ -132,9 +132,8 @@ Observe once, act, then observe again before deciding the next step.
 On macOS, `typeText` inserts exact plain text through clipboard-preserving paste
 while the target app is frontmost, so the current input method does not rewrite
 punctuation. Into a background app it sends the text one character at a time as
-key events: it stops after the first character if the focused field did not
-change, and it refuses emoji and other characters outside the Basic Multilingual
-Plane with `FOREGROUND_REQUIRED` and nothing sent — use `setValue` for those.
+key events and stops after the first character if the focused field did not
+change. A tab moves the focus, as it does when the user presses it.
 Default/`auto` scroll uses the window-scoped event backend; explicit `a11y` still
 requires native support.
 

@@ -537,8 +537,10 @@ void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
 // 真正处于前台时才被当作菜单快捷键，投递给后台应用的粘贴键送达了窗口、输入框不变；同一通道里
 // 不带修饰键、带字符的按键能进输入框。所以目标不在前台时 type 改发逐字符按键，paste 不改。
 //
-// 一个按键只带一个 UTF-16 单元：Chromium 把更长的按键字符交给输入法提交，不聚焦的后台窗口
-// 里这次提交被丢弃。换行发 Return，制表符发 Tab，与用户按键一致。
+// 一个按键带一个 Unicode 标量。增补平面的字符（emoji 等）是两个 UTF-16 单元的代理对，必须整对
+// 发出：Chromium 对恰好一个单元的按键走按键字符，对代理对走输入法提交，后台窗口里两条路都把
+// 字符插进输入框（实测 Chrome 158）；把代理对拆成两段只会插进半个代理项。换行发 Return，
+// 制表符发 Tab，与用户按键一致。
 static const NSUInteger KCUABackgroundTypingLimit = 2048;
 struct TypingStroke {
   CGKeyCode key;
@@ -560,8 +562,14 @@ static std::vector<TypingStroke> typingStrokes(NSString *text) {
       at++;
       strokes.push_back({KCUAParseKeyChord(@"tab").key, @""});
     } else {
-      strokes.push_back({0, [text substringWithRange:NSMakeRange(at, 1)]});
-      at += 1;
+      NSUInteger count =
+          CFStringIsSurrogateHighCharacter(unit) && at + 1 < length &&
+                  CFStringIsSurrogateLowCharacter(
+                      [text characterAtIndex:at + 1])
+              ? 2
+              : 1;
+      strokes.push_back({0, [text substringWithRange:NSMakeRange(at, count)]});
+      at += count;
     }
   }
   return strokes;
@@ -625,18 +633,6 @@ static void typeBackgroundKeys(const KCUATargetRef &target, NSString *text,
                @"Background typing cannot send control characters other than "
                @"tab and newlines",
                @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
-    // 增补平面的字符（emoji 等）是一个代理对、两个 UTF-16 单元。Chromium 只把恰好一个单元的
-    // 按键当作按键字符：更长的交给输入法提交（RenderWidgetHostViewCocoa 合成 keyCode 229 的
-    // 假 keydown 再 ImeCommitText），不聚焦的后台窗口里这次提交被丢弃，什么也不会插入。
-    // 实测把代理对拆成两段只会插进半个代理项。所以派发前拒绝，不给应用送去残缺的内容。
-    if (CFStringIsSurrogateHighCharacter(unit) || CFStringIsSurrogateLowCharacter(unit))
-      KCUAFail(
-          @"foreground_required",
-          @"Background typing cannot enter emoji or other characters outside "
-          @"the Basic Multilingual Plane; set the value on the element, or "
-          @"bring the target window to the foreground and paste",
-          @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent",
-            @"reason_code" : @"supplementary_plane_character"});
   }
   text = KCUAScalarString(text, KCUABackgroundTypingLimit);
   auto strokes = typingStrokes(text);

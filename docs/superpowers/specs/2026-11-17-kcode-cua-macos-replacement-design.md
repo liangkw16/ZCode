@@ -398,8 +398,9 @@ sequenceDiagram
 
 - 先发第一个字符，读到落点元素的值与派发前不同才发其余字符。值可读但没变就停在这里，返回 `foreground_required` / `text_insertion_not_observed`（`action_sent=true`、`dispatch_status=possibly_sent`）。不在非文本控件上连发按键：单个字母在不少应用里就是快捷键。
 - 落点元素先取应用焦点元素；取不到时在目标窗口的辅助功能树里找带焦点标记、值为字符串的元素。查找有节点上限，找不到就只报告派发，不核对。
-- 一个按键只带一个 UTF-16 单元。Chromium 只把恰好一个单元的按键当作按键字符；更长的交给输入法提交（合成 keyCode 229 的假 keydown，再提交文本），不聚焦的后台窗口里这次提交被丢弃，只留下 keydown、不插入。
-- 增补平面的字符（emoji 等）是两个单元的代理对，拆开发送只会插进半个代理项。后台 `type` 遇到它们在派发前拒绝：`foreground_required`、`action_sent=false`、`dispatch_status=not_sent`、`reason_code=supplementary_plane_character`，提示对元素 `set_value`，或把窗口切到前台后粘贴。不自动改用辅助功能写入：那要先证明读到的值是实时的，否则会覆盖输入框里已有的内容。
+- 一个按键带一个 Unicode 标量。增补平面的字符（emoji 等）是两个 UTF-16 单元的代理对，必须整对发出：Chromium 对恰好一个单元的按键走按键字符，对代理对走输入法提交（合成 keyCode 229 的 keydown，再提交文本），不聚焦的后台窗口里两条路都把字符插进输入框（实测 Chrome 158）。把代理对拆成两段只会插进半个代理项；孤立的代理项按 U+FFFD 发出。
+- 只核对首字，不逐字核对。Chromium 在后台连发一串字符后，辅助功能树里的值要等下一次按键才补齐末尾几个字符；单个按键落下后立即更新。
+- Tab 就是焦点遍历：网页里的最后一个输入框再按 Tab，焦点会离开网页内容（实测到了地址栏）。与用户按键一致，不保证制表符被当作文字插入。
 - 后台逐字符输入一次最多 2048 个 UTF-16 单元；除换行和制表符外的控制字符在派发前拒绝（`not_sent`）。更长的文本用 `set_value`，或把窗口切到前台后粘贴。
 - `paste` 工具不走这条路：它必须是粘贴，不在前台时仍返回 `foreground_required`。
 

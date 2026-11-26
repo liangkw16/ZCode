@@ -356,7 +356,7 @@ await target.click(42);
 await target.setValue(42, "example.com");
 await target.pressKey("Return");
 // macOS typeText pastes while the app is frontmost and types key by key into a
-// background app; it cannot enter emoji into a background app.
+// background app.
 await target.typeText("hello");
 await target.scroll(42, "down", 1);
 await target.scroll([640, 480], "down", 1);
@@ -402,11 +402,10 @@ when they do not. The fields you act on:
   non-idempotent action only when this is `false`; otherwise observe first.
 - `FOREGROUND_REQUIRED` comes from `strategy: "event"` on a background app, from
   `paste` on a background app, and from `typeText` on a background app when its
-  text contains emoji or other characters outside the Basic Multilingual Plane
-  (nothing is sent). On macOS nothing in this surface can bring an app forward, so
-  do not retry it and do not look for an activation call: switch to an element
-  target, `setValue`, or an accessibility action, which all work on a background
-  app.
+  first character did not land (that one has `actionSent: true`). On macOS
+  nothing in this surface can bring an app forward, so do not retry it and do not
+  look for an activation call: switch to an element target, `setValue`, or an
+  accessibility action, which all work on a background app.
 - `retry` — `"reobserve"`, `"retry"` or `"never"`.
 
 ```js
@@ -473,9 +472,8 @@ technology after an access refusal.
 - On macOS, `typeText` pastes the whole text while the app is frontmost. Into a
   background app it sends the text one character at a time as key events, and
   stops after the first character when the focused field did not change — that
-  report has `actionSent: true`, so observe before retrying. Emoji and other
-  characters outside the Basic Multilingual Plane are refused on a background app
-  with nothing sent: use `setValue`, or have the user bring the app forward.
+  report has `actionSent: true`, so observe before retrying. A tab moves the
+  focus there, as it does when the user presses it.
 - There is no need to open or launch apps; `agent.computerUse.getApp(...)` launches the app in
   the background if it is not already running. There is no separate launch tool.
   Its argument is a display name, a

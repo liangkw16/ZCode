@@ -211,12 +211,16 @@ int main(void) {
         imp_implementationWithBlock(^id(id) { return fixtureBoard; }));
     id focusedId = (__bridge id)focusedElement;
 
-    // 读不到落点：不核对，只报告派发。每个 BMP 字符一对不带修饰键的按键；\r\n 合成一次
-    // Return，\t 是 Tab。剪贴板不被接管。
+    // 读不到落点：不核对，只报告派发。每个 Unicode 标量一对不带修饰键的按键：emoji 的代理对
+    // 整对发出；\r\n 合成一次 Return，\t 是 Tab。剪贴板不被接管。
     scenario(NSNull.null, @[]);
-    assert([type(@"ab你\r\nx\tyz") isEqual:accepted]);
-    assert([shape() isEqual:@"0:a 0:b 0:你 36: 0:x 48: 0:y 0:z"]);
+    assert([type(@"ab你\r\nx\ty😀") isEqual:accepted]);
+    assert([shape() isEqual:@"0:a 0:b 0:你 36: 0:x 48: 0:y 0:😀"]);
     assertPairs();
+    // 孤立的代理项不是一个字符：按 U+FFFD 发出去，不把半个代理对送进应用。
+    scenario(NSNull.null, @[]);
+    assert([type([NSString stringWithCharacters:(UniChar[]){ 0xD83D } length:1]) isEqual:accepted]);
+    assert([shape() isEqual:@"0:\uFFFD"]);
     assert([[fixtureBoard stringForType:NSPasteboardTypeString] isEqual:@"user-old"]);
 
     // 首字进了输入框：值变了，其余字符照发。
@@ -302,18 +306,6 @@ int main(void) {
     assertRejected(capture(^{
       type(@"a\b");
     }));
-    // 增补平面的字符在后台发不进去：派发前拒绝并指路，不送去半个代理项。
-    scenario(NSNull.null, @[]);
-    op = operation();
-    error = capture(^{
-      KCUAInput(@"type_text_to_app", @{ @"text" : @"a😀b" }, op);
-    });
-    KCUAInputCleanup(op);
-    assert(error && [error.name isEqual:@"foreground_required"]);
-    assert([error.userInfo[@"action_sent"] isEqual:@NO]);
-    assert([error.userInfo[@"dispatch_status"] isEqual:@"not_sent"]);
-    assert([error.userInfo[@"reason_code"] isEqual:@"supplementary_plane_character"]);
-    assert(deliveries.empty());
     assert([[fixtureBoard stringForType:NSPasteboardTypeString] isEqual:@"user-old"]);
 
     // 前台目标仍走粘贴事务：只有一对 ⌘V，按粘贴规则核对落地。

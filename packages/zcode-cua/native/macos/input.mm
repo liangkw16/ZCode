@@ -330,7 +330,9 @@ static void releaseLastInput(bool normal) {
   KCUAPersistInputSafety();
   holds.pop_back();
 }
+static void forgetLanding(void);
 void KCUAInputCleanup(const KCUAOp &op) {
+  forgetLanding();
   @try {
     while (!holds.empty())
       releaseLastInput(false);
@@ -348,22 +350,85 @@ void KCUAInputCleanup(const KCUAOp &op) {
     }
   }
 }
-// 粘贴的落点是应用的焦点元素。返回它当前的值；读不到（没有焦点元素、不支持 AXValue、
-// 不是字符串）返回 nil。经 KCUAAXAttribute 读取，回归用例按同一入口替换。
-static NSString *landingValue(pid_t pid) {
-  AXUIElementRef app = AXUIElementCreateApplication(pid);
+// 粘贴与后台逐字符输入的落点是应用里带焦点的文本控件，这里返回它当前的值；读不到（没有
+// 这样的控件、不支持 AXValue、不是字符串）返回 nil。先取应用的焦点元素；Chromium 在后台
+// 不提供应用级焦点元素，这时在目标窗口的辅助功能树里找带焦点标记、值为字符串的节点，
+// 查找有节点数和时间上限。每次调用只读一次值。
+// 经 KCUAAXAttribute 读取，回归用例按同一入口替换。
+static constexpr NSInteger KCUALandingSearchLimit = 240;
+static constexpr auto KCUALandingSearchBudget = std::chrono::milliseconds(150);
+// 窗口树里找到的元素按目标缓存到本次操作结束：落地核对会反复读值，不必每次重走一遍树。
+static KCUATargetRef landingOwner;
+static AXUIElementRef landingCached = nullptr;
+static void forgetLanding(void) {
+  if (landingCached)
+    CFRelease(landingCached);
+  landingCached = nullptr;
+  landingOwner.reset();
+}
+static NSString *landingValue(const KCUATargetRef &target) {
+  auto read = [](AXUIElementRef element) -> NSString * {
+    id value = KCUAAXAttribute(element, kAXValueAttribute);
+    return [value isKindOfClass:NSString.class] ? value : nil;
+  };
+  if (landingCached && landingOwner &&
+      landingOwner->pid == target->pid &&
+      landingOwner->windowId == target->windowId)
+    return read(landingCached);
+  AXUIElementRef app = AXUIElementCreateApplication(target->pid);
   AXUIElementSetMessagingTimeout(app, 0.25);
   id focused = KCUAAXAttribute(app, kAXFocusedUIElementAttribute);
   CFRelease(app);
-  if (!focused || CFGetTypeID((__bridge CFTypeRef)focused) != AXUIElementGetTypeID())
+  if (focused && CFGetTypeID((__bridge CFTypeRef)focused) == AXUIElementGetTypeID())
+    return read((__bridge AXUIElementRef)focused);
+  if (!target->window)
     return nil;
-  id value = KCUAAXAttribute((__bridge AXUIElementRef)focused, kAXValueAttribute);
-  return [value isKindOfClass:NSString.class] ? value : nil;
+  auto deadline = std::chrono::steady_clock::now() + KCUALandingSearchBudget;
+  // 深度优先：输入控件通常离窗口不远，宽度优先会先扫完整条工具栏。
+  NSMutableArray *pending = [NSMutableArray arrayWithObject:(__bridge id)target->window];
+  for (NSInteger visited = 0;
+       pending.count && visited < KCUALandingSearchLimit &&
+       std::chrono::steady_clock::now() < deadline;
+       visited++) {
+    AXUIElementRef node = (__bridge AXUIElementRef)pending.lastObject;
+    [pending removeLastObject];
+    AXUIElementSetMessagingTimeout(node, 0.25);
+    if ([KCUAAXAttribute(node, kAXFocusedAttribute) isEqual:(__bridge id)kCFBooleanTrue]) {
+      NSString *value = read(node);
+      if (value) {
+        forgetLanding();
+        landingCached = (AXUIElementRef)CFRetain(node);
+        landingOwner = target;
+        return value;
+      }
+    }
+    id children = KCUAAXAttribute(node, kAXChildrenAttribute);
+    NSArray *list = [children isKindOfClass:NSArray.class] ? children : @[];
+    for (NSInteger index = (NSInteger)list.count - 1; index >= 0; index--)
+      if (list[index])
+        [pending addObject:list[index]];
+  }
+  return nil;
+}
+// 文本已派发、落点元素的值却没变：如实报告没有落地，不报告成 accepted。
+[[noreturn]] static void textNotInserted(bool foreground) {
+  KCUAFail(
+      foreground ? @"action_unavailable" : @"foreground_required",
+      foreground
+          ? @"Text was sent but the focused field did not change; inspect it "
+            @"before retrying"
+          : @"Text was sent to the background app but its focused field did "
+            @"not change; bring the target window to the foreground and "
+            @"retry, or set the value on the element",
+      @{@"action_sent" : @YES,
+        @"dispatch_status" : @"possibly_sent",
+        @"reason_code" : @"text_insertion_not_observed"});
 }
 // 粘贴事务：保存剪贴板、写入待粘贴内容、发送 ⌘V，并在操作清理时恢复。
 // board 由调用方给出（运行时是系统剪贴板），便于用独立剪贴板做回归。
 void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
                    NSString *text, NSString *format, const KCUAOp &op) {
+  forgetLanding();
   if (![text isKindOfClass:NSString.class] || text.length > 1024 * 1024 ||
       ![@[ @"text", @"md", @"html" ] containsObject:format])
     KCUAFail(@"invalid_request",
@@ -421,7 +486,7 @@ void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
   // （M2 的原生夹具与本机 keylab 一致，合成 target focus 也改变不了）。回执因此是
   // accepted，模型只能靠事后观察发现。现在能读到落点元素的值时以值为准；HTML 的源码与
   // 粘贴后的富文本内容不可比，仍只看剪贴板证据。
-  NSString *before = [format isEqual:@"html"] ? nil : landingValue(target->pid);
+  NSString *before = [format isEqual:@"html"] ? nil : landingValue(target);
   bool foreground = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier ==
                     target->pid;
   provider.dispatched = YES;
@@ -432,25 +497,12 @@ void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
       std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
   std::chrono::steady_clock::time_point consumedAt;
   bool consumed = false;
-  auto notInserted = [&]() {
-    KCUAFail(
-        foreground ? @"action_unavailable" : @"foreground_required",
-        foreground
-            ? @"Text was sent but the focused field did not change; inspect it "
-              @"before retrying"
-            : @"Text was sent to the background app but its focused field did "
-              @"not change; bring the target window to the foreground and "
-              @"retry, or set the value on the element",
-        @{@"action_sent" : @YES,
-          @"dispatch_status" : @"possibly_sent",
-          @"reason_code" : @"text_insertion_not_observed"});
-  };
   for (;;) {
     KCUACheck(op);
     KCUARequireDesktop();
     auto now = std::chrono::steady_clock::now();
     if (before) {
-      NSString *after = landingValue(target->pid);
+      NSString *after = landingValue(target);
       if (!after) {
         // 元素中途不可读：无法再判断是否落地，退回只看剪贴板证据。
         before = nil;
@@ -467,10 +519,10 @@ void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
         break;
       // 剪贴板已被读取而值没变：给目标一小段时间完成插入，仍没变就是没有落地。
       if (now >= consumedAt + std::chrono::milliseconds(300))
-        notInserted();
+        textNotInserted(foreground);
     } else if (now >= settleDeadline) {
       if (before)
-        notInserted();
+        textNotInserted(foreground);
       KCUAFail(
           @"action_unavailable",
           @"Target clipboard consumption was not observed; inspect before "
@@ -479,6 +531,134 @@ void KCUAPasteText(NSPasteboard *board, const KCUATargetRef &target,
             @"dispatch_status" : @"possibly_sent"});
     }
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+  }
+}
+// 后台逐字符输入。修复原因（M2 2026-11-26、构建机 Chrome 158 / AppKit 实测）：⌘V 只有在目标
+// 真正处于前台时才被当作菜单快捷键，投递给后台应用的粘贴键送达了窗口、输入框不变；同一通道里
+// 不带修饰键、带字符的按键能进输入框。所以目标不在前台时 type 改发逐字符按键，paste 不改。
+//
+// 一个按键只带一个 UTF-16 单元：Chromium 把更长的按键字符交给输入法提交，不聚焦的后台窗口
+// 里这次提交被丢弃。换行发 Return，制表符发 Tab，与用户按键一致。
+static const NSUInteger KCUABackgroundTypingLimit = 2048;
+struct TypingStroke {
+  CGKeyCode key;
+  // 纯键位（Return、Tab）为空串。
+  NSString *characters;
+};
+static std::vector<TypingStroke> typingStrokes(NSString *text) {
+  std::vector<TypingStroke> strokes;
+  NSUInteger length = text.length;
+  for (NSUInteger at = 0; at < length;) {
+    unichar unit = [text characterAtIndex:at];
+    if (unit == '\r' || unit == '\n') {
+      if (unit == '\r' && at + 1 < length &&
+          [text characterAtIndex:at + 1] == '\n')
+        at++;
+      at++;
+      strokes.push_back({KCUAParseKeyChord(@"return").key, @""});
+    } else if (unit == '\t') {
+      at++;
+      strokes.push_back({KCUAParseKeyChord(@"tab").key, @""});
+    } else {
+      strokes.push_back({0, [text substringWithRange:NSMakeRange(at, 1)]});
+      at += 1;
+    }
+  }
+  return strokes;
+}
+// 一次按键：落下与抬起在同处校验、同处派发。与 press_key 走同一条 PID/窗口定向通道，
+// 区别只是键上不带修饰键、带着要输入的字符。
+static void postStroke(const KCUATargetRef &target, const TypingStroke &stroke,
+                       const KCUAOp &op) {
+  CGEventRef down = nullptr, up = nullptr;
+  @try {
+    KCUACheck(op);
+    KCUAValidateTarget(target, true);
+    KCUABeginScopedFocus(target, op);
+    down = CGEventCreateKeyboardEvent(nullptr, stroke.key, true);
+    up = CGEventCreateKeyboardEvent(nullptr, stroke.key, false);
+    if (!down || !up)
+      KCUAFail(@"action_unavailable",
+               @"Could not construct target-scoped input event");
+    std::vector<UniChar> units(stroke.characters.length);
+    if (!units.empty())
+      [stroke.characters
+          getCharacters:units.data()
+                 range:NSMakeRange(0, units.size())];
+    for (CGEventRef event : { down, up }) {
+      // 不继承用户此刻按着的修饰键：字符已经带在事件上，Shift 之类只会改变应用对它的解释。
+      CGEventSetFlags(event, 0);
+      if (!units.empty())
+        CGEventKeyboardSetUnicodeString(event, units.size(), units.data());
+      KCUAStampWindowEvent(event, target);
+    }
+    KCUACheck(op);
+    KCUARequireDesktop();
+    KCUARequireInputKeyWindow(target, false);
+    op->dispatched = true;
+    CGEventPostToPid(target->pid, down);
+    CGEventPostToPid(target->pid, up);
+  } @finally {
+    if (down)
+      CFRelease(down);
+    if (up)
+      CFRelease(up);
+  }
+}
+static void typeBackgroundKeys(const KCUATargetRef &target, NSString *text,
+                               const KCUAOp &op) {
+  forgetLanding();
+  if (![text isKindOfClass:NSString.class])
+    KCUAFail(@"invalid_request", @"Typing requires text", @{@"action_sent" : @NO});
+  if (text.length > KCUABackgroundTypingLimit)
+    KCUAFail(@"invalid_request",
+             @"Background typing is limited to 2048 UTF-16 units; set the "
+             @"value on the element, or bring the target window to the "
+             @"foreground and paste",
+             @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
+  // 控制字符不是“输入的文字”：它们在应用里各有含义，派发前拒绝。
+  for (NSUInteger index = 0; index < text.length; index++) {
+    unichar unit = [text characterAtIndex:index];
+    if ((unit < 0x20 && unit != '\t' && unit != '\r' && unit != '\n') ||
+        unit == 0x7f || (unit >= 0x80 && unit <= 0x9f))
+      KCUAFail(@"invalid_request",
+               @"Background typing cannot send control characters other than "
+               @"tab and newlines",
+               @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
+    // 增补平面的字符（emoji 等）是一个代理对、两个 UTF-16 单元。Chromium 只把恰好一个单元的
+    // 按键当作按键字符：更长的交给输入法提交（RenderWidgetHostViewCocoa 合成 keyCode 229 的
+    // 假 keydown 再 ImeCommitText），不聚焦的后台窗口里这次提交被丢弃，什么也不会插入。
+    // 实测把代理对拆成两段只会插进半个代理项。所以派发前拒绝，不给应用送去残缺的内容。
+    if (CFStringIsSurrogateHighCharacter(unit) || CFStringIsSurrogateLowCharacter(unit))
+      KCUAFail(
+          @"foreground_required",
+          @"Background typing cannot enter emoji or other characters outside "
+          @"the Basic Multilingual Plane; set the value on the element, or "
+          @"bring the target window to the foreground and paste",
+          @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent",
+            @"reason_code" : @"supplementary_plane_character"});
+  }
+  text = KCUAScalarString(text, KCUABackgroundTypingLimit);
+  auto strokes = typingStrokes(text);
+  NSString *before = landingValue(target);
+  for (size_t index = 0; index < strokes.size(); index++) {
+    postStroke(target, strokes[index], op);
+    if (index || !before || !strokes[index].characters.length)
+      continue;
+    // 先发第一个字符并核对落点，值变了才发其余字符。不在非文本控件上连发按键：单个字母
+    // 在不少应用里就是快捷键。第一个按键是 Return / Tab 时没有值可核对。
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(400);
+    for (;;) {
+      KCUACheck(op);
+      KCUARequireDesktop();
+      NSString *after = landingValue(target);
+      if (!after || ![after isEqual:before])
+        break;
+      if (std::chrono::steady_clock::now() >= deadline)
+        textNotInserted(false);
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+    }
   }
 }
 static CGPoint pointParam(id value, CGRect allowed) {
@@ -745,8 +925,15 @@ id KCUAInput(NSString *method, NSDictionary *params, const KCUAOp &op) {
       [method isEqual:@"type_text_to_app"]) {
     if ([method isEqual:@"type_text_to_app"])
       KCUAPositionTyping(params, target, op);
-    KCUAPasteText(NSPasteboard.generalPasteboard, target, params[@"text"],
-                  params[@"format"] ?: @"text", op);
+    NSString *text = params[@"text"], *format = params[@"format"] ?: @"text";
+    // 派发前按目标是否在前台选定方式，派发后不改策略重试（见 typeBackgroundKeys）。
+    // paste 与带格式的 type 必须是粘贴，后台仍如实返回 foreground_required。
+    if (![method isEqual:@"paste"] && [format isEqual:@"text"] &&
+        NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier !=
+            target->pid)
+      typeBackgroundKeys(target, text, op);
+    else
+      KCUAPasteText(NSPasteboard.generalPasteboard, target, text, format, op);
   } else if ([method isEqual:@"press_key"] ||
            [method isEqual:@"press_key_to_app"] ||
            [method isEqual:@"hold_key"] ||

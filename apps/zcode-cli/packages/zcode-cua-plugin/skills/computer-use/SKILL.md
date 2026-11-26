@@ -129,9 +129,14 @@ read it only for an argument shape or response field this page does not give.
 
 Observe once, act, then observe again before deciding the next step.
 
-On macOS, `typeText` inserts exact plain text through clipboard-preserving paste,
-so the current input method does not rewrite punctuation. Default/`auto` scroll
-uses the window-scoped event backend; explicit `a11y` still requires native support.
+On macOS, `typeText` inserts exact plain text through clipboard-preserving paste
+while the target app is frontmost, so the current input method does not rewrite
+punctuation. Into a background app it sends the text one character at a time as
+key events: it stops after the first character if the focused field did not
+change, and it refuses emoji and other characters outside the Basic Multilingual
+Plane with `FOREGROUND_REQUIRED` and nothing sent — use `setValue` for those.
+Default/`auto` scroll uses the window-scoped event backend; explicit `a11y` still
+requires native support.
 
 `agent.computerUse.getApp(...)` binds an app and shows nothing; call `getAXState`
 when you need to see its state. Binding also launches it if not running; there is

@@ -52,3 +52,11 @@ test("paste receipt reports a focused field that never received the text", darwi
     /paste receipt reports a focused field that never received the text/,
   );
 });
+
+test("background typing sends one unicode key pair per scalar and gates on the first character", darwin, async () => {
+  await runFixture(
+    "text-background",
+    "text-background-native.mm",
+    /background typing sends one unicode key pair per scalar and gates on the first character/,
+  );
+});

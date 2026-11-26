@@ -1,9 +1,9 @@
 #import "../native/macos/automation.h"
 #include <ApplicationServices/ApplicationServices.h>
-#include <objc/runtime.h>
 #include <cassert>
 #include <map>
 #include <unistd.h>
+#include <objc/runtime.h>
 #include <vector>
 
 // 后台 type：目标不在前台时 ⌘V 不会被当作菜单快捷键（见 text-landing-native.mm），同一通道里
@@ -109,6 +109,24 @@ AXUIElementRef KCUAResolveElement(NSDictionary *, const KCUAOp &,
   assert(positioned);
   *owner = original;
   return (AXUIElementRef)CFRetain((__bridge CFTypeRef)fieldElement);
+}
+// 模拟 macOS 27.2.1 的行为：对不是辅助功能元素（非 __NSCFType 类链）的对象调用 AX API 会
+// SIGTRAP（M2 上的两次 Helper 崩溃就是这么来的；27.2.0 只返回错误码，复现不了）。
+static BOOL fixtureIsAXElement(id object) {
+  for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls))
+    if ([NSStringFromClass(cls) isEqualToString:@"__NSCFType"])
+      return YES;
+  return NO;
+}
+extern "C" AXError AXUIElementSetMessagingTimeout(AXUIElementRef element,
+                                                  float timeout) {
+  (void)timeout;
+  if (!fixtureIsAXElement((__bridge id)element)) {
+    fprintf(stderr, "fixture trap: AX call on %s\n",
+            NSStringFromClass([(__bridge id)element class]).UTF8String);
+    abort();
+  }
+  return kAXErrorSuccess;
 }
 extern "C" AXError AXUIElementSetAttributeValue(AXUIElementRef element,
                                                CFStringRef attribute,
@@ -358,6 +376,25 @@ int main(void) {
     scenario(NSNull.null, @"seed", @"seed", NO, NO);
     notInserted(@"ok");
     assert([shape() isEqual:@"0:o"]);
+    // children 里混入非元素条目（字符串）：跳过它，继续找到后面的真元素。旧实现把它当元素
+    // 传给 AX API，按 27.2.1 的行为直接 trap（上面桩成 abort，等价复现 M2 的两次崩溃）。
+    elementScript[@1000] = @{
+      (NSString *)kAXChildrenAttribute
+          : @[ @"junk-string", (__bridge id)node(3) ]
+    };
+    elementScript[@1003] = @{
+      (NSString *)kAXFocusedAttribute : @YES,
+      (NSString *)kAXChildrenAttribute : @[]
+    };
+    scenario(NSNull.null, @"seed", @"seedxy", NO, YES);
+    assert([type(@"ok") isEqual:accepted]);
+    assert([shape() isEqual:@"0:o 0:k"]);
+    assert(flushes >= 2);
+    elementScript[@1000] = @{
+      (NSString *)kAXChildrenAttribute
+          : @[ (__bridge id)node(2), (__bridge id)node(3) ]
+    };
+
     // 树里没有带焦点标记的元素：不核对，只报告派发。
     elementScript[@1003] = @{
       (NSString *)kAXFocusedAttribute : @NO,

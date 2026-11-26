@@ -1,5 +1,6 @@
 #import "automation.h"
 #import "text-contract.h"
+#import <objc/runtime.h>
 #include <chrono>
 #include <cmath>
 #include <fcntl.h>
@@ -391,25 +392,49 @@ static id appFocusedLanding(pid_t pid) {
     return focused;
   return nil;
 }
+// 修复原因（M2 2026-11-26 两次崩溃）：窗口树的 children 数组里可能混有不是辅助功能元素的条目
+// （纯 ObjC 对象）。把它当元素传给 AX API 在 macOS 27.2.1 上直接 trap
+// （AXUIElementSetMessagingTimeout → _AXUIElementValidate → CFGetTypeID → __CF_IS_OBJC，
+// SIGTRAP，Helper 进程退出，回合里的 type 全部失败）；27.2.0 只返回错误码，所以本机夹具
+// 复现不了。CFGetTypeID 在 27.2.1 上同样会 trap，不能用类型 ID 校验，只能用 ObjC 运行时判断
+// 类链：真实的辅助功能元素在 ObjC 运行时里是 __NSCFType（构建机 macOS 27.2 实测；元素进入
+// NSArray、被 ARC 持有都依赖这一点）。非元素的条目跳过并记录类名；判据若不成立（全部被跳过）
+// 只是找不到落点，回执退回只证明派发，不会崩溃。
+static BOOL KCUAIsAXElementObject(id object) {
+  for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls))
+    if ([NSStringFromClass(cls) isEqualToString:@"__NSCFType"])
+      return YES;
+  return NO;
+}
 static id searchLanding(const KCUATargetRef &target) {
   if (!target->window)
     return nil;
   auto deadline = std::chrono::steady_clock::now() + KCUALandingSearchBudget;
   // 深度优先：输入控件通常离窗口不远，宽度优先会先扫完整条工具栏。
   NSMutableArray *pending = [NSMutableArray arrayWithObject:(__bridge id)target->window];
+  NSInteger skipped = 0;
   for (NSInteger visited = 0;
        pending.count && visited < KCUALandingSearchLimit &&
        std::chrono::steady_clock::now() < deadline;
        visited++) {
-    AXUIElementRef node = (__bridge AXUIElementRef)pending.lastObject;
+    id item = pending.lastObject;
     [pending removeLastObject];
+    if (!KCUAIsAXElementObject(item)) {
+      skipped += 1;
+      // 有界记录：只记前 8 个，供事后核对混入的是什么。
+      if (skipped <= 8)
+        fprintf(stderr, "[landing] skip non-element child: %s\n",
+                NSStringFromClass(object_getClass(item)).UTF8String);
+      continue;
+    }
+    AXUIElementRef node = (__bridge AXUIElementRef)item;
     AXUIElementSetMessagingTimeout(node, 0.25);
     if ([KCUAAXAttribute(node, kAXFocusedAttribute)
              isEqual:(__bridge id)kCFBooleanTrue]) {
       id value = KCUAAXAttribute(node, kAXValueAttribute);
       if ([value isKindOfClass:NSString.class]) {
-        rememberLanding((__bridge id)node, target);
-        return (__bridge id)node;
+        rememberLanding(item, target);
+        return item;
       }
     }
     id children = KCUAAXAttribute(node, kAXChildrenAttribute);

@@ -20,6 +20,7 @@ static std::recursive_mutex liveLifecycleMutex;
 static std::atomic<bool> framePending{false};
 static std::atomic<bool> presentationSuspended{false};
 static void stopLive(void);
+static void createPip(void);
 static SCStream *pipStream;
 static id pipOutput;
 static NSString *activeSession;
@@ -73,8 +74,11 @@ static std::mutex presentationMutex;
   CGImageRelease(image);
   uint64_t generation = self.generation;
   dispatch_async(dispatch_get_main_queue(), ^{
-    if (generation == visualGeneration && pipPanel && !pipDismissed &&
+    if (generation == visualGeneration && !pipDismissed &&
         !presentationSuspended) {
+      // 面板在第一帧画面到达时才创建：没有画面的回合不建窗口，取流路径也不依赖 WindowServer。
+      if (!pipPanel)
+        createPip();
       pipImage.image = preview;
       if (!pipPanel.visible)
         [pipPanel orderFrontRegardless];
@@ -160,7 +164,6 @@ static void startLive(NSDictionary *target) {
   stopLive();
   __block uint64_t generation;
   mainSync(^{
-    createPip();
     generation = visualGeneration;
   });
   [SCShareableContent
@@ -244,8 +247,9 @@ void KCUAPresentationInitialize(bool pip, bool ghostCursor) {
 }
 void KCUAPresentationCapture(const KCUATargetRef &target,
                              NSDictionary *context) {
-  if (![KCUALeaseStatus()[@"is_owner"] boolValue])
-    return;
+  // 修复原因：这里原先要求 Helper 持有控制 lease 才登记目标。只读观察从不获取 lease，只做观察的
+  // 回合因此一直没有面板（M2 2026-11-26）。控制 lease 只用来串行化写操作，面板只读、不派发输入，
+  // 不构成额外的 controller，所以每个带回合上下文的观察都登记。
   presentationSuspended = false;
   if (!pipEnabled || ![context[@"session_id"] isKindOfClass:NSString.class] ||
       ![context[@"turn_id"] isKindOfClass:NSString.class])

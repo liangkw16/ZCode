@@ -395,7 +395,7 @@ sequenceDiagram
 
 macOS 上启动 Helper 的每条路径都带 `--pip-mode`，包括设置页只读探测拉起的常驻 Helper：它是进程级能力开关，之后的真实操作会复用同一进程，漏传则 PiP 握手返回 `version_mismatch`。握手不匹配的传输只禁用到当前回合结束，下一个 `turn-started` 重新握手一次；同一 socket 背后的 Helper 进程会在 Host 存活期间被替换。
 
-PiP 目标只在 Helper 持有控制 lease 时登记：只做观察、没有任何写操作的回合不出现面板。
+PiP 目标在回合内的每次观察（带 `pip_session_context` 的 `capture_app`）时登记，不以 Helper 持有控制 lease 为前提：只做观察、没有任何写操作的回合同样出现面板，画面是该会话最近观察到的窗口。控制 lease 只用来串行化写操作；面板只读，不派发输入，也不构成额外的 controller。面板在第一帧画面到达时才创建，没有画面的回合不建窗口。
 
 Helper 由回合内的首个 CUA 调用懒启动，而 `turn-started` 与带会话 id 的 `focus-changed` 都早于它。这两条没能送达的事件在回合内保持待补发，直到同一回合的 `turn-ended` / `session-closed`、新的 `turn-started` 或服务销毁；不设固定过期时间。凭据可用后先补 `turn-started`、再补最近一条 `focus-changed`，Helper 才同时有开着的回合和活动会话来承接随后的截图。
 

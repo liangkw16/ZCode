@@ -76,6 +76,7 @@ AXUIElementRef KCUAResolveElement(NSDictionary *, const KCUAOp &,
 }
 id KCUAAXAttribute(AXUIElementRef, CFStringRef) { return nil; }
 CGRect KCUAAXBounds(AXUIElementRef) { return CGRectZero; }
+void KCUAAXHitTest(pid_t, CGPoint) { assert(false); }
 void KCUABeginScopedFocus(const KCUATargetRef &, const KCUAOp &) {}
 void KCUAEndScopedFocus(void) {}
 void KCUAGhostHide(void) {}

@@ -80,6 +80,8 @@ id KCUAAXAttribute(AXUIElementRef element, CFStringRef attribute) {
   return [value isKindOfClass:NSNull.class] ? nil : value;
 }
 CGRect KCUAAXBounds(AXUIElementRef) { return CGRectZero; }
+// 粘贴路径不请求更新：值在前台窗口里是实时的。
+void KCUAAXHitTest(pid_t, CGPoint) { assert(false); }
 void KCUABeginScopedFocus(const KCUATargetRef &, const KCUAOp &) {}
 void KCUAEndScopedFocus(void) {}
 void KCUAGhostHide(void) {}

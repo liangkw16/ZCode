@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <map>
 #include <signal.h>
+#include <thread>
 #include <vector>
 
 id KCUAAXAttribute(AXUIElementRef element, CFStringRef attribute) {
@@ -28,6 +29,16 @@ CGRect KCUAAXBounds(AXUIElementRef element) {
   if (s && CFGetTypeID((__bridge CFTypeRef)s) == AXValueGetTypeID())
     AXValueGetValue((__bridge AXValueRef)s, kAXValueTypeCGSize, &size);
   return CGRectMake(position.x, position.y, size.width, size.height);
+}
+void KCUAAXHitTest(pid_t pid, CGPoint point) {
+  AXUIElementRef application = AXUIElementCreateApplication(pid);
+  AXUIElementSetMessagingTimeout(application, 0.25);
+  AXUIElementRef hit = nullptr;
+  if (AXUIElementCopyElementAtPosition(application, point.x, point.y, &hit) ==
+          kAXErrorSuccess &&
+      hit)
+    CFRelease(hit);
+  CFRelease(application);
 }
 static NSDictionary *rectJSON(CGRect r) {
   return @{
@@ -546,6 +557,7 @@ static NSArray *observeElements(const KCUATargetRef &target,
   pending.push_back({(__bridge id)target->window, 0});
   size_t payloadBytes = 0;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  bool requestedWebUpdates = false;
   while (!pending.empty() && flat.count < 2048 &&
          std::chrono::steady_clock::now() < deadline) {
     KCUACheck(op);
@@ -564,6 +576,21 @@ static NSArray *observeElements(const KCUATargetRef &target,
       if (payloadBytes > 1024 * 1024)
         break;
       [flat addObject:description];
+    }
+    // 修复原因：后台 Chromium 不随按键推送网页内容的更新，观察会读到输入之前的值（构建机
+    // Chrome 158 实测：后台 type 之后观察，输入框仍是输入前的内容，模型会以为没有输进去）。
+    // 网页内容的根是 AXWebArea：读到它时对应用元素在它的中心做一次命中测试，Chromium 处理
+    // 请求时会把待发的更新一并发出来（实测 12–17 毫秒后与页面一致），稍等再读它的子节点。
+    // 请求只读；没有网页内容的窗口不受影响。
+    if (!requestedWebUpdates && description &&
+        [description[@"role"] isEqual:@"AXWebArea"]) {
+      requestedWebUpdates = true;
+      CGRect bounds = KCUAAXBounds(item);
+      if (!CGRectIsEmpty(bounds)) {
+        KCUAAXHitTest(target->pid, CGPointMake(CGRectGetMidX(bounds),
+                                                CGRectGetMidY(bounds)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
     }
     if (node.depth >= 40)
       continue;

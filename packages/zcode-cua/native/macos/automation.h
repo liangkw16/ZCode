@@ -20,6 +20,9 @@ struct KCUATarget {
 using KCUATargetRef = std::shared_ptr<KCUATarget>;
 id KCUAAXAttribute(AXUIElementRef element, CFStringRef attribute);
 CGRect KCUAAXBounds(AXUIElementRef element);
+// 对应用元素做一次命中测试，结果丢弃。Chromium 处理这个请求时会把辅助功能树的待发更新发出来，
+// 后台窗口里按键不会触发这次发送。只读，不改焦点和选区。
+void KCUAAXHitTest(pid_t pid, CGPoint point);
 KCUATargetRef KCUAResolveTarget(NSDictionary *reference, const KCUAOp &op,
                                 bool allowLaunch);
 void KCUAValidateTarget(const KCUATargetRef &target,

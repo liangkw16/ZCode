@@ -20,14 +20,26 @@ static KCUATargetRef original;
 static NSPasteboard *fixtureBoard;
 static BOOL consumedOnDelivery;
 static NSInteger cancelAfter = -1;
-// 应用级焦点元素与它的值按读取顺序出队，用尽后重复最后一项；NSNull 表示读不到。
-static NSMutableArray *focusedScript, *valueScript;
-static NSUInteger focusedReads, valueReads;
+static NSUInteger flushes;
+// 目标应用里带焦点的文本框。value 是应用里的真实值，visible 是辅助功能读到的值：live 时两者
+// 一致（AppKit）；否则要等应用发出待发的更新（后台 Chromium），也就是 KCUAAXHitTest 之后。
+// readable 为 NO 时读不到值。accepts 为 NO 时按键进不了输入框（只读、校验拒绝等）。
+// losesValue 时第一次输入之后它不再是值为字符串的控件（按键被当成了快捷键）。
+static struct {
+  BOOL live, readable, accepts, losesValue;
+  NSString *value, *visible;
+} field;
+// 应用级焦点元素：NSNull 表示读不到。fieldElement 是落点控件对应的元素，previousElement 是
+// “上一个焦点控件”的元素。
+static id focusedElement;
+static id fieldElement, previousElement;
+// 应用报告的焦点元素可能还是上一次更新时的那个：4 号节点是“上一个焦点控件”，flipAfterFlush
+// 表示第几次更新请求之后焦点报告才换成真正的落点（0 表示一直不变）。
+static NSString *previousValue;
+static NSInteger flipAfterFlush;
+static BOOL positioned;
 // 窗口树里的节点：用不同的 pid 造出不同的 AX 元素，按 pid 查它各属性的应答。
 static NSMutableDictionary<NSNumber *, NSDictionary *> *elementScript;
-// 节点的值也可以按读取顺序出队；没有脚本的节点每次都返回同一个值。
-static NSMutableDictionary<NSNumber *, NSMutableArray *> *elementValueScript;
-static std::map<pid_t, NSUInteger> elementValueReads;
 static NSMutableArray *elementRefs;
 
 extern "C" void CGEventPostToPid(pid_t pid, CGEventRef event) {
@@ -35,15 +47,28 @@ extern "C" void CGEventPostToPid(pid_t pid, CGEventRef event) {
   UniChar units[8] = {};
   UniCharCount count = 0;
   CGEventKeyboardGetUnicodeString(event, 8, &count, units);
-  deliveries.push_back({CGEventGetType(event),
-                        (CGKeyCode)CGEventGetIntegerValueField(
-                            event, kCGKeyboardEventKeycode),
-                        CGEventGetFlags(event),
-                        [NSString stringWithCharacters:units length:count]});
-  // ⌘V 送达即模拟目标应用读取剪贴板，原因见 paste-transaction-native.mm。
-  if (fixtureBoard && CGEventGetType(event) == kCGEventKeyDown)
+  CGKeyCode key = (CGKeyCode)CGEventGetIntegerValueField(
+      event, kCGKeyboardEventKeycode);
+  CGEventFlags flags = CGEventGetFlags(event);
+  NSString *text = [NSString stringWithCharacters:units length:count];
+  deliveries.push_back({CGEventGetType(event), key, flags, text});
+  if (CGEventGetType(event) != kCGEventKeyDown)
+    return;
+  if (key == 9 && (flags & kCGEventFlagMaskCommand)) {
+    // ⌘V 送达即模拟目标应用读取剪贴板，原因见 paste-transaction-native.mm。
     consumedOnDelivery =
         [[fixtureBoard stringForType:NSPasteboardTypeString] isEqual:@"payload"];
+    text = [fixtureBoard stringForType:NSPasteboardTypeString] ?: @"";
+  } else if (!text.length)
+    // Return、Tab 这类纯键位在输入框里插入的字符。
+    text = key == 36 ? @"\n" : key == 48 ? @"\t" : @"";
+  if (!field.accepts || !text.length)
+    return;
+  field.value = [field.value stringByAppendingString:text];
+  if (field.live)
+    field.visible = field.value;
+  if (field.losesValue)
+    field.readable = NO;
 }
 NSString *KCUAProcessBirth(pid_t pid) {
   return pid == original->pid ? original->birth : nil;
@@ -79,9 +104,19 @@ KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
   verified->bounds = original->bounds;
   return verified;
 }
-AXUIElementRef KCUAResolveElement(NSDictionary *, const KCUAOp &, KCUATargetRef *) {
-  assert(false);
-  return nullptr;
+AXUIElementRef KCUAResolveElement(NSDictionary *, const KCUAOp &,
+                                  KCUATargetRef *owner) {
+  assert(positioned);
+  *owner = original;
+  return (AXUIElementRef)CFRetain((__bridge CFTypeRef)fieldElement);
+}
+extern "C" AXError AXUIElementSetAttributeValue(AXUIElementRef element,
+                                               CFStringRef attribute,
+                                               CFTypeRef value) {
+  (void)value;
+  assert(element == (__bridge AXUIElementRef)fieldElement &&
+         CFEqual(attribute, kAXFocusedAttribute));
+  return kAXErrorSuccess;
 }
 static AXUIElementRef node(NSInteger number) {
   return AXUIElementCreateApplication((pid_t)(1000 + number));
@@ -91,31 +126,25 @@ id KCUAAXAttribute(AXUIElementRef element, CFStringRef attribute) {
   pid_t pid = 0;
   AXUIElementGetPid(element, &pid);
   NSString *name = (__bridge NSString *)attribute;
-  if (pid == 1001) {
-    // 应用级焦点元素的值按读取顺序出队。
-    assert(CFEqual(attribute, kAXValueAttribute));
-    id value = valueScript[MIN(valueReads, valueScript.count - 1)];
-    valueReads += 1;
-    return value;
-  }
   if (pid != original->pid) {
-    if ([name isEqual:(__bridge NSString *)kAXValueAttribute] &&
-        elementValueScript[@(pid)]) {
-      NSMutableArray *script = elementValueScript[@(pid)];
-      NSUInteger &reads = elementValueReads[pid];
-      id value = script[MIN(reads, script.count - 1)];
-      reads += 1;
-      return value;
-    }
+    if ([name isEqual:(__bridge NSString *)kAXValueAttribute])
+      return pid == 1004 ? previousValue
+                         : (field.readable ? field.visible : NSNull.null);
     return elementScript[@(pid)][name];
   }
   // 应用级只问焦点元素。
   assert(CFEqual(attribute, kAXFocusedUIElementAttribute));
-  id focused = focusedScript[MIN(focusedReads, focusedScript.count - 1)];
-  focusedReads += 1;
-  return focused;
+  return focusedElement;
 }
-CGRect KCUAAXBounds(AXUIElementRef) { return CGRectZero; }
+CGRect KCUAAXBounds(AXUIElementRef) { return CGRectMake(10, 20, 30, 40); }
+void KCUAAXHitTest(pid_t pid, CGPoint point) {
+  assert(pid == original->pid);
+  assert(point.x == 25 && point.y == 40);
+  flushes += 1;
+  field.visible = field.value;
+  if (flipAfterFlush && flushes >= flipAfterFlush)
+    focusedElement = fieldElement;
+}
 void KCUABeginScopedFocus(const KCUATargetRef &, const KCUAOp &) {}
 void KCUAEndScopedFocus(void) {}
 void KCUAGhostHide(void) {}
@@ -145,6 +174,8 @@ static NSDictionary *type(NSString *text, NSString *method = @"type_text_to_app"
   NSMutableDictionary *params = [@{ @"text" : text } mutableCopy];
   if (format)
     params[@"format"] = format;
+  if (positioned)
+    params[@"focus_native"] = @"tok";
   NSDictionary *result = KCUAInput(method, params, op);
   KCUAInputCleanup(op);
   return result;
@@ -167,11 +198,18 @@ static void assertPairs(void) {
     assert([down.text isEqual:up.text]);
   }
 }
-static void scenario(id focused, NSArray *values) {
-  focusedScript = [NSMutableArray arrayWithObject:focused];
-  valueScript = [NSMutableArray arrayWithArray:values];
-  focusedReads = valueReads = 0;
-  elementValueReads.clear();
+// visible 为 nil 表示读不到落点的值；它与 value 不同模拟应用里有待发的更新。
+// withPositioning：输入带定位元素；stalePrevious：焦点报告先指向 4 号控件，staleAfter 次
+// 更新请求之后才换成落点。
+static void scenario(id focused, NSString *visible, NSString *value, BOOL live,
+                     BOOL accepts, BOOL withPositioning = NO,
+                     NSString *stalePrevious = nil, NSInteger staleAfter = 0) {
+  focusedElement = stalePrevious ? previousElement : focused;
+  previousValue = stalePrevious;
+  flipAfterFlush = stalePrevious ? staleAfter : 0;
+  positioned = withPositioning;
+  field = {live, visible != nil, accepts, NO, [value copy], [visible copy]};
+  flushes = 0;
   deliveries.clear();
   cancelAfter = -1;
   consumedOnDelivery = NO;
@@ -183,6 +221,19 @@ static void assertNotInserted(NSException *error) {
   assert([error.userInfo[@"action_sent"] isEqual:@YES]);
   assert([error.userInfo[@"dispatch_status"] isEqual:@"possibly_sent"]);
   assert([error.userInfo[@"reason_code"] isEqual:@"text_insertion_not_observed"]);
+}
+static NSException *notInserted(NSString *text,
+                                NSString *method = @"type_text_to_app") {
+  auto op = operation();
+  NSMutableDictionary *params = [@{ @"text" : text } mutableCopy];
+  if (positioned)
+    params[@"focus_native"] = @"tok";
+  NSException *error = capture(^{
+    KCUAInput(method, params, op);
+  });
+  KCUAInputCleanup(op);
+  assertNotInserted(error);
+  return error;
 }
 static void assertRejected(NSException *error) {
   assert(error && [error.name isEqual:@"invalid_request"]);
@@ -199,60 +250,96 @@ int main(void) {
     original->windowId = 17;
     original->bounds = CGRectMake(100, 200, 400, 500);
     original->window = node(0);
-    AXUIElementRef focusedElement = node(1);
+    fieldElement = (__bridge id)node(1);
+    previousElement = (__bridge id)node(4);
     elementScript = [NSMutableDictionary dictionary];
-    elementValueScript = [NSMutableDictionary dictionary];
     elementRefs = [NSMutableArray array];
-    for (AXUIElementRef item : { original->window, focusedElement, node(2), node(3) })
+    for (AXUIElementRef item :
+         { original->window, (__bridge AXUIElementRef)fieldElement, node(2),
+           node(3), (__bridge AXUIElementRef)previousElement })
       [elementRefs addObject:(__bridge id)item];
     fixtureBoard = [NSPasteboard pasteboardWithUniqueName];
     method_setImplementation(
         class_getClassMethod(NSPasteboard.class, @selector(generalPasteboard)),
         imp_implementationWithBlock(^id(id) { return fixtureBoard; }));
-    id focusedId = (__bridge id)focusedElement;
+    id focusedId = fieldElement;
 
     // 读不到落点：不核对，只报告派发。每个 Unicode 标量一对不带修饰键的按键：emoji 的代理对
     // 整对发出；\r\n 合成一次 Return，\t 是 Tab。剪贴板不被接管。
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, nil, @"", NO, NO);
     assert([type(@"ab你\r\nx\ty😀") isEqual:accepted]);
     assert([shape() isEqual:@"0:a 0:b 0:你 36: 0:x 48: 0:y 0:😀"]);
     assertPairs();
+    assert(flushes == 0);
     // 孤立的代理项不是一个字符：按 U+FFFD 发出去，不把半个代理对送进应用。
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, nil, @"", NO, NO);
     assert([type([NSString stringWithCharacters:(UniChar[]){ 0xD83D } length:1]) isEqual:accepted]);
     assert([shape() isEqual:@"0:\uFFFD"]);
     assert([[fixtureBoard stringForType:NSPasteboardTypeString] isEqual:@"user-old"]);
 
     // 首字进了输入框：值变了，其余字符照发。
-    scenario(focusedId, @[ @"", @"h" ]);
+    scenario(focusedId, @"", @"", YES, YES);
     assert([type(@"hello") isEqual:accepted]);
     assert([shape() isEqual:@"0:h 0:e 0:l 0:l 0:o"]);
     assertPairs();
 
     // 首字没进输入框：停在这里，如实报告没有落地，不把余下按键连发出去。
-    scenario(focusedId, @[ @"", @"" ]);
-    auto op = operation();
-    assertNotInserted(capture(^{
-      KCUAInput(@"type_text_to_app", @{ @"text" : @"hello" }, op);
-    }));
-    KCUAInputCleanup(op);
+    scenario(focusedId, @"", @"", YES, NO);
+    notInserted(@"hello");
     assert([shape() isEqual:@"0:h"]);
     // 值没变就算没落地，即使它本来就包含这个字符。
-    scenario(focusedId, @[ @"h", @"h" ]);
-    op = operation();
-    assertNotInserted(capture(^{
-      KCUAInput(@"type_text_to_app", @{ @"text" : @"hello" }, op);
-    }));
-    KCUAInputCleanup(op);
+    scenario(focusedId, @"h", @"h", YES, NO);
+    notInserted(@"hello");
     assert([shape() isEqual:@"0:h"]);
 
     // 首字是 Return：没有值可核对，直接发完。
-    scenario(focusedId, @[ @"" ]);
+    scenario(focusedId, @"", @"", YES, YES);
     assert([type(@"\nab") isEqual:accepted]);
     assert([shape() isEqual:@"36: 0:a 0:b"]);
 
+    // 后台 Chromium 式的应用：按键改了值，但要等应用发出待发的更新才读得到。基线取更新
+    // 之后的值，首字之后要再请求一次；首字确实进了输入框才算落地。
+    scenario(focusedId, @"seed", @"seedxy", NO, YES);
+    assert([type(@"hello") isEqual:accepted]);
+    assert([shape() isEqual:@"0:h 0:e 0:l 0:l 0:o"]);
+    assert(flushes >= 2);
+    // 请求让值变了一次，那不是首字落地的证据：输入框不接收按键就停在这里。
+    scenario(focusedId, @"seed", @"seedxy", NO, NO);
+    notInserted(@"hello");
+    assert([shape() isEqual:@"0:h"]);
+    assert(flushes >= 1);
+    scenario(focusedId, @"seed", @"seed", NO, NO);
+    notInserted(@"hello");
+    assert([shape() isEqual:@"0:h"]);
+
+    // 首字之后读不到值（按键被当成了快捷键，焦点离开文本控件）：不算落地。
+    scenario(focusedId, @"", @"", YES, YES);
+    field.losesValue = YES;
+    notInserted(@"hello");
+    assert([shape() isEqual:@"0:h"]);
+
+    // 焦点报告滞后（一）：输入带定位元素。应用报告的焦点元素先是别的控件，第二次更新请求之后
+    // 才换成落点。基线和核对都读定位的元素：输入框不接收按键就停在这里，不被别的控件的值
+    // 骗过去。
+    scenario(focusedId, @"ro", @"ro", YES, NO, YES, @"", 2);
+    notInserted(@"hello");
+    assert([shape() isEqual:@"0:h"]);
+    scenario(focusedId, @"", @"", YES, YES, YES, @"seed", 2);
+    assert([type(@"hello") isEqual:accepted]);
+    assert([shape() isEqual:@"0:h 0:e 0:l 0:l 0:o"]);
+
+    // 焦点报告滞后（二）：没有定位元素。基线取自别的控件，核对途中焦点元素变了：以它重新取
+    // 基线，下一个字符再核对。输入框不接收按键时多发了一个字符就停。
+    scenario(focusedId, @"ro", @"ro", YES, NO, NO, @"", 2);
+    notInserted(@"hello");
+    assert([shape() isEqual:@"0:h 0:e"]);
+    // 输入框能输入：字符都留下，回执 accepted。
+    scenario(focusedId, @"", @"", YES, YES, NO, @"", 2);
+    assert([type(@"hello") isEqual:accepted]);
+    assert([shape() isEqual:@"0:h 0:e 0:l 0:l 0:o"]);
+
     // 应用级没有焦点元素时，在目标窗口的树里找带焦点标记、值为字符串的元素；
-    // 0 号节点没有焦点，访问顺序是先子后孙，第 3 号才命中。
+    // 0 号节点没有焦点，访问顺序是先子后孙，第 3 号才命中。更新请求落在找到的元素上。
     elementScript[@1000] = @{
       (NSString *)kAXChildrenAttribute : @[ (__bridge id)node(2), (__bridge id)node(3) ]
     };
@@ -264,31 +351,27 @@ int main(void) {
       (NSString *)kAXFocusedAttribute : @YES,
       (NSString *)kAXChildrenAttribute : @[]
     };
-    elementValueScript[@1003] = [NSMutableArray arrayWithArray:@[ @"seed", @"seeda" ]];
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, @"seed", @"seedok", NO, YES);
     assert([type(@"ok") isEqual:accepted]);
     assert([shape() isEqual:@"0:o 0:k"]);
-    elementValueScript[@1003] = [NSMutableArray arrayWithArray:@[ @"seed", @"seed" ]];
-    scenario(NSNull.null, @[]);
-    op = operation();
-    assertNotInserted(capture(^{
-      KCUAInput(@"type_text_to_app", @{ @"text" : @"ok" }, op);
-    }));
-    KCUAInputCleanup(op);
+    assert(flushes >= 2);
+    scenario(NSNull.null, @"seed", @"seed", NO, NO);
+    notInserted(@"ok");
     assert([shape() isEqual:@"0:o"]);
     // 树里没有带焦点标记的元素：不核对，只报告派发。
     elementScript[@1003] = @{
       (NSString *)kAXFocusedAttribute : @NO,
       (NSString *)kAXChildrenAttribute : @[]
     };
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, @"seed", @"seed", NO, YES);
     assert([type(@"ok") isEqual:accepted]);
     assert([shape() isEqual:@"0:o 0:k"]);
+    assert(flushes == 0);
 
     // 中途取消：已发出的按键算已派发，后面的不再发。
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, nil, @"", NO, NO);
     cancelAfter = 4;
-    op = operation();
+    auto op = operation();
     NSException *error = capture(^{
       KCUAInput(@"type_text_to_app", @{ @"text" : @"abcdef" }, op);
     });
@@ -299,7 +382,7 @@ int main(void) {
     assert(deliveries.size() == 4);
 
     // 超长和控制字符在派发前拒绝。
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, nil, @"", NO, NO);
     assertRejected(capture(^{
       type([@"a" stringByPaddingToLength:2049 withString:@"a" startingAtIndex:0]);
     }));
@@ -316,7 +399,7 @@ int main(void) {
       return [NSRunningApplication currentApplication];
     }));
     original->pid = getpid();
-    scenario(focusedId, @[ @"", @"ab" ]);
+    scenario(focusedId, @"", @"", YES, YES);
     assert([type(@"ab") isEqual:accepted]);
     assert([shape() isEqual:@"9:"]);
     assert(deliveries[0].flags & kCGEventFlagMaskCommand);
@@ -325,15 +408,11 @@ int main(void) {
     method_setImplementation(frontmost, previous);
 
     // paste 工具必须是粘贴：不在前台也不改成按键，没有落地时如实报告。
-    scenario(focusedId, @[ @"", @"" ]);
-    op = operation();
-    assertNotInserted(capture(^{
-      KCUAInput(@"paste", @{ @"text" : @"ab", @"format" : @"text" }, op);
-    }));
-    KCUAInputCleanup(op);
+    scenario(focusedId, @"", @"", YES, NO);
+    notInserted(@"ab", @"paste");
     assert([shape() isEqual:@"9:"]);
     // 带格式的 type 同样只能是粘贴。
-    scenario(NSNull.null, @[]);
+    scenario(NSNull.null, nil, @"", NO, NO);
     assert([type(@"ab", @"type_text_to_app", @"md") isEqual:accepted]);
     assert([shape() isEqual:@"9:"]);
 

@@ -53,7 +53,8 @@ KCUATargetRef KCUAResolveInputReleaseTarget(pid_t pid, NSString *birth,
   verified->bounds = original->bounds;
   return verified;
 }
-static AXUIElementRef element = (AXUIElementRef)0x1234;
+// 真实的辅助功能元素（本进程的 application 元素）：定位的元素会被记为本次输入的落点并保留引用。
+static AXUIElementRef element = AXUIElementCreateApplication(getpid());
 AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &,
                                   KCUATargetRef *owner) {
   NSString *token = params[@"native"];
@@ -68,6 +69,7 @@ AXUIElementRef KCUAResolveElement(NSDictionary *params, const KCUAOp &,
 }
 id KCUAAXAttribute(AXUIElementRef, CFStringRef) { return nil; }
 CGRect KCUAAXBounds(AXUIElementRef) { return CGRectMake(110, 210, 200, 100); }
+void KCUAAXHitTest(pid_t, CGPoint) { assert(false); }
 void KCUABeginScopedFocus(const KCUATargetRef &, const KCUAOp &) {}
 void KCUAEndScopedFocus(void) {}
 void KCUAGhostHide(void) {}

@@ -350,37 +350,48 @@ void KCUAInputCleanup(const KCUAOp &op) {
     }
   }
 }
-// 粘贴与后台逐字符输入的落点是应用里带焦点的文本控件，这里返回它当前的值；读不到（没有
-// 这样的控件、不支持 AXValue、不是字符串）返回 nil。先取应用的焦点元素；Chromium 在后台
-// 不提供应用级焦点元素，这时在目标窗口的辅助功能树里找带焦点标记、值为字符串的节点，
-// 查找有节点数和时间上限。每次调用只读一次值。
+// 粘贴与后台逐字符输入的落点是应用里带焦点的文本控件。landingElement 返回这个元素，找不到
+// 返回 nil；landingValue 返回它当前的值，读不到（没有这样的控件、不支持 AXValue、不是字符串）
+// 返回 nil。带定位元素的输入（focus_native / click_native）以定位的元素为落点；其余情况先取
+// 应用的焦点元素，取不到时在目标窗口的辅助功能树里找带焦点标记、值为字符串的节点，查找有
+// 节点数和时间上限。定位的元素和树里找到的元素按目标记到本次操作结束：落地核对会反复读值，
+// 不必每次重走一遍树。
 // 经 KCUAAXAttribute 读取，回归用例按同一入口替换。
 static constexpr NSInteger KCUALandingSearchLimit = 240;
 static constexpr auto KCUALandingSearchBudget = std::chrono::milliseconds(150);
-// 窗口树里找到的元素按目标缓存到本次操作结束：落地核对会反复读值，不必每次重走一遍树。
 static KCUATargetRef landingOwner;
-static AXUIElementRef landingCached = nullptr;
+static id landingKnown;
+// 基线是从哪个元素读的。没有定位元素时应用的焦点报告可能滞后（见 typeBackgroundKeys），
+// 核对途中要拿它和当前读到的元素比。
+static id landingBaseline;
 static void forgetLanding(void) {
-  if (landingCached)
-    CFRelease(landingCached);
-  landingCached = nullptr;
+  landingKnown = nil;
+  landingBaseline = nil;
   landingOwner.reset();
 }
-static NSString *landingValue(const KCUATargetRef &target) {
-  auto read = [](AXUIElementRef element) -> NSString * {
-    id value = KCUAAXAttribute(element, kAXValueAttribute);
-    return [value isKindOfClass:NSString.class] ? value : nil;
-  };
-  if (landingCached && landingOwner &&
-      landingOwner->pid == target->pid &&
-      landingOwner->windowId == target->windowId)
-    return read(landingCached);
-  AXUIElementRef app = AXUIElementCreateApplication(target->pid);
+static bool ownsLanding(const KCUATargetRef &target) {
+  return landingKnown && landingOwner &&
+         landingOwner->pid == target->pid &&
+         landingOwner->windowId == target->windowId;
+}
+static void rememberLanding(id element, const KCUATargetRef &target) {
+  landingKnown = element;
+  landingOwner = target;
+}
+// 同一个辅助功能元素每次取到的是不同的引用，按 CFEqual 比较。
+static bool sameLanding(id a, id b) {
+  return a && b && CFEqual((__bridge CFTypeRef)a, (__bridge CFTypeRef)b);
+}
+static id appFocusedLanding(pid_t pid) {
+  AXUIElementRef app = AXUIElementCreateApplication(pid);
   AXUIElementSetMessagingTimeout(app, 0.25);
   id focused = KCUAAXAttribute(app, kAXFocusedUIElementAttribute);
   CFRelease(app);
   if (focused && CFGetTypeID((__bridge CFTypeRef)focused) == AXUIElementGetTypeID())
-    return read((__bridge AXUIElementRef)focused);
+    return focused;
+  return nil;
+}
+static id searchLanding(const KCUATargetRef &target) {
   if (!target->window)
     return nil;
   auto deadline = std::chrono::steady_clock::now() + KCUALandingSearchBudget;
@@ -393,13 +404,12 @@ static NSString *landingValue(const KCUATargetRef &target) {
     AXUIElementRef node = (__bridge AXUIElementRef)pending.lastObject;
     [pending removeLastObject];
     AXUIElementSetMessagingTimeout(node, 0.25);
-    if ([KCUAAXAttribute(node, kAXFocusedAttribute) isEqual:(__bridge id)kCFBooleanTrue]) {
-      NSString *value = read(node);
-      if (value) {
-        forgetLanding();
-        landingCached = (AXUIElementRef)CFRetain(node);
-        landingOwner = target;
-        return value;
+    if ([KCUAAXAttribute(node, kAXFocusedAttribute)
+             isEqual:(__bridge id)kCFBooleanTrue]) {
+      id value = KCUAAXAttribute(node, kAXValueAttribute);
+      if ([value isKindOfClass:NSString.class]) {
+        rememberLanding((__bridge id)node, target);
+        return (__bridge id)node;
       }
     }
     id children = KCUAAXAttribute(node, kAXChildrenAttribute);
@@ -409,6 +419,78 @@ static NSString *landingValue(const KCUATargetRef &target) {
         [pending addObject:list[index]];
   }
   return nil;
+}
+static id landingElement(const KCUATargetRef &target) {
+  if (ownsLanding(target))
+    return landingKnown;
+  if (id focused = appFocusedLanding(target->pid))
+    return focused;
+  return searchLanding(target);
+}
+static NSString *elementValue(id element) {
+  if (!element)
+    return nil;
+  id value =
+      KCUAAXAttribute((__bridge AXUIElementRef)element, kAXValueAttribute);
+  return [value isKindOfClass:NSString.class] ? value : nil;
+}
+static NSString *landingValue(const KCUATargetRef &target) {
+  return elementValue(landingElement(target));
+}
+// 修复原因：落地核对要读到应用当前的值。后台 Chromium 不随按键推送输入控件值的更新，值停在
+// 上一次它自己发出待发更新的时候（给控件设辅助功能焦点会触发），直接读会把旧值当成基线，或者
+// 读不到刚输入的首字，核对就不再是落地的证据（构建机 Chrome 158 实测：每次操作结束后读到的
+// 多行框的值都是输入之前的）。Chromium 处理命中测试时会把待发的更新一并发出来：对应用元素
+// 在落点中心做一次命中测试，实测 12–17 毫秒后值与页面一致，光标不动；只读的属性请求、对
+// 控件自身做命中测试都不会触发。请求只读，AppKit 的值本来就是实时的，不受影响。
+static void refreshLanding(id element, pid_t pid) {
+  if (!element)
+    return;
+  CGRect bounds = KCUAAXBounds((__bridge AXUIElementRef)element);
+  if (!CGRectIsEmpty(bounds))
+    KCUAAXHitTest(pid,
+                  CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds)));
+}
+static void pauseLanding(void) {
+  // worker 线程的 run loop 没有源，CFRunLoopRunInMode 会立刻返回；这里要真的等一等。
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+// 基线：发出更新请求后等值不再因它变化，并把读基线的元素记在 landingBaseline。值变了说明
+// 待发的更新已到；到上限仍没变，说明本来就没有待发的更新（实测 12–17 毫秒到），以请求前的
+// 值为准，元素取最后一次读到的。中间读不到值时同样以请求前的值为准，首字之后的核对会把它
+// 拦下来。没有定位元素时，更新请求也会让滞后的焦点报告换成真正的落点：读到的元素变了，即使
+// 值恰好相同也以新元素为准，再等一轮。
+static constexpr auto KCUALandingSettle = std::chrono::milliseconds(60);
+static NSString *settledLandingValue(const KCUATargetRef &target,
+                                     const KCUAOp &op) {
+  id element = landingElement(target);
+  NSString *stale = elementValue(element);
+  if (!stale)
+    return nil;
+  refreshLanding(element, target->pid);
+  auto started = std::chrono::steady_clock::now();
+  auto deadline = started + KCUALandingSettle;
+  for (;;) {
+    KCUACheck(op);
+    pauseLanding();
+    id current = landingElement(target);
+    NSString *value = elementValue(current);
+    auto now = std::chrono::steady_clock::now();
+    if (value && ![value isEqual:stale]) {
+      landingBaseline = current;
+      return value;
+    }
+    // 焦点报告来回变时不能一直等下去：总时长有上限。
+    if (!sameLanding(current, element) &&
+        now < started + 5 * KCUALandingSettle) {
+      element = current;
+      deadline = now + KCUALandingSettle;
+    } else if (now >= deadline) {
+      landingBaseline = current;
+      return stale;
+    }
+    landingBaseline = current;
+  }
 }
 // 文本已派发、落点元素的值却没变：如实报告没有落地，不报告成 accepted。
 [[noreturn]] static void textNotInserted(bool foreground) {
@@ -615,14 +697,13 @@ static void postStroke(const KCUATargetRef &target, const TypingStroke &stroke,
 }
 static void typeBackgroundKeys(const KCUATargetRef &target, NSString *text,
                                const KCUAOp &op) {
-  forgetLanding();
   if (![text isKindOfClass:NSString.class])
     KCUAFail(@"invalid_request", @"Typing requires text", @{@"action_sent" : @NO});
   if (text.length > KCUABackgroundTypingLimit)
     KCUAFail(@"invalid_request",
              @"Background typing is limited to 2048 UTF-16 units; set the "
-             @"value on the element, or bring the target window to the "
-             @"foreground and paste",
+             "value on the element, or bring the target window to the "
+             "foreground and paste",
              @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
   // 控制字符不是“输入的文字”：它们在应用里各有含义，派发前拒绝。
   for (NSUInteger index = 0; index < text.length; index++) {
@@ -631,29 +712,52 @@ static void typeBackgroundKeys(const KCUATargetRef &target, NSString *text,
         unit == 0x7f || (unit >= 0x80 && unit <= 0x9f))
       KCUAFail(@"invalid_request",
                @"Background typing cannot send control characters other than "
-               @"tab and newlines",
+               "tab and newlines",
                @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
   }
   text = KCUAScalarString(text, KCUABackgroundTypingLimit);
   auto strokes = typingStrokes(text);
-  NSString *before = landingValue(target);
+  NSString *before = settledLandingValue(target, op);
+  bool verify = before != nil;
   for (size_t index = 0; index < strokes.size(); index++) {
     postStroke(target, strokes[index], op);
-    if (index || !before || !strokes[index].characters.length)
+    // 先发第一个带字符的按键并核对落点，值变了才发其余字符。不在非文本控件上连发按键：
+    // 单个字母在不少应用里就是快捷键。Return / Tab 不带字符，直接发。
+    if (!verify || !strokes[index].characters.length)
       continue;
-    // 先发第一个字符并核对落点，值变了才发其余字符。不在非文本控件上连发按键：单个字母
-    // 在不少应用里就是快捷键。第一个按键是 Return / Tab 时没有值可核对。
+    verify = false;
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(400);
+    auto nextRefresh = std::chrono::steady_clock::time_point::min();
     for (;;) {
       KCUACheck(op);
       KCUARequireDesktop();
-      NSString *after = landingValue(target);
-      if (!after || ![after isEqual:before])
+      id element = landingElement(target);
+      if (std::chrono::steady_clock::now() >= nextRefresh) {
+        refreshLanding(element, target->pid);
+        nextRefresh = std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds(40);
+        pauseLanding();
+        element = landingElement(target);
+      }
+      // 修复原因：没有定位元素时，应用报告的焦点元素本身也可能还是上一次更新时的那个。基线
+      // 取自别的控件，值不同不能算这个字符落了地（构建机 Chrome 158 实测：给只读框输入时基线
+      // 取自上一个控件，回执成了 accepted）。焦点元素变了就以它重新取基线，下一个字符再核对。
+      if (!sameLanding(element, landingBaseline)) {
+        before = settledLandingValue(target, op);
+        // 焦点元素已经不是值为字符串的控件：首字没有落在文本框里。
+        if (!before)
+          textNotInserted(false);
+        verify = true;
+        break;
+      }
+      // 首字之后读不到值（焦点离开文本控件）同样不算落地。
+      NSString *after = elementValue(element);
+      if (after && ![after isEqual:before])
         break;
       if (std::chrono::steady_clock::now() >= deadline)
         textNotInserted(false);
-      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+      pauseLanding();
     }
   }
 }
@@ -707,6 +811,9 @@ void KCUAPositionTyping(NSDictionary *params, const KCUATargetRef &target,
                @{@"action_sent" : @NO, @"dispatch_status" : @"not_sent"});
     KCUACheck(op);
     KCUARequireDesktop();
+    // 修复原因：定位的元素就是这次输入的落点，落地核对读它，不再去找“应用当前的焦点元素”。
+    // 修复前核对按应用报告的焦点元素取基线，而后台 Chromium 的焦点报告也是滞后的：给控件设
+    // 焦点之后一段时间里仍返回上一个控件（构建机 Chrome 158 实测，几毫秒到上百毫秒不定）。
     if (focus) {
       op->dispatched = true;
       AXError error = AXUIElementSetAttributeValue(
@@ -718,6 +825,7 @@ void KCUAPositionTyping(NSDictionary *params, const KCUATargetRef &target,
                    @"dispatch_status" : @"possibly_sent",
                    @"ax_error" : @(error)
                  });
+      rememberLanding((__bridge id)element, target);
       return;
     }
     // 显式事件路径：按元素当前的位置点击定位，不改动辅助功能焦点。
@@ -727,7 +835,7 @@ void KCUAPositionTyping(NSDictionary *params, const KCUATargetRef &target,
                @{@"action_sent" : @NO});
     clickOnce(target, CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds)),
               op);
-    return;
+    rememberLanding((__bridge id)element, target);
   }
   if (pointValue)
     clickOnce(target, pointParam(pointValue, target->bounds), op);

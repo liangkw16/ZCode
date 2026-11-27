@@ -37,10 +37,10 @@ import {
   restoreWorkspaceFileRewindEntries,
 } from "./workspace-checkpoint-persistence.js";
 import { mainTurnCacheHitAggregateFromMessages } from "./turn-model-step-usage.js";
-import { refreshRestoredAnnouncements } from "./context-refresh.js";
 import { loadPromptSnapshot } from "../helpers/prompt-snapshot.js";
 import { stageSessionStartContext } from "./hooks.js";
 import { collectPreviousRuntimeAgentInterruptions } from "./background-notifications.js";
+import { isSubagentDispatchToolName } from "../../tool/compat.js";
 
 /**
  * fork 子会话在 fork 提示之后还没有输入时，SessionStart 用 fork，之后用 resume。
@@ -116,6 +116,7 @@ export async function resumeFromStore(
     (await this.sessionStore.messages({
       sessionID: this.sessionId,
     }));
+  this.transcriptAgentOutputFiles = transcriptAgentOutputFiles(messages);
   const rewindTargetMessageId = session.revert?.targetMessageID;
   const rewindCreatedMessageId = session.revert?.createdMessageID;
   const rewindKeptMessageIds = session.revert?.keptMessageIDs;
@@ -149,7 +150,7 @@ export async function resumeFromStore(
       : undefined;
   }
   resetProjectMemoryRecall(this);
-  this.messageHistory = new MessageHistoryImpl();
+  this.messageHistory = new MessageHistoryImpl(() => this.now().getTime());
   this.contextBuilder = null;
   this.contextInitialized = false;
   // 修复原因：bootstrap 复用同一个 runtime 再次恢复时，原因还停在上一次 compaction；
@@ -189,7 +190,6 @@ export async function resumeFromStore(
     rewindKeptMessageIds,
     rewindTargetMessageId,
   });
-  refreshRestoredAnnouncements(this);
   const activeMessages = activeSessionMessages(messages, {
     branchCutAfterMessageId,
     rewindCreatedMessageId,
@@ -413,6 +413,24 @@ function hasRestoredTitleEvent(
     const payload = event.payload as { source?: unknown; title?: unknown };
     return payload.title === title && payload.source === source;
   });
+}
+
+/**
+ * 父 transcript 的 Agent part 记下的 agentId → 输出文件，冷恢复后 SendMessage 按它找子代理（只在内存里，不多一次 IO）。
+ * 用全部消息而不是 active 分支：compact 之前、rewind 掉的 agent 也收进来，与进程内 registry 不按分支过滤一致。
+ */
+function transcriptAgentOutputFiles(messages: readonly MessageWithParts[]): Map<string, string> {
+  const outputFiles = new Map<string, string>();
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== "tool" || !isSubagentDispatchToolName(part.tool)) continue;
+      const { agentId, outputFile } = (part.metadata ?? {}) as Record<string, unknown>;
+      if (typeof agentId === "string" && typeof outputFile === "string") {
+        outputFiles.set(agentId, outputFile);
+      }
+    }
+  }
+  return outputFiles;
 }
 
 function extractPersistedEnvInfo(messages: MessageWithParts[]): EnvInfo | undefined {

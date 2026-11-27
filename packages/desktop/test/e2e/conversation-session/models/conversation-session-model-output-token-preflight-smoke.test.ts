@@ -1,11 +1,15 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+// kcode 断言残留：token 预算提醒默认关闭，捕获的请求 JSON 不应再出现该块。
+function totalTokensReminders(requestJson: string): string[] {
+  return requestJson.match(/<total_tokens>[^<]*<\/total_tokens>/gu) ?? [];
+}
 import { ESTIMATED_TOKEN_CHAR_DIVISOR } from "@zcode/shared";
 import { clearAppData, DEFAULT_WORKSPACE, getE2EAppDataPaths } from "#e2e/helpers/desktop-app";
 import { restartIntoWorkspacePreservingProfile } from "#e2e/helpers/model-provider-restart-runtime";
 import { selectUpstreamProviderModelById } from "#e2e/helpers/upstream-provider";
 import { waitForSelectedModel } from "#e2e/helpers/model-provider-restart";
-import { totalTokensReminders } from "#e2e/helpers/total-tokens-evidence";
 import type {
   E2ENetworkCaptureArtifact,
   E2ENetworkCaptureRecord,
@@ -19,7 +23,8 @@ import {
 
 const PROVIDER_ID = "output-token-preflight-e2e";
 const PROVIDER_NAME = "Output Token Preflight E2E";
-const COMPACT_SUMMARY_MAX_OUTPUT_TOKENS = 20_000;
+// 摘要上限等于 Auto Compact reserve：64K/48K 与 200K/128K 两个场景都是 21K。
+const COMPACT_SUMMARY_MAX_OUTPUT_TOKENS = 21_000;
 const PREFLIGHT_BUFFER = 1_000;
 type MessageLengthRange = readonly [minimum: number, maximum: number];
 const BASE_MESSAGE_LENGTH_RANGES = [
@@ -149,7 +154,7 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     expect(completedSessionId).toBe(sessionId);
 
     const request = await waitForCapturedRequest({ latestUserMarker: marker });
-    expect(totalTokensReminders(request.record.requestJson)).toEqual([]);
+    expect(totalTokensReminders(String(request.record.requestJson))).toEqual([]);
     const maxTokens = readMaxTokens(request.record);
     expect(maxTokens).toBeGreaterThan(0);
     expect(maxTokens).toBeLessThanOrEqual(scenario.baselineMaxOutputTokens);
@@ -162,7 +167,7 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     });
     assertCommonDecision(decision, "below_threshold", scenario);
     // provider fixture 给出已覆盖上一轮 assistant 的精确 context usage；生产 estimator
-    // 移除虚拟余额后只叠加本轮 user。日志中的 tokenCount 会被归档脱敏，
+    // 只叠加本轮 user（token 预算提醒默认关闭，同轮没有提醒行）。日志中的 tokenCount 会被归档脱敏，
     // 因此 wire cap 应从这组同源输入独立计算，不能依赖脱敏日志反推。
     const estimatedCurrentUsage = estimateUsageBeforeTurn(scenario, turn, messageLengths[index]!);
     const expectedMaxTokens = Math.min(
@@ -221,7 +226,6 @@ async function runSmokeScenario(scenario: SmokeScenario): Promise<void> {
     sessionId,
   });
   assertCommonDecision(compactDecision, undefined, scenario);
-  // 真实 usage 加当前用户输入必须独立跨过阈值，不依赖虚拟提醒凑足输入长度。
   expect(
     estimateUsageBeforeTurn(scenario, finalTurn, messageLengths[finalTurn - 1]!),
   ).toBeGreaterThanOrEqual(scenario.threshold);

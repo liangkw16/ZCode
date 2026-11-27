@@ -20,7 +20,8 @@ const run = (args) =>
 test("source producer builds its public protocol without recovery artifacts", async () => {
   const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
   assert.notEqual(manifest.zcodeCuaPlaceholder, true, "source producer is still a placeholder");
-  assert.equal(Object.keys(manifest.exports).length, 12);
+  // kcode 侧新增 ./broker/in-process 公开入口（合并 v4.0.0 分支时带入），总数 12 → 13。
+  assert.equal(Object.keys(manifest.exports).length, 13);
   assert.equal(manifest.zcodeCuaProducer.protocol, 3);
   const built = await run(["scripts/build.mjs", "--typescript-only"]);
   assert.equal(built.code, 0, built.output);

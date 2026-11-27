@@ -27,7 +27,7 @@ import type { Model } from "../deps.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { isCompactSummaryOutputLimitError } from "./compact-active-helpers.js";
 import { autoCompactDecisionLogContext } from "./compact-log-context.js";
-import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
+import { resolveAutoCompactPolicyConfig } from "./model-token-limits.js";
 import type {
   AutoCompactLoopContext,
   AutoCompactOutcome,
@@ -194,23 +194,13 @@ export async function autoCompactIfNeeded(
 ): Promise<AutoCompactOutcome> {
   throwIfTurnAborted(abortSignal);
 
-  // 组装点按实际执行模型解析 modelOverrides（子代理用自己的身份走同一路径）；
-  // 未设置字段剔除、结果剥离覆盖表，公式不变。
-  const {
-    config,
-    source: compactPolicySource,
-    matched: compactModelOverrideMatched,
-  } = applyCompactModelOverrides(
-    {
-      contextWindow: context.model.properties.contextWindow,
-      ...this.config.compact,
-      maxOutputTokens: resolveNormalRequestMaxOutputTokens({
-        modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
-      }),
-      modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
-    },
-    { providerId: context.model.providerId, modelId: context.model.modelId },
-  );
+  // 与 autoCompactIfNeeded 共用按实际执行模型解析的组装方式：先取上游统一的策略基座，
+  // 再叠加 kcode 的 modelOverrides（micro 默认阈值由模型级 auto 阈值派生）。
+  const { config: config, source: compactPolicySource, matched: compactModelOverrideMatched } =
+    applyCompactModelOverrides(
+      resolveAutoCompactPolicyConfig(this, context.model),
+      { providerId: context.model.providerId, modelId: context.model.modelId },
+    );
   const activeEntries = context.turnRequestState.entries;
   const activeProjection = buildRuntimeProviderRequestMessages(this, {
     entries: activeEntries,

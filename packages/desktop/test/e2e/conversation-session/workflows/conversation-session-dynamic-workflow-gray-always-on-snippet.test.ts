@@ -160,8 +160,7 @@ async function waitForToolResult(toolCallId: string): Promise<UpstreamToolResult
     { timeout: 90000, timeoutMsg: `${toolCallId} 的工具结果没有回到模型请求里` },
   );
   // 虚拟余额移除后直接检查完整工具结果，避免清洗掩盖多余附件。
-  return result as unknown as UpstreamToolResultSnapshot;
-}
+  return result as unknown as UpstreamToolResultSnapshot;}
 
 /** 模型面的返回值段：序列化方式与完成通知相同（带缩进），按值比较。 */
 function returnValueOf(content: string): unknown {

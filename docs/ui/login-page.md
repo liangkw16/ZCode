@@ -63,7 +63,7 @@ API Key 登录表单在输入框为空时于右侧展示 `Get API Key` 外链入
 
 外链必须通过 `IPlatformService.openExternal()` 打开，保持桌面端 shell 和 Web 端 `window.open` 行为一致。输入框仍保留密码类型和回车提交能力，链接按钮只负责跳转获取密钥，不参与保存流程。
 
-API Key 登录表单的取消按钮底部展示“跳过”链接按钮。跳过只写入当前选择 provider 对应的 `providerFamilyDomain`、`providerFamilyDomainUpdatedAt` 和 `providerFamilyDomainMigrated`，用于确认 Z.ai / BigModel 运行域；它不保存 API Key、不触发 API Key 登录成功事件，也不修改 `modelProviderFamilyModes`。
+API Key 登录表单的取消按钮底部展示“跳过”链接按钮。跳过只写入当前选择 provider 对应的 `providerFamilyDomain`、`providerFamilyDomainUpdatedAt` 和 `providerFamilyDomainMigrated`，用于确认 Z.ai / BigModel 运行域；它不保存 API Key、不触发 API Key 登录成功事件，也不修改 `modelProviderFamilyModes`。跳过写入的运行域只是登录前的选择：之后 OAuth 登录的账号用不了该 family、且该 family 没有保存过连接选择时（例如跳过选 Z.ai 后用国内入口登录），登录完成和启动恢复会改为账号可用的 family，规则见 [登录方案](../zcode-login-rework.md) 中“当前账号用不了、且没有保存过连接选择的 `providerFamilyDomain`”一条。
 
 点击“继续”时，表单先验证非空 API Key 和可用模板，再通过设置服务确认所选运行域，随后由 Provider Settings 服务保存个人 Provider。两个步骤成功后才关闭欢迎页。保存 Provider 失败时，已确认的运行域仍可用于重试，启动门禁继续依据 Registry 检查模型可用性。退出重启后，同一配置应直接打开工作区并使用已保存的 Provider。
 

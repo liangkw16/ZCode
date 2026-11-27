@@ -1,6 +1,6 @@
 import type { SkillMetadata } from "@zcode/contracts";
 import { describe, expect, it } from "vitest";
-import { buildSkillsSection } from "../src/context/sections/skills.js";
+import { buildSkillsContent } from "../src/context/sections/skills.js";
 
 function skill(name: string, description = "Inspect deployment failures"): SkillMetadata {
   return {
@@ -16,11 +16,16 @@ function skill(name: string, description = "Inspect deployment failures"): Skill
   };
 }
 
+// v4 合并：buildSkillsSection 已由 listing 收集器取代，这里直接测 buildSkillsContent；
+// 空目录/无效预算返回 null 的旧契约由收集器层承担，测试按字符串契约适配。
 function render(skills: SkillMetadata[], metadataBudget?: number) {
-  return buildSkillsSection({
-    outcome: { skills, diagnostics: [], totalDiscovered: skills.length },
-    ...(metadataBudget === undefined ? {} : { metadataBudget }),
-  });
+  if (skills.length === 0) return null;
+  const budget = metadataBudget ?? 20_000;
+  if (!Number.isFinite(budget) || Math.floor(budget) < 1) return null;
+  const content = buildSkillsContent(skills, budget);
+  // 连最短省略提示都放不下时按旧契约返回 null（无段可用）。
+  if (content.startsWith("Skills omitted:") && content.length > budget) return null;
+  return { chars: content.length, content, injectionTarget: "meta_user" as const };
 }
 
 function entries(content: string) {

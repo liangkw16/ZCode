@@ -13,7 +13,6 @@ import {
   prepareIncomingMessageCapability,
 } from "#e2e/helpers/incoming-message-capability";
 import { assertAppendOnly, assertPlainUserInput } from "#e2e/helpers/incoming-message-evidence";
-import { totalTokensReminders } from "#e2e/helpers/total-tokens-evidence";
 import {
   E2E_READONLY_TOOL_FILE_CONTENT,
   ensureReadonlyToolFixtureFile,
@@ -101,7 +100,7 @@ describe("会话区修饰键单条 delivery E2E", () => {
   }
 
   for (const { label, mcs } of INCOMING_MESSAGE_MODES) {
-    it(`M06k ${label}：工具结果后 Cmd/Ctrl+Enter 抢占，新消息是普通用户文本，已发出的内容原样保留`, async function () {
+    it(`M06k ${label}：工具结果后 Cmd/Ctrl+Enter 抢占，新消息是普通用户文本且不改写已发出的工具结果`, async function () {
       this.timeout(TEST_TIMEOUT_MS);
       await prepareIncomingMessageCapability(mcs, "queue");
       await ensureReadonlyToolFixtureFile();
@@ -141,9 +140,8 @@ describe("会话区修饰键单条 delivery E2E", () => {
         excludes: [marker, "Generate a concise title"],
       });
       expect(heldRequest).toBeDefined();
-      // 移除虚拟余额后，不再先清洗请求来容忍历史变化：已发出的内容必须原样保留。
-      expect(totalTokensReminders(heldRequest!.requestJson)).toEqual([]);
-      expect(totalTokensReminders(evidence[0]!.requestJson)).toEqual([]);
+      // 被抢占的那次请求已发出的 tool_result 原样保留，新请求只在末尾追加。
+      // token 预算提醒默认关闭，请求里没有会随新一轮移动的提醒。
       assertAppendOnly(heldRequest!.requestJson, evidence[0]!.requestJson);
       expect((await getQueueItems()).some((item) => item.content.includes(marker))).toBe(false);
       const userRows = (await getV4Messages("user")).filter((message) =>

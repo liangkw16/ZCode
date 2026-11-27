@@ -1,9 +1,12 @@
 import {
   COMPACT_PROMPT_TOO_LONG_USER_MESSAGE,
+  hasCompactSummaryBlock,
+  selectCompactSummaryText,
   CoreErrorType,
   SessionEventType,
   isCoreError,
   MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+  getAutoCompactOutputReserveTokens,
   createCoreError,
   formatCompactSummary,
   traceContextToLogContext,
@@ -37,6 +40,7 @@ import {
   resumeStoredSessionEventPublication,
   type SessionEventSinkFailure,
 } from "./events.js";
+import { isOutputTokenLimitFinishReason } from "./turn-output-token-continuation.js";
 
 const COMPACT_SUMMARY_OUTPUT_LIMIT_REASON = "compact_summary_output_limit";
 
@@ -131,6 +135,38 @@ export function createCompactContextExceededFinishError(
   });
 }
 
+/**
+ * 摘要成功但以输出上限结束时记 warn，摘要仍按原逻辑落库。
+ * 修复原因：有正文的 length 曾被当作普通成功，未闭合的 <summary> 原样落库且没有任何日志，
+ * 线上只能靠抓包发现。判定与 Output-limit Continue 相同（normalized length 或 raw max_tokens 等）。
+ * 合并自上游 v4.0.0：与 kcode 的 createCompactSummaryOutputLimitError 重试链互补——
+ * 先按 kcode 链路重试更短的摘要；重试后仍超限时由此处告警并接受截断落库。
+ */
+export function warnCompactSummaryOutputLimit(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  context: { maxOutputTokens: number; traceContext: TraceContext; trigger: CompactTrigger },
+): void {
+  const rawFinishReason = readRawFinishReason(result.providerMetadata);
+  if (!isOutputTokenLimitFinishReason(result.finishReason, rawFinishReason)) return;
+
+  runtime.logger?.warn("Compact summary hit the output limit; the summary may be truncated", {
+    ...traceContextToLogContext(context.traceContext),
+    event: "compact.summary.output_limit",
+    finishReason: result.finishReason,
+    module: "core.runtime",
+    // 日志脱敏按键名匹配 token；这些数量不是凭据，用不含 token 的键名，线上才能判断预算是否够用。
+    outputBudget: {
+      limit: context.maxOutputTokens,
+      output: result.usage.outputTokens,
+      reasoning: result.usage.reasoningTokens,
+    },
+    rawFinishReason,
+    textLength: result.text.length,
+    trigger: context.trigger,
+  });
+}
+
 export async function persistCompactTimelineEvent(
   runtime: AgentRuntimeInternal,
   type: SessionEventType,
@@ -168,24 +204,22 @@ export function buildCompactSummaryRequestMessages(
 export function formatCompactSummaryOrThrow(
   runtime: AgentRuntimeInternal,
   result: RuntimeModelTextResult,
+  traceContext?: TraceContext,
 ): string {
   const compactToolCalls = runtime.extractToolCallsFromResult(result);
   if (compactToolCalls.length > 0) {
-    throw createCoreError(CoreErrorType.ModelError, COMPACT_TOOL_USE_DENIAL_MESSAGE, {
-      context: {
-        behavior: "deny",
-        decisionReason: {
-          reason: COMPACT_TOOL_USE_DENIAL_REASON,
-          type: "other",
-        },
-        toolNames: compactToolCalls.map((toolCall) => toolCall.name),
-      },
-      recoverable: true,
-      retryable: false,
+    runtime.logger?.info("Compact summary reply called tools; ignoring them", {
+      ...(traceContext ? traceContextToLogContext(traceContext) : {}),
+      event: "compact.summary.tool_calls_ignored",
+      module: "core.runtime",
+      toolNames: compactToolCalls.map((toolCall) => toolCall.name),
     });
   }
 
-  const summary = formatCompactSummary(result.text);
+  const text = selectCompactSummaryText(result);
+  // 带工具调用时，选出的块里没有摘要就不用它（例如调用工具前的开场白），按没有摘要失败。
+  const usable = compactToolCalls.length === 0 || hasCompactSummaryBlock(text);
+  const summary = usable ? formatCompactSummary(text) : "";
   if (!summary) {
     throw createCoreError(CoreErrorType.ModelError, "Failed to generate compact summary", {
       recoverable: true,
@@ -260,10 +294,13 @@ export function capCompactSummaryMaxOutputTokens(
   config: AutoCompactPolicyConfig | undefined,
 ): number {
   const configured = config?.summaryMaxOutputTokens;
+  // 合并自上游 v4：未显式配置 summaryMaxOutputTokens 时，摘要上限取 Auto Compact 输出预留
+  // （触发压缩时这部分窗口正好留给摘要，大窗口按窗口比例加大），不再固定 20K。
+  // 不按 usage 估算剩余窗口：截断旧轮或剥离媒体后重试时，留下的旧 usage 已过期，会算错上限。
   const summaryCap =
     typeof configured === "number" && Number.isFinite(configured) && configured > 0
       ? Math.floor(configured)
-      : MAX_OUTPUT_TOKENS_FOR_SUMMARY;
+      : getAutoCompactOutputReserveTokens(config);
   // Compact 是独立执行链，在这里显式选择模型上限与 summary 上限中的较小值。
   const desired = Math.min(
     resolveNormalRequestMaxOutputTokens({

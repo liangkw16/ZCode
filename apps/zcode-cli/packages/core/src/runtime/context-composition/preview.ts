@@ -121,7 +121,7 @@ function simulateRequestEntries(
   if (toolSearch) entries.push(toolSearch);
   const agentListing = collectRuntimeAgentListing(runtime, entries, tools);
   if (agentListing) entries.push(agentListing);
-  const skillsListing = collectSkillsListing(runtime, entries, contextResult);
+  const skillsListing = collectSkillsListing(runtime, entries, tools);
   if (skillsListing) entries.push(skillsListing);
   // 预览与实际请求使用相同的会话类型和完整候选表；deferred 工具尚未曝光不代表不可用。
   const modeReminder = buildRuntimeModeReminderBodyForTask(entries, {

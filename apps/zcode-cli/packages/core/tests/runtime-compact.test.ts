@@ -1,3 +1,4 @@
+import { createMockMcpPort } from "./mcp-runtime-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { createTestModelSelection } from "./test-model-selection.js";
 import { createTestModelFormatProperties } from "./test-runtime-model.js";
@@ -49,6 +50,7 @@ import {
   COMPACT_PROMPT_TOO_LONG_RETRY_MARKER,
   estimateMessageTokens,
   formatCompactSummary,
+  selectCompactSummaryText,
 } from "../src/compact/index.js";
 import {
   realUserRuntimeMetadata,
@@ -64,6 +66,7 @@ import {
   toTokenUsageInfo,
 } from "../src/runtime/helpers/index.js";
 import { createToolRegistry } from "../src/tool/registry.js";
+import { InMemoryRuntimeTaskRegistry } from "../src/runtime-task/registry.js";
 import { createReadFileStatePathKey } from "../src/tool/read-file-state.js";
 import type { ReadFileStateEntry, ReadFileStateMap } from "../src/tool/types.js";
 import { estimateCurrentModelInputTokens } from "../src/runtime/methods/compact.js";
@@ -132,9 +135,13 @@ function withStreamTextFromGenerateText<
       }
 
       if (result.text) {
-        yield { id: "test-text", type: "text_start" };
-        yield { id: "test-text", text: result.text, type: "text_delta" };
-        yield { id: "test-text", type: "text_end" };
+        const textBlocks = result.textBlocks ?? [{ type: "text" as const, text: result.text }];
+        for (const [index, block] of textBlocks.entries()) {
+          const id = index === 0 ? "test-text" : `test-text-${index}`;
+          yield { id, type: "text_start" };
+          if (block.text) yield { id, text: block.text, type: "text_delta" };
+          yield { id, type: "text_end" };
+        }
       }
       for (const toolCall of result.toolCalls ?? []) {
         yield { toolCall, type: "tool_call" };
@@ -411,6 +418,28 @@ describe("runtime compact helpers", () => {
     );
   });
 
+  it.each([
+    { blocks: ["<summary>A</summary>", "B"], expected: "Summary:\nA" },
+    { blocks: ["B", "<summary>A</summary>"], expected: "Summary:\nA" },
+    { blocks: ["A", "B"], expected: "B" },
+    { blocks: ["<summary>A</summary>", "<summary>C</summary>"], expected: "Summary:\nC" },
+    { blocks: ["<summary>A</summary>", ""], expected: "Summary:\nA" },
+    { blocks: ["A", ""], expected: "" },
+    // <summary> 拆在两个块里时只用含开标签的那块，没有闭标签就不替换。
+    { blocks: ["<summary>A", "B</summary>"], expected: "<summary>A" },
+  ])("selects one summary text block from $blocks", ({ blocks, expected }) => {
+    const textBlocks = blocks.map((text) => ({ type: "text" as const, text }));
+    expect(
+      formatCompactSummary(selectCompactSummaryText({ text: blocks.join(""), textBlocks })),
+    ).toBe(expected);
+  });
+
+  it("selects the whole summary text when the result has no text blocks", () => {
+    expect(selectCompactSummaryText({ text: "<summary>A</summary>B" })).toBe(
+      "<summary>A</summary>B",
+    );
+  });
+
   it("formats compact summaries and continuation messages with the fixed continuation shape", () => {
     expect(formatCompactSummary("<analysis>scratch</analysis><summary>abc</summary>")).toBe(
       "Summary:\nabc",
@@ -575,9 +604,9 @@ describe("AgentRuntime manual compact", () => {
     );
 
     await runtime.executeTurn("first manual compact prefix setup");
-    // 改语言会在轮次之外重建前缀；这时没有 model，默认按 MCS 文案。
+    // 改 output style 会在轮次之外重建前缀；这时没有 model，默认按 MCS 文案。
     // /compact 进入轮次后先按本轮 Model 重建前缀，再用同一个 Model 摘要。
-    runtime.updateConfig({ language: "Chinese" });
+    runtime.updateConfig({ outputStyle: undefined });
     await runtime.executeTurn("/compact");
     await runtime.executeTurn("after compact");
 
@@ -626,7 +655,8 @@ describe("AgentRuntime manual compact", () => {
     await runtime.executeTurn("second compact thinking setup");
     await runtime.executeTurn("/compact");
 
-    expect(requests.find((request) => request.isCompact)?.maxOutputTokens).toBe(20_000);
+    // 摘要上限等于 Auto Compact reserve：min(默认 32K, max(21K, 200K × 8%)) = 21K。
+    expect(requests.find((request) => request.isCompact)?.maxOutputTokens).toBe(21_000);
   });
 
   it("runs compact stream-first, links the non-stream fallback, and keeps the stream hidden", async () => {
@@ -1996,8 +2026,9 @@ describe("AgentRuntime manual compact", () => {
         .at(-1)
         ?.map((message) => message.content)
         .join("\n") ?? "";
+    // 调用说明和结果是两条 user 侧提醒（这里按消息用换行拼接）。
     const restoredHeader = (path: string) =>
-      `Called the Read tool with the following input: ${JSON.stringify({ file_path: path })}\nResult of calling the Read tool:\n`;
+      `Called the Read tool with the following input: ${JSON.stringify({ file_path: path })}\n</system-reminder>\n<system-reminder>\nResult of calling the Read tool:\n`;
 
     // 补回的是磁盘上的当前内容；范围记录也补回整个文件。
     expect(
@@ -2305,9 +2336,11 @@ describe("AgentRuntime manual compact", () => {
         resumedRuntime as unknown as { readFileState: Map<string, unknown> }
       ).readFileState;
       // 补回正文仍在上下文中，读取快照必须同行恢复；外部修改不能被重新认证为已读。
+      // v4 合并：持久化快照改为只存 contentSha256（见 read-file-state-content-hash.test.ts），
+      // 冷恢复记录不再带 content；stale-guard 用哈希比较，行为不变。
       expect(resumedReadFileState.size).toBe(1);
       expect(resumedReadFileState.get(createReadFileStatePathKey(filePath))).toMatchObject({
-        content: "export const persisted = 42;\n",
+        contentSha256: expect.any(String),
         revisionId: "revision:export const persisted = 42;\n",
       });
       const edit = await resumedRuntime.getToolExecutor().execute({
@@ -2894,82 +2927,143 @@ describe("AgentRuntime manual compact", () => {
     expect(boundary?.lastSummarizedMessageId).toBe(lastAssistantBeforeResume);
   });
 
-  it("rejects compact summaries that try to call tools", async () => {
-    const sessionId = createSessionId("runtime-compact-tool-call");
-    const eventStore = createTestSessionEventStore();
-    const toolRegistry = createToolRegistry();
-    let requestCount = 0;
-    let compactToolExecuted = false;
-
-    toolRegistry.register({
-      inputSchema: {},
-      metadata: {
-        concurrentSafe: true,
-        destructive: false,
-        name: "BadCompactTool",
-        needsApproval: false,
-        readOnly: true,
-        riskLevel: "low",
-        sideEffectScope: "none",
+  it.each([
+    {
+      caseId: "text-and-tool-call",
+      summary: "Summary:\nA",
+      reply: {
+        finishReason: "tool-calls",
+        text: "<summary>A</summary>B",
+        textBlocks: [
+          { type: "text" as const, text: "<summary>A</summary>" },
+          { type: "text" as const, text: "B" },
+        ],
+        toolCalls: [{ id: "bad-read", name: "BadCompactTool", input: {} }],
       },
-      handler: async () => {
-        compactToolExecuted = true;
-        return "should not execute";
+    },
+    {
+      // 只有开标签、但开标签在行首时算有摘要（闭标签可能在被截断的后一块里）。
+      caseId: "line-start-open-tag-and-tool-call",
+      summary: "<summary>\nA",
+      reply: {
+        finishReason: "tool-calls",
+        text: "<summary>\nA",
+        textBlocks: [{ type: "text" as const, text: "<summary>\nA" }],
+        toolCalls: [{ id: "bad-read", name: "BadCompactTool", input: {} }],
       },
-    });
+    },
+    {
+      caseId: "tool-call-only",
+      summary: undefined,
+      reply: {
+        finishReason: "tool-calls",
+        text: "",
+        toolCalls: [{ id: "bad-read", name: "BadCompactTool", input: {} }],
+      },
+    },
+    {
+      // 调用工具前的开场白不是摘要：接受它会用一句话替换整段历史。
+      caseId: "preamble-and-tool-call",
+      summary: undefined,
+      reply: {
+        finishReason: "tool-calls",
+        text: "Let me read the file first.",
+        textBlocks: [{ type: "text" as const, text: "Let me read the file first." }],
+        toolCalls: [{ id: "bad-read", name: "BadCompactTool", input: {} }],
+      },
+    },
+  ])(
+    "does not run tools called by the compact summary reply ($caseId)",
+    async ({ caseId, summary, reply }) => {
+      const sessionId = createSessionId(`runtime-compact-tool-call-${caseId}`);
+      const eventStore = createTestSessionEventStore();
+      const toolRegistry = createToolRegistry();
+      const info = vi.fn();
+      const logger = { child: () => logger, debug: vi.fn(), error: vi.fn(), info, warn: vi.fn() };
+      let requestCount = 0;
+      let compactToolExecuted = false;
+      let postCompactRequest = "";
 
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { systemPrompt: "You are a compact test agent." },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory(
-          withStreamTextFromGenerateText({
-            async generateText(request) {
-              requestCount++;
-              const lastContent = providerContentToText(request.messages.at(-1)?.content);
-              if (lastContent.includes("create a detailed summary")) {
-                expect(request.tools?.some((tool) => tool.name === "BadCompactTool")).toBe(true);
+      toolRegistry.register({
+        inputSchema: {},
+        metadata: {
+          concurrentSafe: true,
+          destructive: false,
+          name: "BadCompactTool",
+          needsApproval: false,
+          readOnly: true,
+          riskLevel: "low",
+          sideEffectScope: "none",
+        },
+        handler: async () => {
+          compactToolExecuted = true;
+          return "should not execute";
+        },
+      });
+
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        { systemPrompt: "You are a compact test agent." },
+        {
+          eventStore,
+          logger,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                requestCount++;
+                const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                if (lastContent.includes("create a detailed summary")) {
+                  expect(request.tools?.some((tool) => tool.name === "BadCompactTool")).toBe(true);
+                  return { ...reply, usage: { inputTokens: 10, outputTokens: 0, totalTokens: 10 } };
+                }
+                postCompactRequest = request.messages
+                  .map((message) => providerContentToText(message.content))
+                  .join("\n");
                 return {
-                  finishReason: "tool-calls",
-                  text: "",
-                  toolCalls: [{ id: "bad-read", name: "BadCompactTool", input: {} }],
-                  usage: { inputTokens: 10, outputTokens: 0, totalTokens: 10 },
+                  finishReason: "stop",
+                  text: `normal response ${requestCount}`,
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
                 };
-              }
-              return {
-                finishReason: "stop",
-                text: `normal response ${requestCount}`,
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            },
-          }) as never,
-        ),
-        toolRegistry,
-      },
-    );
+              },
+            }) as never,
+          ),
+          toolRegistry,
+        },
+      );
 
-    await runtime.executeTurn("first compact tool-call setup");
-    await runtime.executeTurn("second compact tool-call setup");
-    await expect(runtime.executeTurn("/compact")).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        context: expect.objectContaining({
-          decisionReason: {
-            reason: "compaction agent should only produce text summary",
-            type: "other",
-          },
+      await runtime.executeTurn("first compact tool-call setup");
+      await runtime.executeTurn("second compact tool-call setup");
+      if (summary === undefined) {
+        // 没有可用的摘要时失败，手动压缩只尝试 1 次。
+        await expect(runtime.executeTurn("/compact")).rejects.toMatchObject({
+          cause: expect.objectContaining({
+            message: "Failed to generate compact summary",
+            type: CoreErrorType.ModelError,
+          }),
+          message: "Compact failed",
+        });
+      } else {
+        await runtime.executeTurn("/compact");
+        await runtime.executeTurn("after compact with tool call");
+        // 摘要用最后一个含 <summary> 的文本块，后面的 B 不进入摘要。
+        expect(postCompactRequest).toContain(summary);
+        expect(postCompactRequest).not.toContain("Summary:\nAB");
+      }
+
+      const events = await eventStore.getEvents(sessionId);
+      expect(compactToolExecuted).toBe(false);
+      expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(
+        summary !== undefined,
+      );
+      expect(info).toHaveBeenCalledWith(
+        "Compact summary reply called tools; ignoring them",
+        expect.objectContaining({
+          event: "compact.summary.tool_calls_ignored",
           toolNames: ["BadCompactTool"],
         }),
-        message: "Tool use is not allowed during compaction",
-        type: CoreErrorType.ModelError,
-      }),
-      message: "Compact failed",
-    });
-
-    const events = await eventStore.getEvents(sessionId);
-    expect(compactToolExecuted).toBe(false);
-    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
-  });
+      );
+    },
+  );
 
   it.each([
     {
@@ -2979,7 +3073,8 @@ describe("AgentRuntime manual compact", () => {
     },
     {
       caseId: "OTB03",
-      expectedSummaryMaxOutputTokens: 20_000,
+      // 摘要上限等于 Auto Compact reserve：min(64K, max(21K, 200K × 8%)) = 21K。
+      expectedSummaryMaxOutputTokens: 21_000,
       modelMaxOutputTokens: 64_000,
     },
   ])(
@@ -3026,6 +3121,153 @@ describe("AgentRuntime manual compact", () => {
       await runtime.executeTurn("/compact");
 
       expect(maxOutputTokens).toEqual([expectedSummaryMaxOutputTokens]);
+    },
+  );
+
+  it("uses the auto compact reserve for every compact summary attempt regardless of provider usage", async () => {
+    const compactMaxOutputTokens: Array<number | undefined> = [];
+    let compactAttempts = 0;
+    const logger = {
+      child: () => logger,
+      debug: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+    const runtime = createTestAgentRuntime(
+      createSessionId("runtime-compact-summary-reserve"),
+      {
+        // 关闭 Auto Compact，usage 才能越过 907K 阈值；手动 /compact 不受该开关影响，reserve 也不变。
+        compact: { enabled: false },
+        systemPrompt: "You are a compact reserve test agent.",
+      },
+      {
+        eventStore: createTestSessionEventStore(),
+        logger,
+        modelFactory: createTestModelFactory(
+          withStreamTextFromGenerateText({
+            maxOutputTokens: 128_000,
+            properties: { contextWindow: 1_000_000 },
+            async generateText(request) {
+              const lastContent = providerContentToText(request.messages.at(-1)?.content);
+              if (lastContent.includes("create a detailed summary")) {
+                compactMaxOutputTokens.push(request.options?.maxOutputTokens);
+                compactAttempts++;
+                // 首次摘要超窗，触发截断旧轮重试；截断后留下的 assistant 仍带旧 usage。
+                if (compactAttempts === 1) {
+                  throw createContextExceededError(
+                    "prompt is too long: 1000010 tokens > 1000000 maximum",
+                  );
+                }
+                return {
+                  finishReason: "stop",
+                  text: "<summary>Reserve summary.</summary>",
+                  usage: { inputTokens: 20, outputTokens: 5, totalTokens: 25 },
+                };
+              }
+              // 贴窗的 provider usage：再加 compact prompt，按剩余窗口估算只剩约 6K，远小于 reserve；
+              // 若改回按剩余窗口裁剪，下面的断言会失败。
+              return {
+                finishReason: "stop",
+                text: "normal response",
+                usage: { inputTokens: 990_000, outputTokens: 1_000, totalTokens: 991_000 },
+              };
+            },
+          }) as never,
+        ),
+      },
+    );
+
+    await runtime.executeTurn("first reserve setup");
+    await runtime.executeTurn("second reserve setup");
+    await runtime.executeTurn("third reserve setup");
+    await runtime.executeTurn("/compact");
+
+    // 摘要上限等于 Auto Compact reserve：min(128K, max(21K, 1M × 8%)) = 80K，
+    // 不读 provider usage，截断重试前后保持不变。
+    expect(compactMaxOutputTokens).toEqual([80_000, 80_000]);
+    // 正常 stop 结束的摘要不记输出上限告警。
+    expect(
+      logger.warn.mock.calls.some((call) => call[1]?.event === "compact.summary.output_limit"),
+    ).toBe(false);
+  });
+
+  it.each([
+    { finishReason: "length", providerMetadata: undefined },
+    { finishReason: "other", providerMetadata: { rawFinishReason: "max_tokens" } },
+  ])(
+    "regenerates instead of accepting a truncated summary at the output limit ($finishReason)",
+    async ({ finishReason, providerMetadata }) => {
+      const logger = {
+        child: () => logger,
+        debug: vi.fn(),
+        error: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+      };
+      const truncatedSummary = "<analysis>long</analysis>\n<summary>1. Primary Request";
+      const completeSummary =
+        "<analysis>short</analysis>\n<summary>1. Primary Request and Intent: regenerate.</summary>";
+      const runtime = createTestAgentRuntime(
+        createSessionId(`runtime-compact-summary-output-limit-${finishReason}`),
+        { systemPrompt: "You are a compact output limit test agent." },
+        {
+          eventStore: createTestSessionEventStore(),
+          logger,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                if (lastContent.includes("Rewrite the complete handoff")) {
+                  return {
+                    finishReason: "stop",
+                    text: completeSummary,
+                    usage: { inputTokens: 20, outputTokens: 500, totalTokens: 520 },
+                  };
+                }
+                if (lastContent.includes("create a detailed summary")) {
+                  return {
+                    finishReason,
+                    providerMetadata,
+                    text: truncatedSummary,
+                    usage: {
+                      inputTokens: 20,
+                      outputTokens: 21_000,
+                      reasoningTokens: 12_000,
+                      totalTokens: 21_020,
+                    },
+                  };
+                }
+                return {
+                  finishReason: "stop",
+                  text: "normal response",
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                };
+              },
+            }) as never,
+          ),
+        },
+      );
+
+      await runtime.executeTurn("first output limit setup");
+      await runtime.executeTurn("second output limit setup");
+      await runtime.executeTurn("/compact");
+
+      // kcode 硬化语义（合并取舍）：截断摘要不落库，带更短重写指令重生成一次后成功。
+      // 上游 v4 的「告警后接受半截摘要」与本仓事故驱动设计冲突，此处按本仓契约改写。
+      const retryNotice = logger.info.mock.calls
+        .map((call) => call[1])
+        .find((context) => context?.event === "compact.summary.output_limit.retry");
+      expect(retryNotice).toMatchObject({ finishReason });
+      const runtimeInternals = runtime as unknown as {
+        messageHistory: { borrowReadOnlyRuntimeEntries(): readonly RuntimeMessageEntry[] };
+      };
+      const historyText = runtimeInternals.messageHistory
+        .borrowReadOnlyRuntimeEntries()
+        .map((entry) => String((entry as { message?: { content?: unknown } }).message?.content ?? ""))
+        .join("\n");
+      expect(historyText).toContain("1. Primary Request and Intent: regenerate.");
+      expect(historyText).not.toContain(truncatedSummary);
     },
   );
 
@@ -3980,126 +4222,145 @@ describe("AgentRuntime manual compact", () => {
     },
   );
 
-  it("retries auto compact up to three attempts before continuing the turn", async () => {
-    const sessionId = createSessionId("runtime-auto-compact-retry");
-    const eventStore = createTestSessionEventStore();
-    const requests: Array<{ kind: "compact" | "normal"; content: string; context: string }> = [];
-    const longPrompt = "old retry context marker";
-    let compactAttempts = 0;
-    let normalResponseCount = 0;
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      {
-        compact: {
-          bufferTokens: 10,
-          contextWindow: 120,
-          summaryReserveTokens: 0,
-        },
-        maxOutputTokens: 1,
-        systemPrompt: "You are an auto compact retry test agent.",
+  it.each([
+    { caseId: "empty-text", failedReply: { text: "" } },
+    {
+      // 只有工具调用的摘要回复同样没有文本，按可重试失败计入同一次压缩的 3 次尝试。
+      caseId: "tool-call-only",
+      failedReply: { text: "", toolCalls: [{ id: "retry-tool", name: "Read", input: {} }] },
+    },
+    {
+      // 开场白加工具调用没有摘要，同样按可重试失败处理。
+      caseId: "preamble-and-tool-call",
+      failedReply: {
+        text: "Let me read the file first.",
+        toolCalls: [{ id: "retry-tool", name: "Read", input: {} }],
       },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory(
-          withStreamTextFromGenerateText({
-            async generateText(request) {
-              const lastContent = providerContentToText(request.messages.at(-1)?.content);
-              const isCompact = lastContent.includes("create a detailed summary");
-              requests.push({
-                kind: isCompact ? "compact" : "normal",
-                content: lastContent,
-                context: request.messages
-                  .map((message) => providerContentToText(message.content))
-                  .join("\n"),
-              });
+    },
+  ])(
+    "retries auto compact up to three attempts before continuing the turn ($caseId)",
+    async ({ caseId, failedReply }) => {
+      const sessionId = createSessionId(`runtime-auto-compact-retry-${caseId}`);
+      const eventStore = createTestSessionEventStore();
+      const requests: Array<{ kind: "compact" | "normal"; content: string; context: string }> = [];
+      const longPrompt = "old retry context marker";
+      let compactAttempts = 0;
+      let normalResponseCount = 0;
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          compact: {
+            bufferTokens: 10,
+            contextWindow: 120,
+            summaryReserveTokens: 0,
+          },
+          maxOutputTokens: 1,
+          systemPrompt: "You are an auto compact retry test agent.",
+        },
+        {
+          eventStore,
+          modelFactory: createTestModelFactory(
+            withStreamTextFromGenerateText({
+              async generateText(request) {
+                const lastContent = providerContentToText(request.messages.at(-1)?.content);
+                const isCompact = lastContent.includes("create a detailed summary");
+                requests.push({
+                  kind: isCompact ? "compact" : "normal",
+                  content: lastContent,
+                  context: request.messages
+                    .map((message) => providerContentToText(message.content))
+                    .join("\n"),
+                });
 
-              if (isCompact) {
-                compactAttempts++;
+                if (isCompact) {
+                  compactAttempts++;
+                  return {
+                    finishReason: "stop",
+                    ...(compactAttempts < 3
+                      ? failedReply
+                      : {
+                          text: "<summary>Auto retry summary preserves the second user request.</summary>",
+                        }),
+                    usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+                  };
+                }
+
+                normalResponseCount++;
                 return {
                   finishReason: "stop",
-                  text:
-                    compactAttempts < 3
-                      ? ""
-                      : "<summary>Auto retry summary preserves the second user request.</summary>",
-                  usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+                  text: `normal response ${normalResponseCount}`,
+                  usage: {
+                    inputTokens: normalResponseCount === 2 ? 115 : 3,
+                    outputTokens: 1,
+                    totalTokens: normalResponseCount === 2 ? 116 : 4,
+                  },
                 };
-              }
+              },
+            }) as never,
+          ),
+        },
+      );
 
-              normalResponseCount++;
-              return {
-                finishReason: "stop",
-                text: `normal response ${normalResponseCount}`,
-                usage: {
-                  inputTokens: normalResponseCount === 2 ? 115 : 3,
-                  outputTokens: 1,
-                  totalTokens: normalResponseCount === 2 ? 116 : 4,
-                },
-              };
-            },
-          }) as never,
+      await runtime.executeTurn("auto compact retry warmup setup");
+      await runtime.executeTurn(longPrompt);
+      const result = await runtime.executeTurn("continue after auto compact retry");
+
+      const events = await eventStore.getEvents(sessionId);
+      const timelinePayloads = events
+        .filter(
+          (event) =>
+            event.type === SessionEventType.CompactStarted ||
+            event.type === SessionEventType.CompactCompleted,
+        )
+        .map((event) => event.payload as any);
+      const compactRequests = requests.filter((request) => request.kind === "compact");
+      const postCompactRequest = requests.at(-1)?.context;
+
+      expect(result.response).toBe("normal response 3");
+      expect(requests.map((request) => request.kind)).toEqual([
+        "normal",
+        "normal",
+        "compact",
+        "compact",
+        "compact",
+        "normal",
+      ]);
+      expect(
+        compactRequests.every(
+          (request) => !request.context.includes("continue after auto compact retry"),
         ),
-      },
-    );
-
-    await runtime.executeTurn("auto compact retry warmup setup");
-    await runtime.executeTurn(longPrompt);
-    const result = await runtime.executeTurn("continue after auto compact retry");
-
-    const events = await eventStore.getEvents(sessionId);
-    const timelinePayloads = events
-      .filter(
-        (event) =>
-          event.type === SessionEventType.CompactStarted ||
-          event.type === SessionEventType.CompactCompleted,
-      )
-      .map((event) => event.payload as any);
-    const compactRequests = requests.filter((request) => request.kind === "compact");
-    const postCompactRequest = requests.at(-1)?.context;
-
-    expect(result.response).toBe("normal response 3");
-    expect(requests.map((request) => request.kind)).toEqual([
-      "normal",
-      "normal",
-      "compact",
-      "compact",
-      "compact",
-      "normal",
-    ]);
-    expect(
-      compactRequests.every(
-        (request) => !request.context.includes("continue after auto compact retry"),
-      ),
-    ).toBe(true);
-    expect(timelinePayloads).toEqual([
-      expect.objectContaining({
-        attempt: 1,
-        maxAttempts: 3,
-        status: CompactTimelineStatus.Started,
-        trigger: CompactTrigger.Auto,
-      }),
-      expect.objectContaining({
-        attempt: 2,
-        maxAttempts: 3,
-        status: CompactTimelineStatus.Retrying,
-        trigger: CompactTrigger.Auto,
-      }),
-      expect.objectContaining({
-        attempt: 3,
-        maxAttempts: 3,
-        status: CompactTimelineStatus.Retrying,
-        trigger: CompactTrigger.Auto,
-      }),
-      expect.objectContaining({
-        attempt: 3,
-        maxAttempts: 3,
-        status: CompactTimelineStatus.Completed,
-        trigger: CompactTrigger.Auto,
-      }),
-    ]);
-    expect(postCompactRequest).toContain("Auto retry summary preserves the second user request");
-    expect(postCompactRequest).toContain("continue after auto compact retry");
-    expect(postCompactRequest).not.toContain(longPrompt);
-  });
+      ).toBe(true);
+      expect(timelinePayloads).toEqual([
+        expect.objectContaining({
+          attempt: 1,
+          maxAttempts: 3,
+          status: CompactTimelineStatus.Started,
+          trigger: CompactTrigger.Auto,
+        }),
+        expect.objectContaining({
+          attempt: 2,
+          maxAttempts: 3,
+          status: CompactTimelineStatus.Retrying,
+          trigger: CompactTrigger.Auto,
+        }),
+        expect.objectContaining({
+          attempt: 3,
+          maxAttempts: 3,
+          status: CompactTimelineStatus.Retrying,
+          trigger: CompactTrigger.Auto,
+        }),
+        expect.objectContaining({
+          attempt: 3,
+          maxAttempts: 3,
+          status: CompactTimelineStatus.Completed,
+          trigger: CompactTrigger.Auto,
+        }),
+      ]);
+      expect(postCompactRequest).toContain("Auto retry summary preserves the second user request");
+      expect(postCompactRequest).toContain("continue after auto compact retry");
+      expect(postCompactRequest).not.toContain(longPrompt);
+    },
+  );
 
   it("moves newer compact rounds into preserved context when auto compact prompt is too long", async () => {
     const sessionId = createSessionId("runtime-auto-compact-ptl-preserve-recent");
@@ -6596,24 +6857,6 @@ function createStartPlanBusyError(providerId: string): Error {
     retryable: false,
   };
   return error;
-}
-
-function createMockMcpPort(overrides: Partial<McpPort> = {}): McpPort {
-  return {
-    callTool: async () => ({ content: [{ text: "pong", type: "text" }] }),
-    close: async () => {},
-    connectConfiguredServers: async () => emptyMcpSnapshot(),
-    connectServer: async () => ({
-      status: "connected",
-      toolCount: 1,
-      transport: "stdio",
-      updatedAt: "now",
-    }),
-    disconnectServer: async () => undefined,
-    listTools: async () => [],
-    status: async () => ({}),
-    ...overrides,
-  };
 }
 
 function emptyMcpSnapshot(): McpConnectionSnapshot {

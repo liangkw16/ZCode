@@ -78,6 +78,8 @@ export async function runRegularTurnLoop(
     // guide 只允许由完整 tool result batch 设置这个一次性诊断；普通 queue 不在
     // model roundtrip 起点消费，避免把未来 turn 错并入当前 product turn。
     const drainedSteerForNextRequest = state.drainedSteerForNextRequest;
+    // 修复原因：清空之后再读 state.drainedSteerForNextRequest 会被 TS 收窄成 undefined（进而
+    // never），下面的 fromUser 判断改用这里捕获的局部变量（与 kcode 分支工作区的修法一致）。
     state.drainedSteerForNextRequest = undefined;
 
     // 通知只在带新输入的请求前取出：完整工具批次之后、文本回复后续上 guide，与输入附件同一时机。
@@ -144,7 +146,7 @@ export async function runRegularTurnLoop(
         // 见 isUserSteer），其余看最新输入。
         const fromUser =
           collectionReason === "text_guide"
-            ? state.drainedSteerForNextRequest?.userSteered === true
+            ? drainedSteerForNextRequest?.userSteered === true
             : latestMessage !== undefined && isRealUserPrompt(latestMessage);
         await collectInputAttachments(this, state, tools, collectionReason, fromUser);
       }

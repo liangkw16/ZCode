@@ -87,6 +87,7 @@ export {
 export {
   ZCODE_ENV,
   ZCODE_PRODUCT_FLAVOR,
+  ZCODE_DATA_DIR_SEGMENT,
   ZCODE_APP_VERSION_ENV,
   ZCODE_BUILD_COMMIT_ID_ENV,
   ZCODE_CLIENT_LANGUAGE_ENV,
@@ -193,6 +194,8 @@ export {
   sanitizeTelemetryErrorMessage,
   sanitizeTelemetrySkillName,
   sanitizeTelemetryEventDetail,
+  normalizeToolErrorCode,
+  sanitizeToolErrorCode,
 } from "./telemetry.js";
 export type {
   RedactTelemetryTextOptions,
@@ -394,6 +397,7 @@ export * from "./session-debug.js";
 export { redactFeedbackText } from "./feedbackPrivacy.js";
 export { API_KEY_USAGE_SCENE, type ApiKeyCreationUsageScene } from "./api-key-usage-scene.js";
 export {
+  isProjectTokenTransportFailureCode,
   projectAccessTokenFingerprint,
   projectAccessTokenRetryAfterMs,
   ProjectAccessTokenError,

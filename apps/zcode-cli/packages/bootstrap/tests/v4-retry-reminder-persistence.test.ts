@@ -99,7 +99,7 @@ it.each([
       const assistant = messages.at(-1)!;
       expect(userIndex).toBeGreaterThan(0);
       expect(assistant.info.role).toBe("assistant");
-      // 真实用户输入还会收集一条 token 预算提醒，排在原有提醒之后；retry 同样整组删除。
+      // 新输入只收集当前所需的提醒，不再生成虚拟 token 余额；retry 仍整组删除。
       expect(messages.slice(userIndex + 1, -1)).toEqual([
         expect.objectContaining({
           info: expect.objectContaining({
@@ -110,14 +110,10 @@ it.each([
             }),
           }),
         }),
-        expect.objectContaining({
-          info: expect.objectContaining({
-            role: "user",
-            synthetic: true,
-            semantics: expect.objectContaining({ source: "total_tokens_reminder" }),
-          }),
-        }),
       ]);
+      expect(
+        messages.some((message) => message.info.semantics?.source === "total_tokens_reminder"),
+      ).toBe(false);
       if (cold) await reopen();
 
       // 只适配 App admission；rewind、持久化、hydrate 和模型请求均走真实 Runtime。

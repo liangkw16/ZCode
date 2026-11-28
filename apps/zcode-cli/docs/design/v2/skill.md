@@ -13,10 +13,10 @@
 
 模型入口与上下文：
 
-- skill 入口是 `Skill` tool。启动时只给模型可用 skill 列表，不把完整正文塞进 system prompt；模型必须先调用 tool 才能获得完整指令。
-- skill 列表有预算控制，并对单个描述做硬截断；超过预算时截断描述、降级或发 warning。
-- `Skill` tool 输入是 skill name 和可选 args；输出完整内容和 base directory，帮助模型按需读取 references/scripts。
-- 已加载 skill 会被记录，便于 compaction 后恢复 skill 内容。
+- skill 的按需正文入口是 `Skill` tool。目录只提供 metadata；已由 hook 或工具注入且当前仍可见的同一技能正文可以直接复用，否则通过 tool 加载。
+- skill 目录保留短用途并受明确总字符预算约束；超预算先统一压缩用途，再按确定顺序省略整项，不能退化为没有用途的全量名字。实现规则见「Context 注入」。
+- `Skill` tool 输入是 `skill` 和可选 `args`；`name` 是兼容输入。`args` 当前不被 handler 消费，不承诺参数替换或透传。结果包含正文和 base directory，帮助模型按需读取 references/scripts。
+- 本批只复用当前上下文中仍可见的同一技能正文；正文缺失时重新加载。正文 hash 去重、loaded-skill snapshot 与 compact 后自动恢复尚未实现，另行设计，不属于本批。
 
 能力域与权限：
 
@@ -33,17 +33,68 @@
 - forked skill（`context: fork`）依赖成熟 subagent runtime，第一版只预留 schema。
 - remote / URL skill discovery 需要网络、缓存、签名/校验和审计，不进第一阶段。
 - 不长期保留大正文，优先 metadata snapshot + 按需读取正文。
-- product gating、env dependency prompt、root alias 渲染作为 Phase 2+；第一版只保留字段和诊断，不实现完整依赖补全。
+- product gating、env dependency prompt 作为 Phase 2+；第一版只保留字段和诊断，不实现完整依赖补全。本批目录直接省去重复路径，不引入 root alias 表。
 
 ## ZCode 设计选择
 
-## 当前实现核对（2026-05-08）
+### 按需使用与授权延续（2026-11-15，已实现）
+
+本节及目录预算修订已实现于 Skill 文案、目录渲染及仓库内 superpowers 插件的五份技能正文。与 [主提示词合同](loop/system-prompt-contract.md) 同批实施，链路见 [Tool Change Chain](tool/00-tool-change-chain.md)；不改变插件安装或启用范围。
+
+- `Skill` 描述由 core tool entry 维护；superpowers 的 using-superpowers、brainstorming、writing-plans、executing-plans、verification-before-completion 规则由插件内对应 `SKILL.md` 维护。SessionStart hook 读取同一份 using-superpowers 正文，不另外保存流程状态。
+- 用户明确点名可用技能时继续加载并使用；自动加载要求任务明确匹配，且技能能提供当前工作需要的知识、工具用法或流程。不能因关键词、极小匹配概率或“每轮先检查技能”而强制加载。
+- 清晰且已经授权的局部修改直接调查、实现和验证，不额外进入设计审批。用户要求先设计，或确有影响范围、数据、接口等重大未决选择时，才使用 brainstorming 澄清并提交具体方案。
+- 用户仅要求分析、设计或先写 spec 时，以该阶段产物为完成目标；写 spec 只授权文档修改，不授权产品实现，也不自动要求进入禁止文件写入的 Plan 模式。
+- 同一任务内已经批准的方案保持有效；文档记录、技能切换、上下文续接本身不触发重复审批。范围或重大选择改变时才重新对齐，未获授权的外部副作用仍遵守原权限边界。
+- 技能不能覆盖系统指令、实际权限模式或用户明确约束，不能把技能加载、建议、工具输出当作用户授权。用户要求分析或设计时，不因技能存在就开始实现。
+- 设计文档按任务和仓库要求维护，不为清晰小改动强制创建额外文档；Git 提交遵守用户授权，不由技能自动要求。需要实施计划时使用 writing-plans，已足够明确的执行步骤直接沿现有开发流程继续。
+- 本批只调整模型可见文案、目录渲染和上述打包技能片段，不改变 registry、输入/输出字段、类型与验证规则、SkillPort、事件、权限或持久化，不新增配置、检索系统或会话状态。provider inputSchema 的 `skill` / `args` 字段 description 同步精确名字来源和兼容未消费语义；`args` 仍是未消费的兼容字段。
+
+### 后续 Skill 交接与验证（2026-11-15，已实现）
+
+| 技能 / 环节                       | 本批行为合同                                                                                                                                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| using-superpowers / brainstorming | 自动选择须有明确匹配和实际收益；已经授权且清楚的任务直接推进。只交付分析、设计或 spec 的用户要求仍是完成边界，不因后续技能存在而实施。                                                                             |
+| writing-plans                     | 计划完成后继续用户已授权的实施，不固定询问「子代理还是当前会话执行」。已有执行方式继续有效；未指定时根据任务结构和可用能力选择合理方式。用户要求先审计划时交付计划并等待该真实决定。                               |
+| executing-plans                   | 子代理只在存在可分离工作、可降低耗时或改善质量时使用，不因工具可用就切换技能。发现缺依赖、测试失败或局部步骤不清，先读取证据、诊断并在授权范围内修复；常规失败不自动结束任务求助。                                 |
+| 必要澄清                          | 只有不能从环境推导、也不能按已有授权合理决定的关键用户选择，才暂停依赖它的工作；同步推进不依赖该选择的工作。权限拒绝、用户暂停和阶段边界仍有效，不因持续执行而绕过。不能把故障原因尚未查明等同于必须由用户解决。   |
+| verification-before-completion    | 完成声明必须有对应验收证据；证据有效性取决于代码/产物版本、环境、输入、运行阶段和验收类型。仅跨消息、技能切换、状态询问或 compact 不使证据自动失效；相关条件改变或证据不足时重跑受影响检查，仓库必需检查仍须完成。 |
+
+- 结果声明必须与证据覆盖范围一致：针对性测试通过只能证明对应范围，API 成功不代替 UI 验收，子代理口头成功或进程退出不代替目标结果。未执行、失败、受阻、结果未知必须如实报告；禁止虚报通过或把过期证据当成当前状态。
+- 不要求每条回复前重跑全量验证，也不允许因已有一次成功就忽略后续改动、环境变化或用户要求的重新验证。检查充分后继续交付，不为「新鲜」无条件重复。
+- 执行计划中的实现顺序、仓库检查和阶段边界继续有效；仅取消自动重新审批、固定执行方式选择和普通失败即求助，不把技能变成扩大任务范围的授权。
+
+### 正文可见性与加载边界（2026-11-15，已实现）
+
+- 「已加载」要求当前模型上下文中仍可见所需**同一技能**的正文，并能从名称、已有加载调用与结果或明确的注入标记确认对应关系。任意 `<command-name>`、另一个技能正文、metadata 列表、历史调用记录或摘要中的「已加载」声明都不充分。
+- 对插件限定名，必须能确认同一来源；不能仅因裸名相同就复用另一个插件的正文。当前可见内容无法确认身份或缺少任务所需正文时，使用已有 `Skill` 调用按精确名字重新加载，不补造历史正文。
+- 当前仍可见且足够的正文直接复用。compact 后若只剩摘要、正文已经丢失，按需重新加载；本批不建立「调用过就永久跳过」的缓存或恢复状态。
+- `args` 不参与加载结果、模板参数或脚本执行。用户任务通过现有消息上下文表达，不暗示它会因传入 `args` 自动出现在正文里；加载正文也不自动执行技能引用的脚本。
+- 正文 hash 去重与 compact 后自动恢复列为后续设计：须先明确正文身份/版本、唯一状态所有者、失效和恢复时序，再补接口与验收。本批不引入该状态，也不将摘要作为正文恢复依据。
+
+### 本批验收
+
+| 场景                                                              | 可观察结果                                                                                                        |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 用户已批准方案，writing-plans 交接 executing-plans                | 继续已授权任务，不再次询问是否执行或必须选哪种执行方式；有无子代理均能继续。                                      |
+| 用户明确只要 spec / 先审方案                                      | 只完成该阶段，不开始产品实现；既有工具权限和 Plan 审批回归保持不变。                                              |
+| 测试失败或缺普通依赖，已有信息足以诊断                            | 先检查错误和环境并尝试范围内恢复，不把首个失败直接变成用户求助。确实需要未决用户选择时，只暂停依赖它的部分。      |
+| 同版本、环境、输入和验收类型的检查已通过，用户只问状态            | 复用有效证据回答并继续未完成工作，不重跑全量；相关代码或环境改变后不能继续声称原证据覆盖现状。                    |
+| 只有 API 成功、测试未跑或子代理报告成功                           | 报告实际已验证范围和剩余验收，不宣称整个任务通过。                                                                |
+| 同名同来源正文仍可见 / 只有其他 command-name / compact 后仅剩摘要 | 分别复用 / 加载目标技能 / 按需重新加载；不会因任意 command-name 或历史记录跳过必要加载。                          |
+| 调用携带 args                                                     | 输入兼容不变，描述不承诺参数展开、传入正文或执行脚本。                                                            |
+| 大目录及极小目录预算                                              | 按下文预算算法保留可容纳条目的短用途，最终字符串不超预算；省略不改变可加载集合，显式名字仍按现有 SkillPort 解析。 |
+
+离线回归覆盖 core tool 描述、实际模型请求中的目录、工具结果及 bootstrap 通过插件 adapter 读取实际插件包的五份技能正文，并覆盖 SessionStart 入口；不以测试副本替代插件包正文；这不表示该插件已被官方默认安装或启用。文本断言只证明合同送达，不代表任务完成率提升。真实行为用相同任务、模型、权限与技能来源比较非必要提问、有效验收、无效重复及约束保持；仍须区分外部同名技能和本仓库打包技能。
+
+## 当前实现核对（2026-11-15）
 
 本轮核对确认 skill P0 主线已经落地，本文后续条目仍作为契约基准，但不应再把以下能力当作未实现缺口：
 
 - Contracts：`packages/contracts/src/skills/index.ts` 已定义 `SkillRoot`、`SkillScope`、`SkillMetadata`、`SkillDiagnostic`、`SkillContent`、`SkillLoadOutcome`、`SkillPort` 和 `SkillConfig`；`packages/contracts/src/tools/skill.ts` 已提供 `Skill` tool 的运行时 schema 与 provider JSON schema。
 - Adapter loader：`packages/adapters/src/skills/index.ts` 已通过 Node adapter 发现从 cwd 向上到 worktree root 的 `.zcode/skills`、`.agents/skills`、`.claude/skills` 及对应 user roots，支持 config extra roots、flat YAML frontmatter、未知字段 diagnostics、同名优先级去重、正文按需读取和 100KB 截断。
 - Core runtime：`packages/core/src/context/sections/skills.ts` 已把 skill metadata 渲染为 `meta_user` section，不把正文放进 system prompt；`packages/core/src/tool/handlers/skill.ts` 已通过 `SkillPort` 加载正文，并声明只读、session side effect、runtime input/output schema、result budget、timeout、取消和 trace 传播。
+- 当前目录默认硬上限为 **20,000 字符**，包含外壳和省略提示。单项用途先限制为 250 字符，超限后全体缩到 80 字符，再按确定排序省略整项；不再使用删除全部用途、保留全量路径但仍可能超限的旧降级，也不存在默认 1% context window / 8k fallback。
 - Bootstrap / CLI / ZCode app-server：`packages/bootstrap/src/index.ts` 已按 feature gate 和 `skills.*` config 注入 `SkillPort`；`listZCodeSkills()` 复用同一 adapter；`zcode skills` / `zcode skills list` 支持 human、`--json` 和 `--verbose` diagnostics；TUI/command-center 的裸 `/skill` 只读列举 skills，`/skill <name> [task]` 会改写为必须先调用 `Skill` tool 的 prompt；ZCode app-server 暴露 `/skill <skill-name> [task]`，裸 `/skill` 在 ZCode app-server 中返回 usage，不启动模型 turn。
 - Tests：`packages/adapters/tests/skills.test.ts` 覆盖 discovery、正文加载和重复名优先级；`packages/core/tests/skill-tool.test.ts` 与 `packages/core/tests/context-builder.test.ts` 覆盖 metadata 注入和 `Skill` tool；`packages/cli/tests/cli.unit.test.ts` 覆盖 CLI/TUI `/skill`；`packages/bootstrap/tests/zcode-protocol.test.ts` 覆盖 ZCode app-server command 暴露、禁用和 prompt rewrite。
 
@@ -52,14 +103,14 @@
 - TUI/debug projection 的 skill diagnostics 页面，以及显式 `$skill-name` / `skill://...` mention。
 - 按具体 skill name 或 wildcard 的 allow/deny/ask 规则；当前 `Skill` tool 的权限声明仍是 tool-level low-risk 自动允许，没有根据 unsafe frontmatter、remote/plugin source 或 runtime modifier 字段动态升级为 ask。
 - skill lifecycle 事件（`SkillRootsResolved` / `SkillLoaded` 等）、loaded-skill session snapshot、compact 后恢复完整 skill body，以及 diagnostics 的结构化观测面。
-- bundled/system/plugin/admin/remote roots、dependency/env prompt、`context: fork`、`model` / `effort` runtime modifier、`allowed-tools` scoped suggestion 等 P1/P2 能力。
+- admin/remote roots、dependency/env prompt、`context: fork`、`model` / `effort` runtime modifier、`allowed-tools` scoped suggestion 等 P1/P2 能力；bundled/system/plugin roots 已落地，见「Discovery Roots」。
 
 ### 核心原则
 
 ZCode skill 采用“两层加载”：
 
-1. **metadata discovery**：启动/turn 初始化时扫描 skill roots，只把 name、description、source、scope、path、policy 等轻量信息进入 context。
-2. **content load**：模型显式调用 `Skill` tool 后，才读取对应 `SKILL.md` 正文并注入当前会话。
+1. **metadata discovery**：进程级实时 skill 目录扫描 skill roots，只把 name、description、source、scope、path、policy 等轻量信息进入 context。文件监听更新内存快照，每次普通输入准备只读快照，listing 只追加新增或变化的行；规则见根目录 `docs/skills-live-catalog.md`。
+2. **content load**：模型显式调用 `Skill` tool 后，按会话快照解析名称，才读取对应 `SKILL.md` 正文并注入当前会话。
 
 这能同时满足 token 控制、权限可见、trace 可追踪和跨平台 I/O 收口。
 
@@ -88,7 +139,7 @@ ZCode skill 采用“两层加载”：
 `core` 增加 skill registry / manager：
 
 - 保存当前 session 的 skill metadata snapshot。
-- 供 context builder 渲染 available skills section。
+- 供 `skills_listing` 收集器渲染可用 skill 列表（ContextBuilder 不再渲染，见根目录 `docs/skills-live-catalog.md`）。
 - 注册 `Skill` tool contract。
 - `Skill` tool 只通过 `SkillPort` 加载正文，不直接读文件。
 
@@ -197,32 +248,44 @@ P2 增加：
 
 ## Context 注入
 
+当前实现：列表作为 `skills_listing` 附件进入会话（不在 system prompt），首发为完整列表，之后只追加新增或内容变化的行，删除不通知；格式、指纹与持久化见根目录 `docs/skills-live-catalog.md`。下文为最初的规划格式。
+
 ContextBuilder 增加 `Skills` section，位于 user/project context 之后。工具说明不再作为
 ContextBuilder section 注入 system prompt，而是随 model request 的 `tools` 数组提供。
 
-内容只包含 metadata，不包含正文。初始格式：
+内容只包含 metadata，不包含正文。以下是目录的实际输出形态（`core/context/sections/skills.ts`）：一行固定标题加逐条 `- 名字: 用途`；总预算涵盖标题、条目和省略提示，不另外注入无预算的目录副本：
 
 ```text
-## Skills
+The following skills are available for use with the Skill tool:
 
-A skill is a set of local instructions stored in SKILL.md. Use the Skill tool to load full instructions only when relevant.
-
-### Available Skills
-- my-skill: When this skill should be used (file: /abs/path/to/SKILL.md)
-
-### How To Use Skills
-- If the task matches a skill description, call Skill with the skill name before doing the task.
-- If the user types `/<skill-name>`, call Skill only when that exact skill appears in the available skills list. Do not guess missing skill names.
-- After loading a skill, read only the referenced files you need.
-- Resolve relative references from the skill base directory.
+- my-skill: When this skill should be used
 ```
 
-预算策略：
+目录里没有“如何使用”的说明段：何时自动加载、不臆造名字、不覆盖系统指令等规则只写在 Skill 工具描述里（`core/src/tool/handlers/skill.ts`），随 model request 的 `tools` 数组提供，不计入目录预算。下面“目录预算与省略”规则 5 里的“共享说明”指省略提示，不是这一段。
 
-- P0：默认 1% context window 或 8k chars fallback。
-- 单条 description 最大 250 chars。
-- 超预算时先截断 description，再降级到 names-only，并记录 diagnostic/log。
-- P1：引入 root alias（用短别名代替 skill root 绝对路径），减少长绝对路径成本。
+### 目录预算与省略（2026-11-15，已实现）
+
+目录渲染的唯一所有者仍是 `core/context/sections/skills.ts`；发现、同名优先级和能否加载仍由已有 SkillPort / adapter 决定，省略只是请求投影。复用现有 `metadataBudget` 渲染参数，默认 20,000，按最终 JavaScript 字符串 `length` 计数；不按 token 或 context window 比例动态变更，也不新增用户预算配置。
+
+确定性规则：
+
+1. 以发现结果中的 `qualifiedName ?? name` 作为可调用名字，按 `en-US` 比较排序，比较相等时按原字符串码元顺序打破平局。不得按本机语言环境或未提供的模型相关性评分改变顺序。
+2. 单行只放精确名字与用途，不重复绝对路径和裸名别名；具体路径和 base directory 由现有加载结果提供，CLI discovery 仍保留完整 metadata。这样减少路径成本，不新增 root alias 表或检索索引。
+3. 用途由 `description` 和已有 `whenToUse` 按固定顺序组合，折叠连续空白并略过空项。首次渲染每项最多 250 字符（含截断标记），截断不拆开 Unicode 代理对；所有有用途的条目都保留短用途，不生成模型摘要。无 frontmatter 的兼容技能可缺用途，此时显示 `Purpose not provided; load only on explicit request.`，不凭名字猜用途或参与自动匹配，不改变既有加载能力。metadata 作者应把主要适用范围放在描述前部。
+4. 若包含全部条目的最终目录超预算，先将**全体**用途统一缩到最多 80 字符（含截断标记）后重试；不能先剔除后部技能，也不能删除全体用途换取全量名字。
+5. 若仍超限，保持全体 80 字符短用途，选择满足预算的最大排序前缀，省略其余整项。计算每个候选前缀时计入标题、共享说明、换行和实际省略数量的提示；不截断名字或半条输出，也不跳过较长名字来偷偷改变选择顺序。
+6. 有省略时提示包含 included / total 数量，并明确目录不完整、显式精确名字仍可加载以及下述已有发现方式。若连一条也容纳不了，只输出完整省略提示；若完整提示也超限，降为 `Skills omitted: N.`。若连这个最短提示也容纳不了，返回无 Skills section，不输出残缺文本或超限结果。极小预算不保证可选择性，仍保证不超预算，不改变 registry。
+7. 最终结果含所有外壳和省略提示，长度不超过取整后的有效预算；有限非负预算不足 1 时输出无 section。无技能继续返回无 section；省略 `metadataBudget` 时使用默认值，不新增用户配置项。
+
+省略后的发现与调用：
+
+- 有命令执行能力且当前环境可运行 CLI 时，可在相同工作目录使用现有 `zcode skills list --json` 查询完整 CLI 发现结果，再按返回的精确名字调用 `Skill`。这不是新的工具，也不能假定每个模型环境都已安装 `zcode` 或具有 Bash。
+- 用户在 CLI/TUI 可用已有裸 `/skill` 列举；ZCode app-server 的裸 `/skill` 只返回 usage，不能把它描述成该入口的完整目录查询。用户给出的精确名字可直接尝试既有 `Skill` 加载，不要求先出现在截断后的目录。
+- CLI discovery 与活动会话可能使用不同配置或能力过滤；查询结果只提供名字依据，实际可加载性以本会话 `SkillPort` 的结果为准。未知名字保留现有错误，不虚报加载成功。
+- 省略提示将 CLI 查询写为有条件的选项。没有可用发现通道、也没有明确名字时，不猜测技能、不声称已搜全；使用现有可见能力继续独立工作，仅在该缺失确实阻塞任务时说明具体缺口。
+- 本批不新增搜索 API、ToolSearch 技能索引、协议端点、配置字段、持久缓存、事件或自动恢复机制。已有完整发现结果和 CLI 输出不因模型目录预算被裁剪。
+
+预算验收：覆盖刚好等于预算、全体 250 字符可容纳、全体缩到 80 后可容纳、仍需省略、第一项已过长、仅省略提示可容纳、极小预算、长路径、Unicode 和插件限定名。相同 metadata / budget 在不同输入顺序和进程语言下输出相同；全部输出满足总长度上限，保留条目都有用途。省略项的用户显式调用继续可用；没有命令能力时不出现「已经搜索完整目录」等虚构结果。
 
 ## `Skill` Tool
 
@@ -232,10 +295,12 @@ A skill is a set of local instructions stored in SKILL.md. Use the Skill tool to
 
 ```json
 {
-  "name": "my-skill",
-  "args": "optional user/model supplied arguments"
+  "skill": "my-skill",
+  "args": "optional compatibility field; currently not consumed"
 }
 ```
+
+provider 使用 `skill`；runtime 继续兼容旧 `name` 输入。`args` 仅保留输入兼容，handler 当前只读取技能名字，不把 args 写入正文、做参数替换或执行脚本。provider inputSchema 的字段 description 与工具总说明一致：`skill` 接受目录、发现结果或用户显式提供的精确名字；`args` 明确是 handler 忽略的兼容字段。仅描述文本变化，字段、类型、必填性、验证和执行行为不变。
 
 P0 输出：
 
@@ -249,6 +314,10 @@ Base directory for this skill: /abs/path/to/my-skill
 Relative paths in this skill are relative to this base directory.
 </skill_content>
 ```
+
+例外：动态工作流 mode 为 onDemand 且工具面尚未激活时，加载 `dynamic-workflows` 的结果在 `<skill_content>`
+之前多一段固定提示，让模型请用户发送 `/workflow`；子 runtime（Agent 子代理、`/expert` 子会话）拿到的那段改为让它把限制报告给父代理（见 [Tool Change Chain](tool/00-tool-change-chain.md)
+「Skill 结果的工作流工具未激活提示」）。
 
 工具 metadata：
 
@@ -408,7 +477,7 @@ Status: completed for P0. `packages/contracts/src/skills/index.ts` 和 `packages
 
 ### Phase 2：Adapter Loader
 
-Status: completed for P0. Node loader 已支持 native/compatible project 与 user roots、extra roots、从 cwd 向上到 worktree root 的 project discovery、frontmatter diagnostics、重复名优先级、正文截断和取消前检查；symlink canonical 去重、remote/cache 和 plugin roots 尚未实现。
+Status: completed for P0. Node loader 已支持 native/compatible project 与 user roots、extra roots、从 cwd 向上到 worktree root 的 project discovery、frontmatter diagnostics、重复名优先级、正文截断和取消前检查；bootstrap 已注入 plugin / bundled roots。symlink canonical 去重、remote/cache 尚未实现。
 
 - 在 `packages/adapters/src/skills` 实现 Node loader。
 - 支持 P0 roots 和 frontmatter。
@@ -421,16 +490,16 @@ Status: completed for P0. Node loader 已支持 native/compatible project 与 us
 
 ### Phase 3：Core Context 与 Registry
 
-Status: completed for P0. ContextBuilder 已把 available skills 渲染为独立 `meta_user` section，内置 registry 已注册 `Skill` tool，并允许在没有 `SkillPort` 时省略该 tool；session 级 loaded-skill snapshot 和 compact 恢复仍未实现。
+Status: completed for P0. 内置 registry 已注册 `Skill` tool，并允许在没有 `SkillPort` 时省略该 tool；session 级 loaded-skill snapshot 和 compact 恢复仍未实现。ContextBuilder 曾把 available skills 渲染为独立 `meta_user` section；现在列表只由 `skills_listing` 收集器渲染，ContextBuilder 只按会话开始时的目录决定 skill 引导语。
 
 - core 增加 `SkillRegistry` / `SkillManager`。
-- `ContextBuilder` 渲染 Skills section。
+- `skills_listing` 收集器渲染 Skills 列表。
 - context diagnostics 记录预算与截断。
 
 验收：
 
-- fake skill snapshot 能渲染到 system prompt。
-- 超预算不会丢失所有 skill name。
+- fake skill snapshot 能渲染到 `meta_user` section。
+- 本批目录预算已实现；以本节的总长度、短用途、确定省略和显式调用验收为准，不再要求任意预算都保留全量名字。
 - core 仍不 import Node I/O。
 
 ### Phase 4：`Skill` Tool
@@ -463,10 +532,9 @@ Status: partially completed. `zcode skills` / `zcode skills list`、`zcode skill
 
 ### Phase 6：Advanced
 
-- root alias 渲染。
+- 正文 hash 去重、loaded-skill snapshot 与 compact 后自动恢复；先另行明确唯一状态所有者和失效/恢复合同，本批不实现。
 - explicit mention：`$skill-name` 和 `skill://.../SKILL.md`。
-- bundled/system skills。
-- plugin skill roots。
+- bundled/system skills 与 plugin skill roots 已实现，见「Discovery Roots」。
 - skill dependency/env prompt。
 - forked skill。
 - remote URL discovery/cache。

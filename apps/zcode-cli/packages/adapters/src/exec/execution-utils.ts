@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExecutionRequest } from "@zcode/contracts";
+// 修复原因：全局存储根硬编码 ".zcode"，kcode 构建下 Bash 落盘输出会写进 ZCode 的目录，
+// 违反 kcode-full-isolation 设计 §2（全局派生点统一走 segment）。走窄入口，不拉桶文件。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 
 export const DEFAULT_TIMEOUT_MS = 300_000;
 const MS_PER_SECOND = 1_000;
@@ -16,7 +19,8 @@ export const DEFAULT_PROGRESS_INTERVAL_MS = 1_000;
 export const DEFAULT_PROGRESS_TAIL_BYTES = 4 * 1024;
 
 export function resolveDefaultOutputRootDir(processEnv: NodeJS.ProcessEnv = process.env): string {
-  const storageRoot = processEnv.ZCODE_STORAGE_DIR?.trim() || join(homedir(), ".zcode");
+  const storageRoot =
+    processEnv.ZCODE_STORAGE_DIR?.trim() || join(homedir(), ZCODE_DATA_DIR_SEGMENT);
   return join(storageRoot, "cli", "exec");
 }
 

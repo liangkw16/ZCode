@@ -14,7 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const WRITTEN: string[] = [];
 
-async function makeGlobals(bridgeOverrides: Record<string, unknown> = {}) {
+async function makeGlobals(bridgeOverrides: Record<string, unknown> = {}, platform = process.platform) {
   const { join, dirname } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
   const clientUrl = fileURLToPath(new URL("../../zcode-cua-plugin/scripts/computer-use-client.mjs", import.meta.url));
@@ -26,6 +26,7 @@ async function makeGlobals(bridgeOverrides: Record<string, unknown> = {}) {
     ...bridgeOverrides,
   };
   const globals = {
+    process: { platform },
     [Symbol.for("zcode.node-repl.computer-use-bridge")]: bridge,
     nodeRepl: { write: (text: string) => { WRITTEN.push(text); } },
   };
@@ -55,5 +56,201 @@ describe("computer-use output policy", () => {
     expect(doc).toMatch(/^# Computer Use/u);
     // 按需取用的那份仍是完整参考：模型需要参数形状时才付这份预算。
     expect(doc).toMatch(/## Tool arguments/u);
+  });
+});
+
+
+// 2026-11-17 真机回归：中文输入法改写网址；macOS element_scroll 尚未实现。
+async function makeTarget(platform: NodeJS.Platform) {
+  const call = vi.fn(async () => ({
+    content: [],
+    structuredContent: {
+      state_id: "browser-state",
+      app: { pid: 123, bundle_id: "com.google.Chrome" },
+      window: { window_id: 42 },
+      elements: [{ index: 1 }],
+      text: "1 browser content",
+    },
+  }));
+  const { globals } = await makeGlobals({ call }, platform);
+  const target = await globals.agent.computerUse.getApp({ bundle_id: "com.google.Chrome", window_id: 42 });
+  call.mockClear();
+  return { target, call };
+}
+
+describe("computer-use observation return values", () => {
+  it("retrieves fresh usable element indices without making screen capture a prerequisite", async () => {
+    const { target, call } = await makeTarget("darwin");
+    await expect(target.elements()).resolves.toEqual([{ index: 1 }]);
+    expect(call).toHaveBeenCalledExactlyOnceWith("get_app_state", {
+      app_ref: { pid: 123, bundle_id: "com.google.Chrome", window_id: 42 },
+      tree_shown_to_model: true,
+      include_screenshot: false,
+    });
+  });
+
+  it("returns tree text directly and the combined tree in state", async () => {
+    // 真机模型误读 .content 造成反复空匹配；锁定既有 SDK 返回契约，文档示例直接解析字符串。
+    const { target } = await makeTarget("darwin");
+    const tree = await target.getAXState({ emit: false, disableDiffing: true });
+    expect(tree).toBe("1 browser content");
+    const combined = await target.getAXStateAndScreenshot({ emit: false, disableDiffing: true });
+    expect(combined.state).toBe(tree);
+    expect(combined).not.toHaveProperty("content");
+  });
+});
+
+describe("computer-use platform input dispatch", () => {
+  it.each(["darwin", "win32", "linux"] as const)("preserves text and resolved identity on %s", async (platform) => {
+    const { target, call } = await makeTarget(platform);
+    const text = "http://127.0.0.1:53568/?验收=🌼&value=a/b";
+    await target.typeText(text);
+    expect(call).toHaveBeenCalledExactlyOnceWith(platform === "darwin" ? "paste" : "type", {
+      text,
+      app_ref: { pid: 123, bundle_id: "com.google.Chrome", window_id: 42 },
+      ...(platform === "darwin" ? { format: "text" } : {}),
+    });
+  });
+
+  it.each([
+    ["darwin", undefined, "event"],
+    ["darwin", "auto", "event"],
+    ["darwin", "event", "event"],
+    ["darwin", "a11y", "a11y"],
+    ["win32", undefined, undefined],
+    ["linux", "auto", "auto"],
+  ] as const)("dispatches %s scroll strategy %s as %s", async (platform, requested, expected) => {
+    const { target, call } = await makeTarget(platform);
+    await target.scroll(1, "down", 2, requested ? { strategy: requested } : undefined);
+    expect(call).toHaveBeenCalledExactlyOnceWith("scroll", {
+      target: { type: "element", index: 1 },
+      app_ref: { pid: 123, bundle_id: "com.google.Chrome", window_id: 42 },
+      scroll_direction: "down",
+      scroll_amount: 2,
+      ...(expected ? { strategy: expected } : {}),
+    });
+  });
+
+  it("does not replay a failed paste that may already have been sent", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockRejectedValueOnce(new Error("possibly_sent"));
+    await expect(target.typeText("single insertion")).rejects.toThrow("possibly_sent");
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("computer-use producer action receipts", () => {
+  it("rejects possibly_sent from the real action_receipt envelope without replay", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockResolvedValueOnce({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            action_receipt: {
+              schema_version: "zcode-cua-action-receipt-v1",
+              action_sent: true,
+              dispatch_status: "possibly_sent",
+              retry_action: false,
+            },
+          }),
+        },
+      ],
+      isError: false,
+    });
+    await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
+      name: "ComputerUseError",
+      code: "TIMEOUT",
+      actionSent: true,
+      dispatchStatus: "possibly_sent",
+      retry: "reobserve",
+    });
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [false, true, "accepted"],
+    [true, false, "not_sent"],
+  ] as const)(
+    "preserves isError=%s action_sent=%s dispatch=%s",
+    async (isError, actionSent, dispatch) => {
+      const { target, call } = await makeTarget("darwin");
+      call.mockResolvedValueOnce({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              action_receipt: {
+                action_sent: actionSent,
+                dispatch_status: dispatch,
+              },
+            }),
+          },
+        ],
+        structuredContent: { code: "permission_denied" },
+        isError,
+      });
+      const action = target.scroll(1, "down", 1);
+      if (isError)
+        await expect(action).rejects.toMatchObject({
+          code: "PERMISSION_DENIED",
+          actionSent: false,
+          dispatchStatus: "not_sent",
+          retry: "never",
+        });
+      else await expect(action).resolves.toBeUndefined();
+      expect(call).toHaveBeenCalledTimes(1);
+    },
+  );
+});
+
+describe("computer-use desktop admission errors", () => {
+  // Host 的失败信封：首个文本块是 {error, action_receipt}，structuredContent 同形。
+  const refusal = (details: Record<string, unknown>) => {
+    const body = {
+      error: {
+        code: "permission_denied",
+        message: "The desktop is locked; unlock it and observe again",
+        details,
+      },
+      action_receipt: {
+        schema_version: "zcode-cua-action-receipt-v1",
+        action_sent: false,
+        dispatch_status: "not_sent",
+        retry_action: false,
+      },
+    };
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify(body) }],
+      structuredContent: body,
+    };
+  };
+
+  it("reports DESKTOP_LOCKED for the broker's permission_denied + reason screen_locked shape", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockResolvedValueOnce(
+      refusal({
+        action_sent: false,
+        dispatch_status: "not_sent",
+        reason: "screen_locked",
+        desktop_availability: "locked",
+      }),
+    );
+    await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
+      code: "DESKTOP_LOCKED",
+      actionSent: false,
+      dispatchStatus: "not_sent",
+      retry: "never",
+    });
+  });
+
+  it("does not mistake a real accessibility denial for a locked desktop", async () => {
+    const { target, call } = await makeTarget("darwin");
+    call.mockResolvedValueOnce(refusal({ action_sent: false, dispatch_status: "not_sent" }));
+    await expect(target.scroll(1, "down", 1)).rejects.toMatchObject({
+      code: "PERMISSION_DENIED",
+      retry: "never",
+    });
   });
 });

@@ -97,7 +97,10 @@ export function ComputerUseSection({
   const path = supportsLocalMacWorkspace ? (localWorkspacePath ?? workspacePath) : null;
   // 展示只跟 settled：fresh 每次查询开始都会落回 false，跟着它渲染会让授权按钮的文案
   // 在「验证中…」与终态之间切换、宽度随之跳变。
-  const { status, settled, refresh } = useCuaPermissionStatus(path ?? null, workspaceIdentity);
+  const { status, fresh, settled, refresh } = useCuaPermissionStatus(
+    path ?? null,
+    workspaceIdentity,
+  );
   const availableStatus = status && isCuaPermissionStatusAvailable(status) ? status : null;
 
   // macOS 版本门槛：低版本系统上 Helper 被 LaunchServices -10825 拒启，表象是授权反复无响应。
@@ -220,7 +223,7 @@ export function ComputerUseSection({
       targetWorkspaceIdentity = workspaceIdentity,
       restartOptions?: CuaPermissionRestartOptions,
     ): Promise<boolean> => {
-      if (!targetPath || !services || !cuaPermissionService) return Promise.resolve(false);
+      if (!targetPath || !cuaPermissionService) return Promise.resolve(false);
       if (restartPromiseRef.current) return restartPromiseRef.current;
       const targetContextKey = [targetPath, targetWorkspaceIdentity?.trim() ?? ""].join("\u0000");
       if (helperContextKeyRef.current === targetContextKey) {
@@ -284,7 +287,7 @@ export function ComputerUseSection({
       restartPromiseRef.current = operation;
       return operation;
     },
-    [path, workspaceIdentity, services, refresh, intl],
+    [path, workspaceIdentity, cuaPermissionService, refresh, intl],
   );
 
   const applyPendingGrant = useCallback(
@@ -355,7 +358,6 @@ export function ComputerUseSection({
       }
     },
     [
-      path,
       pluginManagementService,
       pluginToggleContextKey,
       refresh,
@@ -509,7 +511,16 @@ export function ComputerUseSection({
         }
       }
     },
-    [platform, path, services, workspaceIdentity, intl, applyPendingGrant, refresh],
+    [
+      platform,
+      path,
+      cuaPermissionService,
+      helperContextKey,
+      workspaceIdentity,
+      intl,
+      applyPendingGrant,
+      refresh,
+    ],
   );
 
   const onManualRestart = useCallback((): void => {
@@ -537,7 +548,7 @@ export function ComputerUseSection({
         <ExternalLink className="size-4" aria-hidden="true" />
         <span className="hidden sm:inline">
           {intl.formatMessage({
-            id: settled ? labelId : "cuaPermission.status.verifying",
+            id: settled ? labelId : "cuaPermission.status.checking",
           })}
         </span>
       </Button>
@@ -608,6 +619,13 @@ export function ComputerUseSection({
   // 两项权限的状态视图（圆点 tone + 文案），与圆点同源，避免文案/颜色不同步。
   const acc = statusView(availableStatus?.accessibility);
   const screenPerm = statusView(availableStatus?.screenRecording);
+  // 规范 §8.1：锁屏不改变授权事实，但此时截图、观察和输入都会被拒绝。两项都已授权而桌面锁着时
+  // 单独说明一句，否则两行「已授权」会让用户以为可以马上操作；未授权或状态未知时不显示，
+  // 免得把 TCC 问题说成锁屏问题。
+  const desktopLocked =
+    availableStatus?.desktopAvailability === "locked" &&
+    availableStatus.accessibility === "granted" &&
+    availableStatus.screenRecording === "granted";
 
   // 输入框常驻入口的显隐。隐藏开关用 useSettings().update 写入
   // （直连 settingService 只落盘不刷新共享 snapshot，输入框按钮读不到新值）。
@@ -767,7 +785,24 @@ export function ComputerUseSection({
             </div>
           ) : null}
           {/* macOS 权限引导只保留在 Settings 内，CUA 操作与工具审批流不再自动弹权限 modal。 */}
-          {!macOsBelowCuaFloor ? (
+          {!macOsBelowCuaFloor && status && !availableStatus ? (
+            <SettingsGroupCard>
+              <SettingsRow
+                label={intl.formatMessage({ id: "cuaPermission.status.unavailable" })}
+                description={intl.formatMessage({ id: "cuaPermission.modal.unavailable" })}
+                control={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!fresh || !path}
+                    onClick={() => refresh()}
+                  >
+                    {intl.formatMessage({ id: "cuaPermission.status.retry" })}
+                  </Button>
+                }
+              />
+            </SettingsGroupCard>
+          ) : !macOsBelowCuaFloor ? (
             <SettingsGroupCard>
               <SettingsRow
                 controlLayout="wide"
@@ -812,6 +847,19 @@ export function ComputerUseSection({
                       )
                 }
               />
+              {desktopLocked ? (
+                <SettingsRow
+                  label={
+                    <span className="inline-flex items-center gap-1.5 font-normal text-foreground-subtle">
+                      <StatusDot tone="amber" />
+                      <span role="status">
+                        {intl.formatMessage({ id: "cuaPermission.status.locked" })}
+                      </span>
+                    </span>
+                  }
+                  control={null}
+                />
+              ) : null}
             </SettingsGroupCard>
           ) : null}
         </>

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
@@ -204,8 +205,8 @@ import { OFFICIAL_PLUGIN_DEFINITIONS } from "../src/app/official-plugin-definiti
 import { resolveZCodePlugins } from "../src/plugins.js";
 
 const OFFICIAL_CACHE_ROOT = join("cache", "zcode-plugins-official");
-const BROWSER_CACHE_SUFFIX = join(OFFICIAL_CACHE_ROOT, "browser-use", "0.5.1");
-const ANDROID_CACHE_SUFFIX = join(OFFICIAL_CACHE_ROOT, "android-emulator", "0.1.1");
+const BROWSER_CACHE_SUFFIX = join(OFFICIAL_CACHE_ROOT, "browser-use", "0.5.2");
+const ANDROID_CACHE_SUFFIX = join(OFFICIAL_CACHE_ROOT, "android-emulator", "0.1.3");
 const SKILL_CREATOR_CACHE_SUFFIX = join(OFFICIAL_CACHE_ROOT, "skill-creator", "0.1.0");
 const ANDROID_MANIFEST_SUFFIX = join(ANDROID_CACHE_SUFFIX, ".zcode-plugin", "plugin.json");
 const CUA_DEFINITION = OFFICIAL_PLUGIN_DEFINITIONS.find(({ name }) => name === "computer-use");
@@ -242,6 +243,17 @@ describe("bundled official plugin cache resilience", () => {
     faults.seedLockHeldTargetSuffixes = [];
     faults.seedLockObservedTimeoutsMs = [];
     await Promise.all(cleanups.splice(0).map((root) => rm(root, { force: true, recursive: true })));
+  });
+
+  it("publishes computer-use under the SDK release version", async () => {
+    const sdkRoot = new URL("../../zcode-cua-plugin/", import.meta.url);
+    const [pkg, manifest] = await Promise.all(
+      ["package.json", ".zcode-plugin/plugin.json"].map(async (path) =>
+        JSON.parse(await readFile(new URL(path, sdkRoot), "utf8")),
+      ),
+    );
+    expect(manifest.version).toBe(pkg.version);
+    expect(CUA_DEFINITION.version).toBe(pkg.version);
   });
 
   it.each([false, true])("keeps SEA payload hash validation (corrupt: %s)", async (corrupt) => {
@@ -421,6 +433,43 @@ describe("bundled official plugin cache resilience", () => {
     expect(JSON.parse(await readFile(markerPath, "utf8")).hash).toBe("legacy-content-hash");
   });
 
+  it("upgrades the node host cache with its staged Sharp runtime closure", async () => {
+    const storageRoot = await createStorageRoot(cleanups);
+    const definition = OFFICIAL_PLUGIN_DEFINITIONS.find((item) => item.name === "node-repl-host")!;
+    const entrypointRoot = join(storageRoot, "versioned-source");
+    const root = join(entrypointRoot, "packages", "node-repl-host");
+    const payloads = {
+      ".zcode-plugin/plugin.json": JSON.stringify({
+        name: definition.name,
+        version: definition.version,
+      }),
+      "dist/mcp/server.js": "// bundled host",
+      "node_modules/sharp/package.json": '{"name":"sharp","main":"lib/index.js"}',
+      "node_modules/sharp/lib/index.js": 'module.exports = { versions: { vips: "fixture" } };',
+      "node_modules/@img/sharp-darwin-arm64/lib/sharp.node": "native addon fixture",
+      "node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips.dylib": "libvips fixture",
+    };
+    for (const [path, text] of Object.entries(payloads)) {
+      const target = join(root, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, text);
+    }
+    const oldRoot = join(storageRoot, OFFICIAL_CACHE_ROOT, definition.name, "0.7.0");
+    await mkdir(oldRoot, { recursive: true });
+    await writeFile(join(oldRoot, "old-cache"), "preserved");
+    process.argv[1] = join(entrypointRoot, "zcode.cjs");
+
+    await resolveOfficialPluginRoots({ storageRoot });
+
+    const targetRoot = join(storageRoot, OFFICIAL_CACHE_ROOT, definition.name, definition.version);
+    const sharp = createRequire(join(targetRoot, ".zcode-plugin", "plugin.json"))("sharp");
+    expect(sharp.versions.vips).toBe("fixture");
+    expect(definition.version).not.toBe("0.7.0");
+    for (const [path, text] of Object.entries(payloads))
+      expect(await readFile(join(targetRoot, path), "utf8")).toBe(text);
+    expect(await readFile(join(oldRoot, "old-cache"), "utf8")).toBe("preserved");
+  });
+
   it("reseeds the same filesystem version when its declared build identity changes", async () => {
     const storageRoot = await createStorageRoot(cleanups);
     const fixture = await createVersionedSource(storageRoot);
@@ -455,6 +504,16 @@ describe("bundled official plugin cache resilience", () => {
       expect(JSON.parse(await readFile(markerPath, "utf8")).buildIdentity).toBe(
         '{"cuaHelperBuildId":"pipeline-2"}\n',
       );
+
+      // Helper build id 没变而 CUA runtime 已变化，空 build id 也不能复用占位缓存。
+      for (const runtimeSha256 of ["placeholder-runtime", "real-runtime"]) {
+        const identity = `${JSON.stringify({ cuaHelperBuildId: "", runtimeSha256 })}\n`;
+        await writeFile(identityPath, identity);
+        await writeFile(fixture.payload, runtimeSha256);
+        await resolveOfficialPluginRoots({ storageRoot });
+        expect(await cachedPayload()).toBe(runtimeSha256);
+        expect(JSON.parse(await readFile(markerPath, "utf8")).buildIdentity).toBe(identity);
+      }
 
       // 旧客户端写入的 marker 没有构建身份，同样视为过期。
       const marker = JSON.parse(await readFile(markerPath, "utf8"));
@@ -816,7 +875,7 @@ describe("bundled official plugin cache resilience", () => {
     await mkdir(join(incompletePluginRoot, ".zcode-plugin"), { recursive: true });
     await writeFile(
       join(incompletePluginRoot, ".zcode-plugin", "plugin.json"),
-      JSON.stringify({ name: "browser-use", version: "0.5.1" }),
+      JSON.stringify({ name: "browser-use", version: "0.5.2" }),
     );
     process.argv[1] = join(entrypointRoot, "zcode.cjs");
     const logger = createLogger();
@@ -861,7 +920,7 @@ describe("bundled official plugin cache resilience", () => {
     await mkdir(join(incompletePluginRoot, ".zcode-plugin"), { recursive: true });
     await writeFile(
       join(incompletePluginRoot, ".zcode-plugin", "plugin.json"),
-      JSON.stringify({ name: "browser-use", version: "0.5.1" }),
+      JSON.stringify({ name: "browser-use", version: "0.5.2" }),
     );
     process.argv[1] = join(entrypointRoot, "zcode.cjs");
     const logger = createLogger();

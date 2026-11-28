@@ -9,6 +9,37 @@ import {
 } from "../src/runtime/helpers/compact.js";
 
 describe("local microcompact", () => {
+  it.each([
+    [0.5, 1, false],
+    [0.5, 30_000, false],
+    [0.5, 30_001, true],
+    [1.5, 60_001, false],
+    [1.5, 90_001, true],
+    [1, 60_001, true],
+    [0, 1, true],
+    [Number.NaN, 1, false],
+    [Number.POSITIVE_INFINITY, 1, false],
+    [-1, 1, false],
+  ])("preserves idle threshold precision: %s minutes at %s ms", (minutes, elapsed, applied) => {
+    const result = maybeLocalMicrocompactMessages({
+      config: {
+        idleThresholdMinutes: minutes,
+        keepRecentToolResults: 1,
+        minTokenSavings: 1,
+        thresholdTokens: 999_999,
+      },
+      lastAssistantCompletedAtMs: 1000,
+      nowMs: 1000 + elapsed,
+      messages: [
+        { role: "assistant", content: "", toolCalls: [{ id: "old", name: "Read", input: {} }] },
+        { role: "tool", content: "evidence ".repeat(120), toolCallId: "old", toolName: "Read" },
+        { role: "assistant", content: "", toolCalls: [{ id: "new", name: "Read", input: {} }] },
+        { role: "tool", content: "recent", toolCallId: "new", toolName: "Read" },
+      ],
+    });
+    expect(result.decision.reason === "applied").toBe(applied);
+  });
+
   it("counts reasoning consistently in runtime-entry estimates", () => {
     expect(
       estimateRuntimeEntryTokens([

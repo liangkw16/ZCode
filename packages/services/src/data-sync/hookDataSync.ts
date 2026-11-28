@@ -7,6 +7,7 @@ import type {
   DataSyncListItem,
   HookDataSyncPayload,
 } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import {
   WORKSPACE_HOOK_EVENT_NAMES,
   workspaceHookMatcherConfigSchema,
@@ -35,9 +36,10 @@ interface HookEntry {
   index: number;
 }
 
-/** 只同步用户级 `~/.zcode/cli/config.json` 的 hooks；`~/.agents`、`~/.claude` 下的只读来源不读。 */
+/** 只同步用户级 `~/<segment>/cli/config.json` 的 hooks；`~/.agents`、`~/.claude` 下的只读来源不读。 */
+// 修复原因：路径原先硬编码 ".zcode"，kcode 构建下远端同步会读写 ZCode 的 hooks 配置。
 function userConfigPath(): string {
-  return join(resolveUserHomeDir(), ".zcode", "cli", "config.json");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
 }
 
 function sha256(value: string): string {

@@ -4,9 +4,11 @@ import { cp } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, join, win32 } from "node:path";
 import { homedir } from "node:os";
+import { readAssignedCredentialsFile } from "@zcode/shared/credential-security";
 import {
   DATA_BASE_DIR_FORBIDDEN_WINDOWS_INSTALL_DIR_ERROR_CODE,
   ZCODE_AGENT_RUNTIME,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 
 let _dataBaseDir: string | null = null;
@@ -42,9 +44,9 @@ export function getDataBaseDir(): string {
   return defaultDataBaseDir;
 }
 
-/** {dataBaseDir}/.zcode */
+/** {dataBaseDir}/{ZCODE_DATA_DIR_SEGMENT}（默认 .zcode；kcode 构建为 .kcode 镜像根） */
 export function getZCodeDataRootDir(): string {
-  return join(getDataBaseDir(), ".zcode");
+  return join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT);
 }
 
 /** 非项目对话共享的真实工作目录；默认 ~/.zcode/workspace/default。 */
@@ -55,6 +57,15 @@ export function getConversationWorkspaceDir(): string {
 /** {dataBaseDir}/.zcode/v2 */
 export function getAppConfigDir(): string {
   return join(getZCodeDataRootDir(), "v2");
+}
+
+/**
+ * 本进程读写的凭据文件，所有凭据读写方的唯一解析入口。
+ * 进程装配的 ZCODE_CREDENTIALS_FILE 优先（只有使用自有凭据库的 Source Server Core 设置，
+ * 其 Agent 继承）；否则为 {appConfigDir}/credentials.json。调用时读取，不在模块加载时缓存。
+ */
+export function getCredentialsFilePath(): string {
+  return readAssignedCredentialsFile(process.env) ?? join(getAppConfigDir(), "credentials.json");
 }
 
 /**
@@ -69,9 +80,13 @@ export function resolveAgentUserInstructionsHomeDir(env: NodeJS.ProcessEnv = pro
   return envHome && envHome.length > 0 ? envHome : homedir();
 }
 
-/** `{home}/.zcode/AGENTS.md`：用户自定义指令（个性化）的唯一事实源文件。 */
+/** `{home}/{segment}/AGENTS.md`：用户自定义指令（个性化）的唯一事实源文件。 */
 export function getAgentUserInstructionsFilePath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(resolveAgentUserInstructionsHomeDir(env), ".zcode", "AGENTS.md");
+  // 修复原因：CLI adapter（context/index.ts 的 resolveUserInstructions）已按
+  // ZCODE_DATA_DIR_SEGMENT 解析同一路径；此处残留硬编码旧目录名会让 kcode 构建
+  // 下 App 写旧镜像根的 AGENTS.md 而 Agent 读新镜像根，个性化指令分叉
+  // （dataDirSegmentSweep 守护逐字面量核对时捕获）。同用 segment 常量收口。
+  return join(resolveAgentUserInstructionsHomeDir(env), ZCODE_DATA_DIR_SEGMENT, "AGENTS.md");
 }
 
 function readEnvValue(env: Record<string, string | undefined>, key: string): string | undefined {
@@ -251,7 +266,7 @@ export function getLegacyDeletedTaskSessionSnapshotPath(
 export function getProviderWorkspaceConfigDir(): string {
   return ZCODE_AGENT_RUNTIME.nativeConfigDir
     ? join(getDataBaseDir(), ZCODE_AGENT_RUNTIME.nativeConfigDir)
-    : join(getDataBaseDir(), ".zcode", "cli");
+    : join(getDataBaseDir(), ZCODE_DATA_DIR_SEGMENT, "cli");
 }
 
 /**
@@ -260,8 +275,8 @@ export function getProviderWorkspaceConfigDir(): string {
  * state must only live at the default homedir location.
  */
 export async function copyDataDirectory(oldBaseDir: string, newBaseDir: string): Promise<void> {
-  const oldDir = join(oldBaseDir, ".zcode", "v2");
-  const newDir = join(newBaseDir, ".zcode", "v2");
+  const oldDir = join(oldBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2");
+  const newDir = join(newBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2");
   await cp(oldDir, newDir, {
     recursive: true,
     force: false,

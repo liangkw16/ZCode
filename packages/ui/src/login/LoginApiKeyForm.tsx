@@ -30,7 +30,7 @@ import { logger } from "@/logger.js";
 import { renderOAuthProviderIcon } from "@/lib/oauthProviderIcon.js";
 import {
   buildLoginApiKeyDefaultModelPreferenceFromSelection,
-  buildLoginApiKeySkipSettings,
+  buildLoginApiKeyFamilySettings,
   resolveLoginApiKeyDefaultProvider,
   resolveLoginApiKeyTemplateId,
   resolveLoginApiKeyProviderLabel,
@@ -70,6 +70,21 @@ export function LoginApiKeyForm({ onCancel, onSaved, onSkipped }: LoginApiKeyFor
   // 用户已经输入或回填 API Key 后，右侧获取入口会挤占密码输入区域。
   const showApiKeyLink = shouldShowLoginApiKeyLink(apiKeyValue, apiKeyUrl ?? undefined);
 
+  const confirmProviderFamily = async () => {
+    const current = await settingService.get();
+    const previousVersion = current.providerFamilyDomainUpdatedAt ?? 0;
+    // 首次 API Key 登录原先只写 Provider，冷启动缺少运行域，仍会打开欢迎页。
+    // 启用域与跳过使用同一写入路径，由设置服务拒绝过时的跨窗口变更。
+    await settingService.update(
+      buildLoginApiKeyFamilySettings(providerChoice, Math.max(Date.now(), previousVersion + 1)),
+      {
+        providerFamilyDomain: current.providerFamilyDomain,
+        providerFamilyConnectionSelections: current.providerFamilyConnectionSelections,
+        providerFamilyDomainUpdatedAt: previousVersion,
+      },
+    );
+  };
+
   const saveApiKeyProvider = async () => {
     const apiKey = apiKeyValue.trim();
     if (!apiKey) {
@@ -93,6 +108,7 @@ export function LoginApiKeyForm({ onCancel, onSaved, onSkipped }: LoginApiKeyFor
         return;
       }
 
+      await confirmProviderFamily();
       const created = await providerSettingsService.createPersonalProvider({
         templateId,
         initialConfig: { access: { type: template.config.access.type, apiKey } },
@@ -127,7 +143,7 @@ export function LoginApiKeyForm({ onCancel, onSaved, onSkipped }: LoginApiKeyFor
     try {
       // 跳过只表示用户确认当前 provider family 运行域，不能写入空 API Key
       // 或触发 API Key 登录成功事件，否则后续模型选择会误以为已有可用凭据。
-      await settingService.update(buildLoginApiKeySkipSettings(providerChoice, Date.now()));
+      await confirmProviderFamily();
       await onSkipped();
     } catch (skipError) {
       logger.error("[LoginEntry] 跳过 API Key 登录失败", {

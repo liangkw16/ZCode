@@ -1,5 +1,9 @@
 # Prompt Snapshot
 
+## Continuation model after compact (2026-11-15)
+
+A summary model only owns the summary request. New system blocks, tool/mode announcements and the next eligible prompt snapshot use the actual continuation Model (including execution/fallback/off-peak bindings). Build the candidate prefix without changing live history before commit; install and estimate the same prefix after commit. A temporary execution model does not become the session snapshot owner.
+
 Status: current behavior. Scope: main sessions (`querySourceForTask(taskType) === "main_turn"`) with a
 session store. Subagents and workflow actors do not use a snapshot.
 
@@ -68,7 +72,7 @@ build result. A record captures the leading system messages of the request that 
 
 ## Compaction, fork, rewind
 
-- After a successful compaction (manual, auto or reactive) the snapshot is cleared: the runtime drops
+- After a successful compaction (manual, auto or reactive) the snapshot is invalidated in memory before post-commit I/O and its tombstone is then saved: the runtime drops
   its copy, writes the tombstone, and rebuilds the context prefix of the history and of the entries
   it returns from the current code. The next main-loop request records a new snapshot. A skipped
   compaction and microcompaction keep the snapshot.
@@ -89,7 +93,13 @@ build result. A record captures the leading system messages of the request that 
 A system section added by a later CLI version (for example the token budget line, see
 `system-prompt-contract.md`) reaches an existing session only after its next successful compaction
 or session model change. Until then the session keeps its recorded system bytes; reminders that the
-new version adds to the history are appended and do not change the sent prefix.
+new version adds to the history are appended and do not change the sent prefix. A session without a
+recorded snapshot is the exception: its next request records the current system. A system section
+that a later CLI version removes follows the same rule. The same rule covers the total-tokens reminder
+value, which can change between runs (CLI flag or App setting): when it is off, a snapshot that
+recorded the budget line keeps it; when it is on, a snapshot without the line stays without it. Both
+last until the next successful compaction or session model change; the countdown attachments follow
+the current value.
 
 ## Failure and compatibility
 

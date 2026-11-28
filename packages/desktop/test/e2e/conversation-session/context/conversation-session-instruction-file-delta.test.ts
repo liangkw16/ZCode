@@ -6,6 +6,7 @@ import { access, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { TID_V4_COMPOSER_INPUT } from "@zcode/shared/test-ids";
+import { assertProviderToolContracts } from "#e2e/helpers/provider-prefix";
 import {
   clearAppData,
   DEFAULT_WORKSPACE,
@@ -46,7 +47,8 @@ const RULE_V1 = "IFD_RULE_V1 original rule";
 const RULE_V2 = "IFD_RULE_V2 changed between turns";
 const RULE_V3 = "IFD_RULE_V3 changed before compact";
 const COMPACT_REQUEST = "CRITICAL: Respond with TEXT ONLY";
-const FULL_HEAD = "Codebase and user instructions are shown below.";
+// 只取首短语：本仓的共同前言在 "shown below" 之后还有来源与作用域说明，不能带句号整句匹配。
+const FULL_HEAD = "Codebase and user instructions are shown below";
 const DELTA_HEAD = "Instruction files were re-read";
 const PROJECT_TYPE = "(project instructions, checked into the codebase):";
 
@@ -112,7 +114,7 @@ describe("IFD 指令文件增量公告", () => {
     const r3 = await sendTurn("u3", "THIRD: after resume.");
     expectStrictPrefix(r2, r3, "U2 → cold U3");
     expect(stripCacheControl(r3.system)).toEqual(stripCacheControl(r2.system));
-    expect(stripCacheControl(r3.tools)).toEqual(stripCacheControl(r2.tools));
+    assertProviderToolContracts(r2.tools, r3.tools);
     expect(fullAnnouncements(r3)).toEqual([full1]);
     expectDeltaBeforePrompt(
       r3,

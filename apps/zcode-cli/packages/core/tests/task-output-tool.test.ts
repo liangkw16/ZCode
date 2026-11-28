@@ -46,6 +46,7 @@ describe("TaskOutput tool", () => {
       expect.objectContaining({
         name: TASK_OUTPUT_TOOL_NAME,
         description: TASK_OUTPUT_PROVIDER_DESCRIPTION,
+        capability: expect.stringContaining("query task status, wait for completion"),
         inputSchema: taskOutputToolEntry.inputSchema,
         readOnly: true,
         concurrentSafe: true,
@@ -56,6 +57,18 @@ describe("TaskOutput tool", () => {
     for (const alias of ["AgentOutputTool", "BashOutputTool", "AgentOutput", "BashOutput"]) {
       expect(registry.get(alias)?.handler).toBe(taskOutputToolEntry.handler);
     }
+    const description = registry.toContracts()[0]?.description;
+    expect(registry.getMetadata(TASK_OUTPUT_TOOL_NAME)?.searchHint).toContain(
+      "wait for completion",
+    );
+    expect(registry.getMetadata(TASK_OUTPUT_TOOL_NAME)?.searchHint).toContain("background task");
+    expect(description).not.toContain("DEPRECATED");
+    expect(description).not.toContain("symlink to the full subagent conversation");
+    expect(description).toContain("Read retrieves logs; it does not wait for task completion");
+    expect(description).toContain("Never construct a task ID from a callId");
+    expect(description).toContain("Increasing timeout cannot repair a wrong ID");
+    expect(description).toContain("Prefer completion notifications");
+    expect(description).toContain("Do not blindly rerun a task");
   });
 
   it("returns not_ready for a running Agent even when its output file is absent", async () => {
@@ -166,9 +179,11 @@ describe("TaskOutput tool", () => {
     );
 
     expect(registry.get("agent_1")?.notified).toBe(true);
-    expect(formatTaskOutputModelContent(output)).toBe(
+    const text = formatTaskOutputModelContent(output);
+    expect(text).toMatch(/^<retrieval_status>success<\/retrieval_status>/u);
+    expect(text).toContain("Retrieval succeeded; this does not mean the task succeeded");
+    expect(text).toContain(
       [
-        "<retrieval_status>success</retrieval_status>",
         "<task_id>agent_1</task_id>",
         "<task_type>local_agent</task_type>",
         "<status>completed</status>",
@@ -254,30 +269,33 @@ describe("TaskOutput tool", () => {
     },
   );
 
-  it("omits empty optional tags and formats task:null as retrieval status only", () => {
-    expect(
-      formatTaskOutputModelContent({
-        retrieval_status: "not_ready",
-        task: {
-          task_id: "agent_1",
-          task_type: "local_agent",
-          status: "running",
-          description: "Research task",
-          output: " \n\t",
-          exitCode: null,
-        },
-      }),
-    ).toBe(
+  it("explains running and missing snapshots without inventing a task outcome", () => {
+    const running = formatTaskOutputModelContent({
+      retrieval_status: "not_ready",
+      task: {
+        task_id: "agent_1",
+        task_type: "local_agent",
+        status: "running",
+        description: "Research task",
+        output: " \n\t",
+        exitCode: null,
+      },
+    });
+    expect(running).toContain("The task is still active");
+    expect(running).not.toContain("<exit_code>");
+    expect(running).not.toContain("<output>");
+    expect(running).toContain(
       [
-        "<retrieval_status>not_ready</retrieval_status>",
         "<task_id>agent_1</task_id>",
         "<task_type>local_agent</task_type>",
         "<status>running</status>",
       ].join("\n\n"),
     );
-    expect(formatTaskOutputModelContent({ retrieval_status: "timeout", task: null })).toBe(
-      "<retrieval_status>timeout</retrieval_status>",
-    );
+    const missing = formatTaskOutputModelContent({ retrieval_status: "timeout", task: null });
+    expect(missing).toContain("<retrieval_status>timeout</retrieval_status>");
+    expect(missing).toContain("does not mean the task failed or stopped");
+    expect(missing).toContain("verify the original task ID and current runtime");
+    expect(missing).not.toContain("<task_id>");
   });
 
   it("prefers the completed Agent result over disk output and joins blocks with one newline", async () => {
@@ -961,9 +979,30 @@ describe("TaskOutput tool", () => {
     await expect(taskOutputToolEntry.handler({ task_id: "missing" }, context)).resolves.toEqual({
       result: false,
       errorCode: 2,
-      message: "No task found with ID: missing",
+      message: expect.stringContaining("No task found with ID: missing"),
     });
   });
+
+  it.each([30_000, 600_000])(
+    "does not wait or rerun for a wrong task ID (timeout=%s)",
+    async (timeout) => {
+      const registry = registryWithTask(runtimeTask());
+      const result = await taskOutputToolEntry.handler(
+        { task_id: "call_agent_1", block: true, timeout },
+        toolContext(registry),
+      );
+      expect(result).toMatchObject({
+        result: false,
+        errorCode: 2,
+        message: expect.stringContaining("Increasing timeout cannot repair a wrong ID"),
+      });
+      expect(result).toMatchObject({
+        message: expect.stringContaining("check existing results and side effects before retrying"),
+      });
+      expect(registry.get("agent_1")?.status).toBe("running");
+      expect(registry.get("call_agent_1")).toBeUndefined();
+    },
+  );
 
   it("projects schema and TaskOutput handler failures through the executor", async () => {
     const sessionId = createSessionId("task-output-validation");
@@ -1020,8 +1059,11 @@ describe("TaskOutput tool", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error?.message).toBe(testCase.message);
-      expect(result.modelContent).toBe(`<tool_use_error>${testCase.message}</tool_use_error>`);
+      expect(result.error?.message).toContain(testCase.message);
+      expect(result.modelContent).toBe(`<tool_use_error>${result.error?.message}</tool_use_error>`);
+      if (testCase.input.task_id) {
+        expect(result.modelContent).toContain("Increasing timeout cannot repair a wrong ID");
+      }
     }
   });
 
@@ -1082,7 +1124,8 @@ describe("TaskOutput tool", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.modelContent).toBe(`<tool_use_error>${testCase.message}</tool_use_error>`);
+      expect(result.modelContent).toContain(testCase.message);
+      expect(result.modelContent).toBe(`<tool_use_error>${result.error?.message}</tool_use_error>`);
     }
 
     expect(preToolUseCalls).toBe(0);

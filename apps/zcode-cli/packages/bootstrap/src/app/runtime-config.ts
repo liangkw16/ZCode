@@ -2,16 +2,17 @@ import type { ConfigResult } from "@zcode/adapters/config";
 import { GEN_UI_OUTPUT_ROOT_ENV } from "@zcode/shared/node";
 import { resolveInitialModelSelection, type ModelSelectionOptions } from "@zcode/provider";
 import { resolveBashTimeoutPolicy, type AgentProfile, type AgentRuntimeConfig } from "@zcode/core";
+import type { AutoCompactPolicyConfig } from "@zcode/core";
 import { type BuiltInSubagentModelSelectionOverrides } from "@zcode/shared";
 import {
   type CollaborationMode,
+  type CompactRuntimeConfig,
   type HookConfigSource,
   type HookEventName,
   type HookMatcherConfig,
   type HooksRuntimeConfig,
-  type McpServerConfig,
+  type McpConfigurationSnapshot,
 } from "@zcode/contracts";
-import { omitMcpServers, resolveTrustedOfficialCuaServerNames } from "../mcp-config.js";
 import { resolveDefaultEmbeddedSearchBackend } from "./embedded-search-backend.js";
 import { getProjectMemoryRoot } from "./paths.js";
 import type { ZCodeAppOptions } from "./types.js";
@@ -22,7 +23,6 @@ import {
 } from "./provider-registry-selection.js";
 
 interface ResolvedAppRuntimeConfig {
-  configuredMcpServers: Record<string, McpServerConfig>;
   runtimeConfig: AgentRuntimeConfig;
   untrustedProjectMcpServers: Set<string>;
 }
@@ -36,10 +36,9 @@ export function resolveAppRuntimeConfig(input: {
   configResult: ConfigResult;
   options: ZCodeAppOptions;
   persistedMode?: CollaborationMode;
-  builtInMcpServers?: Record<string, McpServerConfig>;
+  mcpConfiguration: Partial<McpConfigurationSnapshot>;
   builtInSubagentModelSelectionOverrides?: BuiltInSubagentModelSelectionOverrides;
   pluginHooks?: Partial<Record<HookEventName, HookMatcherConfig[]>>;
-  pluginMcpServers?: Record<string, McpServerConfig>;
   pluginRuntimeFeatures?: AgentRuntimeConfig["runtimeFeatures"];
   subagentOutputRootDir: string;
   subagentProfiles?: readonly AgentProfile[];
@@ -52,8 +51,6 @@ export function resolveAppRuntimeConfig(input: {
     configResult,
     options,
     persistedMode,
-    builtInMcpServers,
-    pluginMcpServers,
     pluginRuntimeFeatures,
     subagentOutputRootDir,
     subagentProfiles = [],
@@ -88,43 +85,22 @@ export function resolveAppRuntimeConfig(input: {
               }
             : {}),
         };
-  // Protocol session/create 传入的 mcp.servers 只包含 UI MCP 设置里的用户配置，
-  // 不包含插件注册的 MCP。宿主内建 server 最后合并并保留其 identity，避免用户或第三方
-  // 用同名配置劫持 mcp__node_repl__*；普通 plugin MCP 仍允许显式用户配置覆盖。
-  const configuredMcpServers = {
-    ...pluginMcpServers,
-    ...(options.runtimeConfig?.mcp?.servers ?? configResult.config.mcp.servers),
-    ...builtInMcpServers,
-  };
-  const trustedOfficialCuaServerNames = resolveTrustedOfficialCuaServerNames(
-    configuredMcpServers,
-    pluginMcpServers ?? {},
-  );
-  const cuaBridgeServerNames = new Set(trustedOfficialCuaServerNames);
-  if (pluginRuntimeFeatures?.computerUse === true && configuredMcpServers.node_repl) {
-    // node_repl 需要 broker 注入，但不是 CUA MCP server。注入资格与官方 CUA 图片
-    // authority 必须分开；把它塞进 trustedOfficialCuaServerNames 会让整个
-    // 通用 node_repl 结果被误送进 exact-raster gate，Browser 截图和 console 日志都会失败。
-    cuaBridgeServerNames.add("node_repl");
-  }
+  // 配置合并与磁盘 server 的来源标记都在 MCP 配置源完成；这里把 workspace 来源计入待信任集合，
+  // 并按 createConfig 的来源给没有标记的显式 server 补标。
+  const mcpServers = { ...input.mcpConfiguration.servers };
   const untrustedProjectMcpServers = new Set<string>();
-  for (const [name, config] of Object.entries(configuredMcpServers)) {
+  for (const [name, config] of Object.entries(mcpServers)) {
     if (
       config.source?.kind === "workspace" ||
       (!config.source && configResult.sources.mcp.serverSources[name] === "project")
     ) {
-      configuredMcpServers[name] = { ...config, source: { kind: "workspace" } };
+      mcpServers[name] = { ...config, source: { kind: "workspace" } };
       untrustedProjectMcpServers.add(name);
     } else if (!config.source && configResult.sources.mcp.serverSources[name] === "user") {
       // headless 配置也保留用户来源，项目文件损坏不能把用户 MCP 当成待信任声明。
-      configuredMcpServers[name] = { ...config, source: { kind: "user" } };
+      mcpServers[name] = { ...config, source: { kind: "user" } };
     }
   }
-  const autoConnectMcpServers = omitMcpServers(
-    configuredMcpServers,
-    new Set(),
-    cuaBridgeServerNames,
-  );
   const runtimeBuiltInModelSelectionOverrides =
     options.runtimeConfig?.subagents?.builtInModelSelectionOverrides ?? {};
   const runtimeConfig: AgentRuntimeConfig = {
@@ -147,7 +123,6 @@ export function resolveAppRuntimeConfig(input: {
         env: options.env,
       }),
     runtimeFeatures: pluginRuntimeFeatures,
-    language: options.runtimeConfig?.language,
     titleGeneration,
     workingDirectory,
     additionalDirectories: options.additionalDirectories,
@@ -166,11 +141,12 @@ export function resolveAppRuntimeConfig(input: {
       ...configResult.config.modelAnomalyGuard,
       ...options.runtimeConfig?.modelAnomalyGuard,
     },
-    mcp: {
-      enabled: options.runtimeConfig?.mcp?.enabled ?? configResult.config.features.mcp,
-      servers: autoConnectMcpServers,
-      trustedOfficialCuaServerNames: [...trustedOfficialCuaServerNames],
-    },
+    compact: resolveCompactPolicyConfig(
+      configResult.config.compact,
+      configResult.config.features.compact,
+      options.runtimeConfig?.compact,
+    ),
+    mcp: { ...input.mcpConfiguration, servers: mcpServers },
     hooks: mergeRuntimeHooks(
       options.runtimeConfig?.hooks
         ? withHookConfigSource(options.runtimeConfig.hooks, { kind: "internal" })
@@ -200,7 +176,6 @@ export function resolveAppRuntimeConfig(input: {
     },
   };
   return {
-    configuredMcpServers,
     runtimeConfig,
     untrustedProjectMcpServers,
   };
@@ -222,6 +197,66 @@ function withHookConfigSource(
       ]),
     ) as HooksRuntimeConfig["events"],
   };
+}
+
+/**
+ * 把配置文件的 compact 段映射成 core 的 AutoCompactPolicyConfig。
+ *
+ * 两点关键约束：
+ * 1. 未设置的键必须从结果中剔除（而不是保留 undefined 键）：autoCompactIfNeeded 以
+ *    `{ contextWindow: 模型窗口, ...compact }` 构造策略，显式 undefined 键会覆盖模型
+ *    窗口并让阈值回退到 200K 兜底，改变既有压缩时机。
+ * 2. enabled 语义：显式 compact.enabled > features.compact 总开关（默认 true）；
+ *    嵌入方程序化传入的 compact 策略整体优先于配置文件。
+ */
+function resolveCompactPolicyConfig(
+  fileConfig: CompactRuntimeConfig | undefined,
+  featuresCompact: boolean,
+  runtimeOverride: AutoCompactPolicyConfig | undefined,
+): AutoCompactPolicyConfig {
+  const microcompact = fileConfig?.microcompact;
+  // 程序化 runtimeOverride 是嵌入方对压缩行为的整体接管：modelOverrides 不在此解析
+  // （此处无模型身份，必须延迟到组装点按实际执行模型挑选）。程序化 override 存在时
+  // 文件级与程序化对象自带的覆盖表一并剔除——后者若不剥离，末尾展开会把它重新带回，
+  // 让组装点的模型覆盖反超程序化值，违反优先级链。
+  const {
+    modelOverrides: _programmaticModelOverridesIgnored,
+    ...programmaticOverrideWithoutModelOverrides
+  } = runtimeOverride ?? {};
+  return omitUndefinedKeys({
+    ...(microcompact
+      ? {
+          microcompact: omitUndefinedKeys({
+            enabled: microcompact.enabled,
+            thresholdTokens: microcompact.thresholdTokens,
+            idleThresholdMinutes: microcompact.idleThresholdMinutes,
+            keepRecentToolResults: microcompact.keepRecentToolResults,
+            compactableToolNames: microcompact.compactableToolNames,
+            clearErrorResults: microcompact.clearErrorResults,
+            minTokenSavings: microcompact.minTokenSavings,
+          }),
+        }
+      : {}),
+    ...(runtimeOverride === undefined ? { modelOverrides: fileConfig?.modelOverrides } : {}),
+    bufferTokens: fileConfig?.bufferTokens,
+    contextWindow: fileConfig?.contextWindowTokens,
+    keepRecentRounds: fileConfig?.keepRecentRounds,
+    keepRecentTokens: fileConfig?.keepRecentTokens,
+    maxConsecutiveFailures: fileConfig?.maxConsecutiveFailures,
+    outputReserveTokens: fileConfig?.outputReserveTokens,
+    summaryMaxOutputTokens: fileConfig?.summaryMaxOutputTokens,
+    summaryModel: fileConfig?.summaryModel,
+    summaryProvider: fileConfig?.summaryProvider,
+    thresholdRatio: fileConfig?.thresholdRatio,
+    enabled: fileConfig?.enabled ?? featuresCompact,
+    ...programmaticOverrideWithoutModelOverrides,
+  });
+}
+
+function omitUndefinedKeys<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
+  ) as T;
 }
 
 function resolveInitialRegistrySelection(
@@ -307,6 +342,10 @@ export function runtimeConfigLogContext(
       : undefined,
     runtimeFeatureBrowserUse: runtimeConfig.runtimeFeatures?.browserUse === true,
     runtimeFeatureNodeRepl: runtimeConfig.runtimeFeatures?.nodeRepl === true,
+    // 评测时据此确认 runtime 实际用的 token 预算提醒开关。
+    totalTokensReminder: runtimeConfig.totalTokensReminder?.enabled === true,
+    // 评测时据此确认 Agent 是否总在后台运行（缺省开启）。
+    agentAlwaysBackground: runtimeConfig.subagents?.alwaysBackground !== false,
     // 只在被改过（开发环境变量或 runtimeConfig）时出现，便于确认 ZCODE_SUBAGENT_STALL_NOTIFY_MS 生效值。
     ...(runtimeConfig.subagents?.backgroundStallNotifyMs !== undefined
       ? { subagentStallNotifyMs: runtimeConfig.subagents.backgroundStallNotifyMs }

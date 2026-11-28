@@ -3,7 +3,7 @@ import { z } from "zod";
 import { EditInputJsonSchema } from "../src/tools/edit.js";
 import { toToolJsonSchema } from "../src/tools/json-schema.js";
 import { EnterPlanModeInputJsonSchema } from "../src/tools/plan-mode.js";
-import { SkillInputJsonSchema } from "../src/tools/skill.js";
+import { SkillInputJsonSchema, SkillInputSchema } from "../src/tools/skill.js";
 import { ToolSearchInputJsonSchema } from "../src/tools/tool-search.js";
 import { WebSearchInputJsonSchema } from "../src/tools/websearch.js";
 import { WriteInputJsonSchema } from "../src/tools/write.js";
@@ -16,7 +16,7 @@ const EXPECTED_INPUT_SCHEMAS = {
   EnterPlanMode:
     '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false}',
   Skill:
-    '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"skill":{"description":"The name of a skill from the available-skills list. Do not guess names.","type":"string"},"args":{"description":"Optional arguments for the skill","type":"string"}},"required":["skill"],"additionalProperties":false}',
+    '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"skill":{"description":"Exact skill name from the catalog, a discovery result, or an explicit user invocation. Do not guess names.","type":"string"},"args":{"description":"Compatibility field; the handler ignores it and does not pass it into skill content.","type":"string"}},"required":["skill"],"additionalProperties":false}',
   WebSearch:
     '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"query":{"description":"The search query to use","type":"string","minLength":2},"allowed_domains":{"description":"Only include search results from these domains","type":"array","items":{"type":"string"}},"blocked_domains":{"description":"Never include search results from these domains","type":"array","items":{"type":"string"}}},"required":["query"],"additionalProperties":false}',
   ToolSearch:
@@ -24,6 +24,18 @@ const EXPECTED_INPUT_SCHEMAS = {
 };
 
 describe("tool JSON schema key order", () => {
+  it("keeps Skill field types and legacy input compatibility while updating model guidance", () => {
+    expect(SkillInputSchema.parse({ name: "omitted-skill", args: "compatibility" })).toEqual({
+      skill: "omitted-skill",
+      args: "compatibility",
+    });
+    expect(SkillInputSchema.parse({ skill: "omitted-skill" })).toEqual({
+      skill: "omitted-skill",
+    });
+    expect(SkillInputSchema.safeParse({ skill: "omitted-skill", args: 1 }).success).toBe(false);
+    expect(SkillInputSchema.safeParse({ args: "compatibility" }).success).toBe(false);
+  });
+
   it("serializes shared tool input schemas byte-for-byte", () => {
     const actual = {
       Edit: EditInputJsonSchema,
@@ -46,8 +58,51 @@ describe("tool JSON schema key order", () => {
       }),
     );
 
+    // 只有 default、没有 optional 的字段在输出里一定有值，算必填。
     expect(JSON.stringify(schema)).toBe(
-      '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"tags":{"description":"Tags","minItems":1,"maxItems":4,"type":"array","items":{"type":"string","maxLength":12}},"count":{"description":"Count","default":3,"type":"integer","minimum":0,"maximum":9}},"required":["tags"],"additionalProperties":false}',
+      '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"tags":{"description":"Tags","minItems":1,"maxItems":4,"type":"array","items":{"type":"string","maxLength":12}},"count":{"description":"Count","default":3,"type":"integer","minimum":0,"maximum":9}},"required":["tags","count"],"additionalProperties":false}',
+    );
+  });
+
+  it("leaves optional fields out of required, including default-then-optional and preprocess", () => {
+    const schema = toToolJsonSchema(
+      z.object({
+        flag: z.boolean().default(false).optional(),
+        limit: z
+          .preprocess((value) => value, z.number().int().min(1).max(50))
+          .default(20)
+          .optional(),
+        offset: z.preprocess((value) => value, z.number().optional()),
+        name: z.string(),
+      }),
+    );
+
+    expect(schema.required).toEqual(["name"]);
+  });
+
+  it("writes unions and nullable fields as anyOf branches", () => {
+    const schema = toToolJsonSchema(
+      z.object({
+        delay: z.number().int().positive().nullable().optional(),
+        target: z.discriminatedUnion("kind", [
+          z.object({ kind: z.literal("a") }).strict(),
+          z.object({ kind: z.literal("b") }).strict(),
+        ]),
+      }),
+    );
+
+    expect(JSON.stringify(schema.properties)).toBe(
+      '{"delay":{"anyOf":[{"type":"integer","exclusiveMinimum":0,"maximum":9007199254740991},{"type":"null"}]},"target":{"anyOf":[{"type":"object","properties":{"kind":{"type":"string","const":"a"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","const":"b"}},"required":["kind"],"additionalProperties":false}]}}',
+    );
+  });
+
+  it("rejects zod types that JSON Schema cannot represent", () => {
+    expect(() => toToolJsonSchema(z.object({ when: z.date() }))).toThrow(
+      "Date cannot be represented in JSON Schema",
+    );
+    // 自定义清单曾漏掉 undefined：它会静默变成 `{}`，模型看到一个什么都接受的参数。
+    expect(() => toToolJsonSchema(z.object({ gone: z.undefined() }))).toThrow(
+      "Undefined cannot be represented in JSON Schema",
     );
   });
 

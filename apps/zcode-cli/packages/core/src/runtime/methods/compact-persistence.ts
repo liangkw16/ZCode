@@ -1,3 +1,4 @@
+import type { ToolSearchDelivery } from "@zcode/contracts";
 import {
   CompactTrigger,
   CompactTimelineDisplay,
@@ -30,6 +31,8 @@ import {
   removeRuntimePersistenceMessagesBestEffort,
   resolvePersistedReminderModel,
 } from "./runtime-reminder-persistence.js";
+
+import { buildAssistantTimelineRecord } from "./timeline-persistence.js";
 
 export function buildCompactTimelinePayload(
   this: AgentRuntimeInternal,
@@ -84,12 +87,47 @@ export async function persistCompactTimeline(
   this: AgentRuntimeInternal,
   payload: CompactTimelinePayload,
   traceContext: TraceContext,
+  // 冷恢复修正旧状态时传入已加载的记录：只更新完成状态与 boundary 字段。
+  loaded?: MessageWithParts,
 ): Promise<void> {
   if (!this.sessionStore) return;
 
+  const record = buildCompactTimelineRecord(this, payload, traceContext);
+  if (loaded) preserveCompactTimelineAssociations(record, loaded);
+  await this.persistMessage(record.info, traceContext);
+  for (const part of record.parts) await this.persistPart(part, traceContext);
+}
+
+// 修复原因：冷恢复修正旧的压缩状态时，原先用当前 runtime 重建整条消息再保存。此刻还没有
+// latestConversationMessageId，重建出的 parentID 指向时间线消息自己，原命令关联 sourceCommandId
+// 也丢了，V4 随后无法把这条时间线事实关联到原 /compact 命令。恢复只改完成状态与 boundary 字段，
+// 消息头与时间线 part 的关联字段沿用已加载的记录。
+function preserveCompactTimelineAssociations(
+  record: MessageWithParts,
+  loaded: MessageWithParts,
+): void {
+  if (record.info.role !== "assistant" || loaded.info.role !== "assistant") return;
+  const rebuilt = record.info;
+  record.info = {
+    ...loaded.info,
+    finish: rebuilt.finish,
+    time: { ...loaded.info.time, completed: rebuilt.time.completed },
+  };
+  record.parts = record.parts.map((part) => {
+    const previous = loaded.parts.find((item) => item.id === part.id);
+    if (part.type !== "timeline" || previous?.type !== "timeline") return part;
+    return { ...part, sourceCommandId: previous.sourceCommandId };
+  });
+}
+
+function buildCompactTimelineRecord(
+  runtime: AgentRuntimeInternal,
+  payload: CompactTimelinePayload,
+  traceContext: TraceContext,
+): MessageWithParts {
   const created = payload.startedAt ?? Date.now();
-  await this.persistAssistantTimelinePartForSession({
-    sessionId: this.sessionId,
+  const record = buildAssistantTimelineRecord(runtime, {
+    sessionId: runtime.sessionId,
     messageID: payload.messageId,
     partID: compactTimelinePartId(payload),
     created,
@@ -119,36 +157,34 @@ export async function persistCompactTimeline(
     },
     traceContext,
   });
-  await this.persistPart(
-    {
-      id: payload.partId ?? createPartId(),
-      sessionID: this.sessionId,
-      messageID: payload.messageId,
-      type: "compaction",
-      auto: payload.trigger === CompactTrigger.Auto,
-      trigger: payload.trigger,
-      phase: payload.phase,
-      compactReason: payload.compactReason,
-      operationId: payload.operationId,
-      timelineStatus: payload.status,
-      timelineDisplay: payload.display,
-      replace: payload.replace,
-      reason: payload.reason,
-      attempt: payload.attempt,
-      maxAttempts: payload.maxAttempts,
-      boundaryId: payload.boundaryId,
-      summaryMessageId: payload.summaryMessageId,
-      tail_start_id: payload.tailStartMessageId,
-      preCompactTokenCount: payload.preCompactTokenCount,
-      postCompactTokenCount: payload.postCompactTokenCount,
-      truePostCompactTokenCount: payload.truePostCompactTokenCount,
-      time: {
-        start: payload.startedAt,
-        end: payload.endedAt,
-      },
+  record.parts.push({
+    id: payload.partId ?? createPartId(),
+    sessionID: runtime.sessionId,
+    messageID: payload.messageId,
+    type: "compaction",
+    auto: payload.trigger === CompactTrigger.Auto,
+    trigger: payload.trigger,
+    phase: payload.phase,
+    compactReason: payload.compactReason,
+    operationId: payload.operationId,
+    timelineStatus: payload.status,
+    timelineDisplay: payload.display,
+    replace: payload.replace,
+    reason: payload.reason,
+    attempt: payload.attempt,
+    maxAttempts: payload.maxAttempts,
+    boundaryId: payload.boundaryId,
+    summaryMessageId: payload.summaryMessageId,
+    tail_start_id: payload.tailStartMessageId,
+    preCompactTokenCount: payload.preCompactTokenCount,
+    postCompactTokenCount: payload.postCompactTokenCount,
+    truePostCompactTokenCount: payload.truePostCompactTokenCount,
+    time: {
+      start: payload.startedAt,
+      end: payload.endedAt,
     },
-    traceContext,
-  );
+  });
+  return record;
 }
 
 function compactTimelinePartId(payload: CompactTimelinePayload): PartId {
@@ -215,8 +251,13 @@ export async function recoverInterruptedCompactTimelines(
     for (const part of message.parts) {
       if (
         part.type !== "compaction" ||
-        !isRecoverableRunningCompactTimelineStatus(part.timelineStatus) ||
-        !part.operationId
+        !part.operationId ||
+        (!isRecoverableRunningCompactTimelineStatus(part.timelineStatus) &&
+          !(
+            boundaryByOperationId.has(part.operationId) &&
+            (part.timelineStatus === CompactTimelineStatus.Failed ||
+              part.timelineStatus === CompactTimelineStatus.Interrupted)
+          ))
       ) {
         continue;
       }
@@ -251,7 +292,7 @@ export async function recoverInterruptedCompactTimelines(
         tailStartMessageId: boundary?.lastSummarizedMessageId,
         truePostCompactTokenCount: boundary?.truePostCompactTokenCount,
       });
-      await this.persistCompactTimeline(payload, traceContext);
+      await persistCompactTimeline.call(this, payload, traceContext, message);
       Object.assign(part, {
         timelineStatus: payload.status,
         phase: payload.phase,
@@ -292,15 +333,19 @@ export async function persistCompactSummary(
   compactBoundary: CompactBoundaryPayload,
   traceContext: TraceContext,
   options?: {
+    /** 与 live 条目相同的时间；冷恢复按它还原条目时间。 */
+    created?: number;
     model?: Model;
     operationId?: string;
+    completedTimeline?: CompactTimelinePayload;
     leadingReminderEntries?: readonly RuntimeMessageEntry[];
     postCompactReminderEntries?: readonly RuntimeMessageEntry[];
+    toolSearchDelivery?: ToolSearchDelivery;
   },
-): Promise<void> {
+): Promise<Error | undefined> {
   if (!this.sessionStore) return;
 
-  const created = Date.now();
+  const created = options?.created ?? Date.now();
   const recordOptions = { created, model: options?.model };
   const leading = buildReminderRecords(this, options?.leadingReminderEntries, recordOptions);
   const attachments = buildReminderRecords(
@@ -331,6 +376,9 @@ export async function persistCompactSummary(
         transcriptVisibility: "hidden",
       },
       system: this.config.systemPrompt,
+      ...(options?.toolSearchDelivery
+        ? { metadata: { toolSearchDelivery: options.toolSearchDelivery } }
+        : {}),
     },
     parts: [
       {
@@ -366,7 +414,14 @@ export async function persistCompactSummary(
   // 存储顺序与 live 一致：请求前公告 → summary → compaction 附件，只在 summary 产出后整组写入。
   const records = [...leading, summaryRecord, ...attachments];
   if (this.sessionStore.commitMessageBundle) {
-    await this.sessionStore.commitMessageBundle({ sessionID: this.sessionId, messages: records });
+    // 完成 timeline 是摘要提交的一部分；后续事件写失败不能把它重新变成 failed。
+    const completed = options?.completedTimeline
+      ? buildCompactTimelineRecord(this, options.completedTimeline, traceContext)
+      : undefined;
+    await this.sessionStore.commitMessageBundle({
+      sessionID: this.sessionId,
+      messages: completed ? [...records, completed] : records,
+    });
     this.logger?.debug("Compact bundle persisted", {
       ...traceContextToLogContext(traceContext),
       event: "session.compact_bundle.persisted",
@@ -387,6 +442,21 @@ export async function persistCompactSummary(
   } catch (error) {
     await removeRuntimePersistenceMessagesBestEffort.call(this, persistedMessageIds, traceContext);
     throw error;
+  }
+  // 兼容无 bundle 的 store：摘要已保存，完成状态失败不能触发删除旧 timeline 或重新摘要。
+  if (options?.completedTimeline) {
+    try {
+      await this.persistCompactTimeline(options.completedTimeline, traceContext);
+    } catch (error) {
+      this.logger?.warn("Committed compact timeline update failed", {
+        ...traceContextToLogContext(traceContext),
+        event: "compact.committed_timeline.failed",
+        operationId: options.operationId,
+        boundaryId: compactBoundary.boundaryId,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      return error instanceof Error ? error : new Error(String(error));
+    }
   }
 }
 

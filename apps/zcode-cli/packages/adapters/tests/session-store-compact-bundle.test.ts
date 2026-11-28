@@ -133,6 +133,25 @@ describe("sqlite compact bundle", () => {
     await expect(store.messages({ sessionID: sessionId })).resolves.toEqual([]);
   });
 
+  it("rolls back both the summary and an existing timeline update when the final completion part fails", async () => {
+    const { store, sessionId } = await openStore("compact-completion-rollback");
+    const started = userMessage(sessionId, "timeline", { metadata: { status: "started" } });
+    await store.commitMessageBundle!({ sessionID: sessionId, messages: [started] });
+    const completed = userMessage(sessionId, "timeline", {
+      metadata: { status: "completed", invalid: 1n },
+    });
+    await expect(
+      store.commitMessageBundle!({
+        sessionID: sessionId,
+        messages: [summaryMessage(sessionId, []), completed],
+      }),
+    ).rejects.toThrow(/BigInt/);
+    const messages = await store.messages({ sessionID: sessionId });
+    expect(messages).toHaveLength(1);
+    expect(messages[0].info.id).toBe(started.info.id);
+    expect(messages[0].parts[0]).toMatchObject({ metadata: { status: "started" } });
+  });
+
   it("rejects records that belong to another session before writing", async () => {
     const { store, sessionId } = await openStore("compact-bundle-owner");
     const foreign = userMessage(createSessionId("other-session"), "foreign");

@@ -1,5 +1,9 @@
 # ZCode CLI Compact 设计 v2
 
+## 本批修复合同（2026-11-15）
+
+执行合并设计中的摘要/接续模型分离、完成 timeline 同事务提交和提交后事件补投规则。idleThresholdMinutes 保留小数分钟精度与 elapsed > threshold 边界；默认关闭和其他整数旋钮不变。输出截断只允许一次短摘要重生成，不能作为 prompt-too-long 删除旧输入。
+
 ## 文档定位
 
 本文记录 ZCode v2 compact 的候选设计。当前文档属于 `L1 Candidate Contract`：它明确 compact 的领域边界、状态变化、对外契约和风险，但不固定最终 TypeScript 接口、数据库表结构或事件字段全集。
@@ -7,6 +11,8 @@
 实施拆分见 [plan.md](./plan.md)。
 
 compact 阶段语义与 memory read/write path 的增量改造计划见 [compact-phase-memory-plan.md](./compact-phase-memory-plan.md)。
+
+按模型覆盖阈值策略（`compact.modelOverrides`）的设计与实施见 [model-overrides-design.md](./model-overrides-design.md) 与 [model-overrides-plan.md](./model-overrides-plan.md)。
 
 Compact 的目标不是简单减少 UI 中可见消息，而是在不丢失当前任务连续性的前提下，把模型可见上下文从“完整历史”切换为“断点 + 总结 + 必要恢复上下文”。因此它必须和 session、message chain、tool result、memory、hooks、rewind、file checkpoint、resume 和 trace 一起设计。
 
@@ -68,7 +74,7 @@ compact 或 preflight；该降级不改变 tool 执行和持久化合同。
 2. 执行轻量压缩或预算裁剪，例如 tool result budget、microcompact、snip。
 3. 判断是否满足 compact policy；手动 compact 直接进入执行。
 4. 运行 `PreCompact` hook，允许追加受控 summary 指令或阻止 compact。
-5. 构造 summary prompt。summary agent 只能输出文本，不允许工具调用。
+5. 构造 summary prompt。summary prompt 要求只输出文本；回复仍带工具调用时，按下文「摘要文本的选取」处理。
 6. 调 provider 生成 summary，并把 prompt-too-long、网络中断、无文本输出等失败归一化。
 7. 创建 `CompactBoundary` 和 `CompactSummary`。
 8. 生成 post-compact 恢复上下文，例如最近文件、plan 状态、已加载 skill、agent 状态、MCP/tool 声明、session start hook 结果。
@@ -76,6 +82,14 @@ compact 或 preflight；该降级不改变 tool 执行和持久化合同。
 10. 运行 `PostCompact` hook，记录 telemetry，清理已失效的缓存。
 
 业务 core 只表达这些状态转移和意图。模型请求、文件读取、session 存储、hook 子进程、网络和日志都必须通过 adapter 完成。
+
+#### 摘要文本的选取
+
+- 摘要请求只跑一轮。回复里的工具调用不执行，也不进入历史；运行时记一条 info 日志（`compact.summary.tool_calls_ignored`，带工具名），然后按文本继续。
+- 回复有多个文本块时，选最后一个含 `<summary>` 的文本块；都不含时，选最后一个文本块。空文本块也算一个文本块。流式结果和非流式回退用同一规则；结果没有分块信息时，用整段文字。
+- 只清洗选出的这一块：去掉第一个 `<analysis>…</analysis>`，把第一个 `<summary>…</summary>` 换成 `Summary:\n<内容>`。`<summary>` 被拆在两个文本块里时，只用含开标签的那一块，这块没有闭标签，标签原样保留。
+- 回复带工具调用时，选出的块必须有摘要：有成对的 `<summary>…</summary>`，或有一行以 `<summary>` 开头（先去掉第一个 `<analysis>…</analysis>` 再判断）。没有时按清洗后为空处理。原因：模型常先说一句（例如 "Let me read the file first."）再调用工具，这句话不是摘要，接受它会用一句话替换整段历史。没有工具调用的回复不做这项检查。
+- 清洗后为空（包括回复里没有文本块、只有工具调用）时，压缩失败，错误是 `Failed to generate compact summary`（可重试）。auto 在同一次压缩内最多尝试 3 次；手动压缩和 reactive 只尝试 1 次。
 
 ### 1.4 Summary 内容要求
 
@@ -201,13 +215,16 @@ Compact timeline 的显示规则属于客户端投影：
 
 ZCode 自有配置和环境变量必须使用 `ZCODE_` 前缀。
 
-建议配置项：
+当前配置项（根配置的 `compact` 段，strict schema 见 `adapters/src/config/schema.ts`；阈值覆盖的语义见 [model-overrides-design.md](./model-overrides-design.md)）：
 
-- `autoCompactEnabled`：是否启用自动 compact。
-- `compact.maxSummaryOutputTokens`：summary 输出预算。
-- `compact.bufferTokens`：自动 compact 触发 buffer。
+- `compact.enabled`：是否启用自动 compact。
+- `compact.summaryMaxOutputTokens`：summary 输出预算。
+- `compact.bufferTokens`、`compact.contextWindowTokens`、`compact.thresholdRatio`：自动 compact 的触发窗口与阈值。
 - `compact.maxConsecutiveFailures`：自动 compact 失败熔断次数。
-- `compact.preserveRecentTokens`：session memory compact 或 partial compact 的最近上下文保留量。
+- `compact.keepRecentTokens`：session memory compact 或 partial compact 的最近上下文保留量。
+- `compact.summaryProvider` 与 `compact.summaryModel`：摘要请求使用的模型，必须成对配置。
+- `compact.modelOverrides`：按 `providerId → modelId` 精确匹配的阈值覆盖表。
+- `compact.microcompact.*`：microcompact 的同构配置。
 
 调试和运维 override 不声明环境变量入口，优先使用 config file、CLI/session override 或测试注入。新增 `ZCODE_` 环境变量必须先补齐 spec，明确用途、优先级、错误行为和测试覆盖。
 

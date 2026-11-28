@@ -1,4 +1,7 @@
 import { join } from "node:path";
+// 修复原因：/init 提示词里“不要写用户级 AGENTS.md”的路径原先写死 "~/.zcode"，而 agent 实际读取的
+// 用户级指令文件随产品 segment（kcode 为 ~/.kcode）。走窄入口，不拉 contracts 桶文件。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import {
   BUILTIN_WORKFLOW_COMMAND_NAME,
   expandBuiltinWorkflowCommandPrompt,
@@ -101,7 +104,7 @@ function buildInitAgentsPrompt(params: {
     `- Instruction file: ${params.targetPath}`,
     `- Existing hidden instruction candidates: ${join(params.workingDirectory, ".zcode", "AGENTS.md")} and ${join(params.workingDirectory, ".agents", "AGENTS.md")}`,
     "- File name must be exactly AGENTS.md.",
-    "- This command targets the current workspace only. Do not write ~/.zcode/AGENTS.md.",
+    `- This command targets the current workspace only. Do not write ~/${ZCODE_DATA_DIR_SEGMENT}/AGENTS.md.`,
     additionalInstructions,
     "",
     "Process:",

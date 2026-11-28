@@ -1,0 +1,726 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { createServer, type Socket } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createComputerUseRuntime } from "../index.js";
+import {
+  CUA_REQUEST_ACCESS_STATUS_META_KEY,
+  cuaRequestAccessStatusSchema,
+} from "../request-access-contract.js";
+const cleanups: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const fn of cleanups.splice(0).reverse()) await fn();
+});
+const context = {
+  sessionId: "s1",
+  runtimeScope: "main" as const,
+  workspaceKey: "/work",
+  workspacePath: "/work",
+  workspaceIdentity: "one",
+};
+async function fixture(options: {
+  screenshot?: boolean;
+  pixelsOnly?: boolean;
+  hold?: string;
+  pressable?: boolean;
+} = {}) {
+  const dir = await mkdtemp(join(tmpdir(), "kcua-rt-"));
+  const socketPath = join(dir, "broker.sock");
+  const calls: any[] = [];
+  const sockets = new Set<Socket>();
+  let generation = "g1",
+    epoch = 0,
+    failObservation = false,
+    appExited = false,
+    failCall:
+      | ((request: any, ordinal: number) => Record<string, unknown> | undefined)
+      | undefined,
+    rasterFailure: "blank" | "capture_error" | undefined;
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      for (let n = buffer.indexOf("\n"); n >= 0; n = buffer.indexOf("\n")) {
+        const r = JSON.parse(buffer.slice(0, n));
+        buffer = buffer.slice(n + 1);
+        if (r.method === "authenticate") {
+          socket.write(
+            JSON.stringify({
+              id: r.id,
+              ok: true,
+              result: {
+                authenticated: true,
+                serverApiVersion: 3,
+                kcode: {
+                  generation,
+                  capability: "private",
+                  cleanupFence: true,
+                  pixelsOnly: options.pixelsOnly,
+                  cancellationEpoch: epoch,
+                },
+              },
+            }) + "\n",
+          );
+          continue;
+        }
+        calls.push(r);
+        // 注入点：按方法与第几次调用返回错误或指定结果，用来模拟多步骤动作中途失败。
+        const ordinal = calls.filter((c) => c.method === r.method).length;
+        const injected = failCall?.(r, ordinal);
+        if (injected) {
+          socket.end(JSON.stringify({ id: r.id, ok: false, error: injected }) + "\n");
+          continue;
+        }
+        if (r.method === options.hold) continue;
+        if (r.method === "operation_cancel") {
+          epoch++;
+          socket.end(
+            JSON.stringify({
+              id: r.id,
+              ok: true,
+              result: { cleanup_complete: true, epoch, dispatch_status: "possibly_sent" },
+            }) + "\n",
+          );
+          continue;
+        }
+        if (r.method === "capture_app" && failObservation) {
+          socket.end(
+            JSON.stringify({
+              id: r.id,
+              ok: false,
+              error: { code: "desktop_locked", message: "locked" },
+            }) + "\n",
+          );
+          continue;
+        }
+        const result =
+          r.method === "capture_app"
+            ? {
+                app: { pid: 700, bundle_id: "dev.fixture", name: "Fixture" },
+                window: { window_id: 10, bounds: { x: -100, y: 20, width: 200, height: 100 } },
+                elements: r.params.pixels_only ? [] : [
+                  {
+                    native: "token1",
+                    actions: options.pressable === false ? [] : ["AXPress"],
+                    role: "AXTextField",
+                    kind: "text_field",
+                    title: "Text",
+                    value: "中文🌟",
+                    editable: true,
+                    bounds: { x: -90, y: 30, width: 80, height: 20 },
+                  },
+                ],
+                desktop_epoch: 0,
+                cancellation_epoch: epoch,
+                snapshot_mode: "full",
+              }
+            : r.method === "list_applications"
+              ? [{ pid: 700, bundle_id: "dev.fixture", name: "Fixture" }]
+              : r.method === "application_info"
+                ? // 与原生一致：应用在运行时返回应用信息，已退出时返回 null。
+                  (appExited ? null : { pid: 700, bundle_id: "dev.fixture", name: "Fixture" })
+              : r.method === "list_windows"
+                ? [{ window_id: 10 }]
+                : r.method === "session_release"
+                  ? { cleanup_complete: true }
+                  : r.method === "request_access" || r.method === "permission_status"
+                    ? {
+                        grant_owner: "dev.zcode.cua-helper.kcode",
+                        accessibility: "granted",
+                        screen_recording: "denied",
+                        desktop_availability: "unlocked",
+                      }
+                    : { action_sent: true, dispatch_status: "accepted" };
+        if (r.method === "capture_app" && r.params.include_screenshot && rasterFailure) {
+          Object.assign(result, rasterFailure === "blank"
+            ? { screenshot_blank: true }
+            : { screenshot_error: { code: "capture_unavailable" } });
+        } else if (r.method === "capture_app" && options.screenshot && r.params.include_screenshot) {
+          Object.assign(result, {
+            screenshot: {
+              format: "png",
+              width: 1,
+              height: 1,
+              data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/J0AAAAASUVORK5CYII=",
+            },
+            pointer: { x: -100, y: 20, width: 200, height: 100 },
+            surface_identity: { pid: 700, window_id: 10, process_birth: "b1" },
+            display: { topology_fingerprint: "topo-1" },
+          });
+        }
+        socket.end(JSON.stringify({ id: r.id, ok: true, result }) + "\n");
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(socketPath, r));
+  const runtime = createComputerUseRuntime({ brokerSocketPath: socketPath });
+  cleanups.push(async () => {
+    await runtime.dispose();
+    for (const s of sockets) s.destroy();
+    await new Promise<void>((r) => server.close(() => r()));
+    await rm(dir, { recursive: true });
+  });
+  const run = (toolName: string, args: unknown = {}, ctx = context) =>
+    runtime.execute({ toolName, arguments: args, context: ctx });
+  return {
+    runtime,
+    run,
+    calls,
+    setGeneration: (g: string) => (generation = g),
+    setEpoch: (e: number) => (epoch = e),
+    failObservation: () => (failObservation = true),
+    setRasterFailure: (failure?: "blank" | "capture_error") => (rasterFailure = failure),
+    setAppExited: (exited: boolean) => (appExited = exited),
+    setFailCall: (
+      hook: ((request: any, ordinal: number) => Record<string, unknown> | undefined) | undefined,
+    ) => (failCall = hook),
+  };
+}
+it.each([true, false])(
+  "negotiates pixels-only Capture without evicting AX state (support %s)",
+  async (pixelsOnly) => {
+    const f = await fixture({ screenshot: true, pixelsOnly });
+    const app = { pid: 700 };
+    await f.run("get_app_state", { app_ref: app, include_screenshot: false });
+    const raster = await f.run("get_app_state", {
+      app_ref: app, include_screenshot: true, tree_shown_to_model: false,
+    });
+    expect(raster.isError).not.toBe(true);
+    expect(raster.content.filter((item) => item.type === "image")).toHaveLength(1);
+    expect(f.calls.at(-1).params.pixels_only).toBe(pixelsOnly ? true : undefined);
+    expect(raster.structuredContent?.elements).toHaveLength(pixelsOnly ? 0 : 1);
+    const action = await f.run("set_value", {
+      app_ref: app, target: { type: "element", index: 0 }, value: "after screenshot",
+    });
+    expect(action.isError).not.toBe(true);
+    expect(f.calls.at(-1).params.native).toBe("token1");
+    await f.run("get_app_state", { app_ref: app, include_screenshot: true });
+    expect(f.calls.at(-1).params.pixels_only).toBeUndefined();
+  },
+);
+it("returns full state and preserves observed indices across fresh hidden SDK bindings", async () => {
+  const f = await fixture();
+  const state = await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  expect(state.isError).not.toBe(true);
+  expect(state.structuredContent).toMatchObject({
+    snapshot_mode: "full",
+    elements: [{ index: 0, value: "中文🌟" }],
+  });
+  const hidden = await f.run("get_app_state", {
+    app_ref: { pid: 700 },
+    include_screenshot: false,
+    tree_shown_to_model: false,
+  });
+  expect(hidden.isError).not.toBe(true);
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(1);
+  const action = await f.run("set_value", {
+    app_ref: { pid: 700 },
+    target: { type: "element", index: 0 },
+    value: "好\ud83c",
+  });
+  expect(action.isError).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "element_set_value",
+    params: { native: "token1", value: "好�" },
+  });
+  expect(action.structuredContent).toMatchObject({
+    action_receipt: { dispatch_status: "accepted", retry_action: false },
+  });
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(1);
+});
+it("rejects unknown keys, selectors, nonfinite numbers and subagents before broker preparation", async () => {
+  let calls = 0;
+  const runtime = createComputerUseRuntime({
+    ensureBrokerAvailable: async () => {
+      calls++;
+    },
+  });
+  cleanups.push(() => runtime.dispose());
+  for (const args of [
+    { app_ref: { pid: 700 }, extra: true },
+    { app_ref: { pid: NaN } },
+    { app_ref: { pid: 1.2 } },
+    { app_ref: { pid: 4294967297 } },
+    { app_ref: { pid: 700, window_id: 4294967306 } },
+    { app_ref: { name: " " } },
+  ]) {
+    expect(
+      (await runtime.execute({ toolName: "get_app_state", arguments: args, context })).isError,
+    ).toBe(true);
+  }
+  expect(
+    (
+      await runtime.execute({
+        toolName: "list_apps",
+        arguments: {},
+        context: { ...context, runtimeScope: "subagent" },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(calls).toBe(0);
+});
+it("keeps indices scoped by workspace identity and refuses arbitrary coordinates without a delivered frame", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  const result = await f.run(
+    "set_value",
+    { app_ref: { pid: 700 }, target: { type: "element", index: 0 }, value: "wrong" },
+    { ...context, workspaceIdentity: "two" },
+  );
+  expect(result.isError).toBe(true);
+  expect(
+    (
+      await f.run("left_click", {
+        app_ref: { pid: 700 },
+        target: { type: "coordinate", x: 1, y: 1, frame_id: "forged" },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(f.calls.some((c) => c.method === "click" || c.method === "element_set_value")).toBe(false);
+});
+it("requires a fresh shown observation after a generation or cancellation epoch change", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  f.setEpoch(1);
+  expect(
+    (
+      await f.run("set_value", {
+        app_ref: { pid: 700 },
+        target: { type: "element", index: 0 },
+        value: "stale",
+      })
+    ).isError,
+  ).toBe(true);
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  expect(
+    (
+      await f.run("set_value", {
+        app_ref: { pid: 700 },
+        target: { type: "element", index: 0 },
+        value: "fresh",
+      })
+    ).isError,
+  ).not.toBe(true);
+  f.setGeneration("g2");
+  expect((await f.run("key", { app_ref: { pid: 700 }, text: "ENTER" })).isError).toBe(true);
+});
+it("preserves accepted receipt if explicitly requested post-action observation fails", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  f.failObservation();
+  const result = await f.run("set_value", {
+    app_ref: { pid: 700 },
+    target: { type: "element", index: 0 },
+    value: "done",
+    return_state: "full",
+  });
+  expect(result.structuredContent).toMatchObject({
+    action_receipt: { dispatch_status: "accepted", retry_action: false },
+    state_unavailable: true,
+  });
+  expect(f.calls.filter((c) => c.method === "element_set_value")).toHaveLength(1);
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(2);
+});
+it("latches stop for one logical session without disabling a different workspace identity", async () => {
+  const f = await fixture();
+  expect((await f.run("stop_computer_control")).isError).not.toBe(true);
+  expect((await f.run("list_apps")).isError).toBe(true);
+  expect((await f.run("list_apps", {}, { ...context, workspaceIdentity: "two" })).isError).not.toBe(
+    true,
+  );
+  expect(f.calls.filter((c) => c.method === "session_release")).toHaveLength(1);
+});
+it("maps all public observation and action tools to the compatible broker without implicit captures", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  const base = { app_ref: { pid: 700 } },
+    target = { type: "element", index: 0 };
+  for (const [name, args, method] of [
+    ["list_apps", {}, "list_applications"],
+    ["list_windows", base, "list_windows"],
+    ["left_click", { ...base, target }, "element_press"],
+    [
+      "left_click",
+      { ...base, target, strategy: "event", modifiers: ["shift"], click_count: 2 },
+      "click",
+    ],
+    ["scroll", { ...base, target, scroll_direction: "down", scroll_amount: 2 }, "scroll"],
+    ["left_click_drag", { ...base, from_target: target, to: target }, "drag"],
+    ["type", { ...base, text: "中文🌟\nline" }, "type_text_to_app"],
+    ["set_value", { ...base, target, value: "text" }, "element_set_value"],
+    ["select_text", { ...base, target, text_range: [0, 2] }, "element_select_text"],
+    ["key", { ...base, text: "CMD+A" }, "press_key_to_app"],
+    ["key", { ...base, text: "SHIFT", hold_seconds: 1 }, "hold_key_to_app"],
+    ["perform_action", { ...base, target, action: "AXPress" }, "element_perform_action"],
+    ["paste", { ...base, text: "<b>中文</b>", format: "html" }, "paste"],
+    ["request_access", {}, "request_access"],
+  ] as const) {
+    const result = await f.run(name, args);
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    expect(f.calls.at(-1).method).toBe(method);
+  }
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(1);
+});
+it("does not reuse hidden cached bindings after native epoch changes", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  f.setEpoch(2);
+  const hidden = await f.run("get_app_state", {
+    app_ref: { pid: 700 },
+    include_screenshot: false,
+    tree_shown_to_model: false,
+  });
+  expect(hidden.isError).not.toBe(true);
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(2);
+  expect(
+    (
+      await f.run("set_value", {
+        app_ref: { pid: 700 },
+        target: { type: "element", index: 0 },
+        value: "stale",
+      })
+    ).isError,
+  ).toBe(true);
+});
+it("cancels and drains before settling, invalidates old indices and allows the same logical session to continue", async () => {
+  const f = await fixture({ hold: "hold_key_to_app" });
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  const controller = new AbortController();
+  const work = f.runtime.execute({
+    toolName: "key",
+    arguments: { app_ref: { pid: 700 }, text: "SHIFT", hold_seconds: 20 },
+    context,
+    signal: controller.signal,
+  });
+  await new Promise<void>((resolve) => {
+    const check = () =>
+      f.calls.some((c) => c.method === "hold_key_to_app") ? resolve() : setTimeout(check, 1);
+    check();
+  });
+  controller.abort();
+  const result = await work;
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    action_receipt: { dispatch_status: "possibly_sent", retry_action: false },
+  });
+  expect(
+    (
+      await f.run("set_value", {
+        app_ref: { pid: 700 },
+        target: { type: "element", index: 0 },
+        value: "stale",
+      })
+    ).isError,
+  ).toBe(true);
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  expect((await f.run("key", { app_ref: { pid: 700 }, text: "ENTER" })).isError).not.toBe(true);
+  expect(f.calls.filter((c) => c.method === "hold_key_to_app")).toHaveLength(1);
+});
+it("projects only the latest delivered raster to native points and keeps it across hidden or AX-only observations", async () => {
+  const f = await fixture({ screenshot: true });
+  const observed = await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: true });
+  const frame = JSON.parse((observed.content.at(-1) as any).text).image_ref.frame_id;
+  // 纯 AX 观察不产生新帧，也不撤销仍有效的旧帧（设计 §9.1）。
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  expect(
+    (
+      await f.run("left_click", {
+        app_ref: { pid: 700 },
+        target: { type: "coordinate", x: 0, y: 0, frame_id: frame },
+      })
+    ).isError,
+  ).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "click",
+    params: {
+      point: { x: -100, y: 20 },
+      expected_pid: 700,
+      expected_window_id: 10,
+      expected_desktop_epoch: 0,
+      // 截图时记录的进程出生身份与显示拓扑一并交给原生层核对：PID 被复用或显示器拓扑变化
+      // 而窗口矩形没变时，仅凭 PID、窗口号和矩形识不破旧帧。
+      expected_process_birth: "b1",
+      expected_display_topology: "topo-1",
+    },
+  });
+  // 新的像素观察撤销旧帧。
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: true });
+  const before = f.calls.filter((c) => c.method === "click").length;
+  expect(
+    (
+      await f.run("left_click", {
+        app_ref: { pid: 700 },
+        target: { type: "coordinate", x: 0, y: 0, frame_id: frame },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(f.calls.filter((c) => c.method === "click")).toHaveLength(before);
+});
+it("allows an implicit latest-frame coordinate across fresh SDK cells", async () => {
+  const f = await fixture({ screenshot: true });
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: true });
+  expect(
+    (
+      await f.run("left_click", {
+        app_ref: { pid: 700 },
+        target: { type: "coordinate", x: 0, y: 0 },
+      })
+    ).isError,
+  ).not.toBe(true);
+});
+it.each(["blank", "capture_error", "request_error", "after_input"] as const)(
+  "revokes both explicit and implicit old coordinates after %s",
+  async (scenario) => {
+    const f = await fixture({ screenshot: true, pixelsOnly: true });
+    const app_ref = { pid: 700 };
+    const first = await f.run("get_app_state", { app_ref, include_screenshot: true });
+    const frame_id = JSON.parse((first.content.at(-1) as any).text).image_ref.frame_id;
+    const pixel = { type: "coordinate", x: 0, y: 0 };
+    if (scenario === "after_input") {
+      expect((await f.run("left_click", { app_ref, target: pixel })).isError).not.toBe(true);
+    } else {
+      if (scenario === "request_error") f.failObservation();
+      else f.setRasterFailure(scenario);
+      const failed = await f.run("get_app_state", {
+        app_ref, include_screenshot: true, tree_shown_to_model: false,
+      });
+      expect(failed.content.some((item) => item.type === "image")).toBe(false);
+    }
+    const clickCount = f.calls.filter((c) => c.method === "click").length;
+    for (const target of [pixel, { ...pixel, frame_id }]) {
+      const result = await f.run("left_click", { app_ref, target });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: "stale_state" },
+        action_receipt: { dispatch_status: "not_sent" },
+      });
+    }
+    expect(f.calls.filter((c) => c.method === "click")).toHaveLength(clickCount);
+    if (scenario !== "request_error") {
+      f.setRasterFailure();
+      await f.run("get_app_state", { app_ref, include_screenshot: true, tree_shown_to_model: false });
+      expect((await f.run("left_click", { app_ref, target: pixel })).isError).not.toBe(true);
+    }
+  },
+);
+it("supports the existing SDK in two fresh workers using the same Host observations", async () => {
+  const f = await fixture();
+  const { setupComputerUseRuntime } =
+    await import("../../../apps/zcode-cli/packages/zcode-cua-plugin/scripts/computer-use-client.mjs");
+  const make = async () => {
+    const globals: any = {
+      process: { platform: "darwin" },
+      [Symbol.for("zcode.node-repl.computer-use-bridge")]: {
+        assertAvailable() {},
+        call: f.run,
+        documentationRoot: "/fixture",
+      },
+      nodeRepl: { write() {}, emitImage() {} },
+    };
+    await setupComputerUseRuntime({ globals });
+    return globals.agent.computerUse;
+  };
+  const first = await make();
+  const app = await first.getApp({ pid: 700 });
+  expect(await app.getAXState({ emit: false })).toContain("中文🌟");
+  const fresh = await make();
+  const bound = await fresh.getApp({ pid: 700 });
+  await bound.setValue(0, "SDK 中文🌟");
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "element_set_value",
+    params: { value: "SDK 中文🌟", native: "token1" },
+  });
+});
+
+it("keeps stop idempotent without releasing a session twice", async () => {
+  const f = await fixture();
+  await f.run("stop_computer_control");
+  expect((await f.run("stop_computer_control")).isError).not.toBe(true);
+  expect(f.calls.filter((c) => c.method === "session_release")).toHaveLength(1);
+});
+it("SDK exposes stale-state and lock refusals with recovery codes instead of INTERNAL retries", async () => {
+  const f = await fixture();
+  const { setupComputerUseRuntime } =
+    await import("../../../apps/zcode-cli/packages/zcode-cua-plugin/scripts/computer-use-client.mjs");
+  const globals: any = {
+    process: { platform: "darwin" },
+    [Symbol.for("zcode.node-repl.computer-use-bridge")]: {
+      assertAvailable() {},
+      call: f.run,
+      documentationRoot: "/fixture",
+    },
+    nodeRepl: { write() {} },
+  };
+  await setupComputerUseRuntime({ globals });
+  const app = await globals.agent.computerUse.getApp({ pid: 700 });
+  await app.getAXState({ emit: false });
+  f.setEpoch(1);
+  await expect(app.setValue(0, "stale")).rejects.toMatchObject({
+    code: "STALE_STATE",
+    retry: "reobserve",
+    actionSent: false,
+  });
+  f.failObservation();
+  await expect(app.getAXState()).rejects.toMatchObject({
+    code: "DESKTOP_LOCKED",
+    retry: "never",
+    actionSent: false,
+  });
+});
+
+it("chooses raw click for a non-pressable AX element and preserves native refetch authority", async () => {
+  const f = await fixture({ pressable: false });
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  expect(
+    (await f.run("left_click", { app_ref: { pid: 700 }, target: { type: "element", index: 0 } }))
+      .isError,
+  ).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "click",
+    params: { native_target: "token1", app_ref: { pid: 700, window_id: 10 } },
+  });
+});
+it("forwards trusted turn context to presentation without accepting it as a model argument", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false }, {
+    ...context,
+    turnId: "trusted-turn",
+  } as any);
+  expect(f.calls.find((c) => c.method === "capture_app").params.pip_session_context).toEqual({
+    session_id: "s1",
+    turn_id: "trusted-turn",
+  });
+});
+it("honors the documented key repeat, type target focus and whole-value select_text", async () => {
+  const f = await fixture();
+  const base = { app_ref: { pid: 700 } },
+    target = { type: "element", index: 0 };
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+
+  // 文档约定 key 用 repeat 重发和弦，而不是让调用方循环。
+  const key = await f.run("key", { ...base, text: "enter", repeat: 3 });
+  expect(key.isError, JSON.stringify(key)).not.toBe(true);
+  expect(f.calls.filter((c) => c.method === "press_key_to_app")).toHaveLength(3);
+
+  // 文档约定 type 可带 target：定位与输入是同一次原生请求（Host 侧分两步时并发调用会交错）。
+  const sentBefore = f.calls.length;
+  const typed = await f.run("type", { ...base, text: "hello", target });
+  expect(typed.isError, JSON.stringify(typed)).not.toBe(true);
+  expect(f.calls.length).toBe(sentBefore + 1);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "type_text_to_app",
+    params: { focus_native: "token1", text: "hello" },
+  });
+  expect(f.calls.at(-1).params).not.toHaveProperty("click_native");
+  // 显式 event 不碰 AX 焦点：按元素当前位置点击定位。
+  const eventTyped = await f.run("type", {
+    ...base, text: "hello", target, strategy: "event",
+  });
+  expect(eventTyped.isError, JSON.stringify(eventTyped)).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({
+    method: "type_text_to_app",
+    params: { click_native: "token1", text: "hello" },
+  });
+  expect(f.calls.at(-1).params).not.toHaveProperty("focus_native");
+
+  // 文档约定不带 text_range 时选中整个值：范围由原生层按元素当前值计算，Host 不传。
+  const selected = await f.run("select_text", { ...base, target });
+  expect(selected.isError, JSON.stringify(selected)).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({ method: "element_select_text", params: { native: "token1" } });
+  expect(f.calls.at(-1).params).not.toHaveProperty("text_range");
+  const ranged = await f.run("select_text", { ...base, target, text_range: [1, 2] });
+  expect(ranged.isError, JSON.stringify(ranged)).not.toBe(true);
+  expect(f.calls.at(-1).params.text_range).toEqual([1, 2]);
+
+  // 文档里的修饰键是 "+" 分隔的和弦字符串。
+  const clicked = await f.run("left_click", { ...base, target, modifiers: "cmd+Shift" });
+  expect(clicked.isError, JSON.stringify(clicked)).not.toBe(true);
+  expect(f.calls.at(-1)).toMatchObject({ method: "click", params: { modifiers: ["cmd", "shift"] } });
+
+  // 显式 strategy 强制走那一条路径：a11y 做不到的事明确拒绝，不静默改发事件，也不派发任何原生调用。
+  for (const [name, args] of [
+    ["left_click", { ...base, target, modifiers: "cmd", strategy: "a11y" }],
+    ["key", { ...base, text: "a", strategy: "a11y" }],
+    ["set_value", { ...base, target, value: "x", strategy: "event" }],
+  ] as const) {
+    const sent = f.calls.length;
+    const refused = await f.run(name, args);
+    expect(refused.isError, `${name} should refuse`).toBe(true);
+    expect(f.calls.length).toBe(sent);
+  }
+  expect(f.calls.filter((c) => c.method === "press_key_to_app")).toHaveLength(3);
+});
+
+it("does not capture a raster unless include_screenshot is true", async () => {
+  const f = await fixture({ screenshot: true });
+  const state = await f.run("get_app_state", { app_ref: { pid: 700 } });
+  expect(state.isError, JSON.stringify(state)).not.toBe(true);
+  expect(state.content.some((item) => item.type === "image")).toBe(false);
+  expect(f.calls.find((c) => c.method === "capture_app").params.include_screenshot).toBe(false);
+});
+
+it("drops a cached binding when application_info reports that the app exited", async () => {
+  const f = await fixture();
+  await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+  f.setAppExited(true);
+  const hidden = await f.run("get_app_state", {
+    app_ref: { pid: 700 }, include_screenshot: false, tree_shown_to_model: false,
+  });
+  expect(hidden.isError, JSON.stringify(hidden)).not.toBe(true);
+  // 缓存被撤销并重新观察，而不是带着旧 PID 原样返回。
+  expect(f.calls.filter((c) => c.method === "capture_app")).toHaveLength(2);
+});
+
+it("maps request_access to the documented AccessStatus and accepts the SDK's stop reason", async () => {
+  const f = await fixture();
+  const access = await f.run("request_access", { capabilities: ["accessibility"] });
+  expect(access.isError, JSON.stringify(access)).not.toBe(true);
+  const status = {
+    ready: false,
+    accessibility: "granted",
+    screenRecording: "denied",
+  };
+  // SDK 的 requestAccess() 解析首个文本块；桌面的权限观察读取 _meta 里的权限事实。
+  expect(access.structuredContent).toEqual(status);
+  expect(JSON.parse(access.content[0].text)).toEqual(status);
+  expect(cuaRequestAccessStatusSchema.safeParse(access._meta[CUA_REQUEST_ACCESS_STATUS_META_KEY]))
+    .toMatchObject({ success: true });
+  expect(access._meta[CUA_REQUEST_ACCESS_STATUS_META_KEY]).toMatchObject({
+    platform: "darwin",
+    grantOwner: "dev.zcode.cua-helper.kcode",
+    accessibility: "granted",
+    screenRecording: "denied",
+  });
+  const stopped = await f.run("stop_computer_control", { reason: "user" });
+  expect(stopped.isError, JSON.stringify(stopped)).not.toBe(true);
+  expect(stopped.structuredContent).toEqual({ stopped: true });
+});
+
+it.each(["error", "not_sent"] as const)(
+  "reports a multi-step action as sent when an earlier step was dispatched (%s on the later step)",
+  async (later) => {
+    const f = await fixture();
+    await f.run("get_app_state", { app_ref: { pid: 700 }, include_screenshot: false });
+    f.setFailCall((request, ordinal) =>
+      request.method === "press_key_to_app" && ordinal === 2
+        ? later === "error"
+          ? {
+              code: "cancelled",
+              message: "cancelled before dispatch",
+              details: { action_sent: false, dispatch_status: "not_sent" },
+            }
+          : { code: "cancelled", message: "cancelled before dispatch" }
+        : undefined,
+    );
+    const result = await f.run("key", { app_ref: { pid: 700 }, text: "ENTER", repeat: 2 });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: "cancelled" },
+      // 第一次按键已经发出，整次回执不能报成 not_sent。
+      action_receipt: { action_sent: true, dispatch_status: "possibly_sent" },
+    });
+  },
+);

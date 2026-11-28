@@ -97,6 +97,24 @@ describe("custom command expansion", () => {
     expect(expanded).toContain("it uses ${#ZCODE_PLUGIN_ROOT}, which cannot be resolved here.");
   });
 
+  it("holds back shell blocks whose plugin values contain shell-active characters", () => {
+    // 上游同步审查 P2 回归：值按文本替换进命令，含 $ ` " ' \ 的路径在执行时会被
+    // shell 二次展开/截断引号（环境变量传值不会）；按无法安全解析整块不转交。
+    const command = createCommand("!`bash ${CLAUDE_PLUGIN_ROOT}/run.sh`");
+    command.metadata = {
+      ...command.metadata,
+      plugin: { dataPath: "/data/p", id: "p@market", name: "p", rootPath: "/tmp/$DEMO_VAR/plugin" },
+      scope: "user",
+      source: "plugin",
+    };
+
+    const expanded = expandCustomCommandPrompt({ args: "", command }).prompt;
+    expect(expanded).toContain(
+      "[A shell step from the /demo command file (user/plugin) was not run: it uses ${CLAUDE_PLUGIN_ROOT}, which cannot be resolved here.]",
+    );
+    expect(expanded).not.toContain("```bash");
+  });
+
   it("writes Windows plugin paths with forward slashes, quoted or not", () => {
     const command = createCommand(
       ["!`bash ${CLAUDE_PLUGIN_ROOT}/scripts/run.sh`", '!`ls "$ZCODE_PLUGIN_DATA"`'].join("\n"),

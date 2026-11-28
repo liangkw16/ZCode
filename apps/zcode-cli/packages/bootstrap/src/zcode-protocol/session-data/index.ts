@@ -49,73 +49,103 @@ export async function measureSessionDataWith(
 
 /**
  * 附件仍被本次不删除的会话引用的树整棵保留：fork、回退、工作流转录按值复制 part，
- * `zcode-artifact://<源会话>/…` 仍指向源会话的附件目录。保留一棵会让它也成为引用方，迭代到不动点。
+ * `zcode-artifact://<源会话>/…` 仍指向源会话的附件目录。引用关系按树建立依赖，只取一次快照，
+ * 之后按本批的删除结果推进（见 purgeSessionDataWith 的注释）。
  */
-async function referencedRoots(
-  host: SessionDataHost,
-  candidates: ReadonlyArray<{ root: string; ids: string[] }>,
-  removable: Set<string>,
-): Promise<Set<string>> {
-  const referrers = await host.store.listArtifactReferrers(
-    candidates.flatMap(({ ids }) => ids) as SessionId[],
-  );
-  const referenced = new Set<string>();
-  for (let changed = true; changed; ) {
-    changed = false;
-    for (const { root, ids } of candidates) {
-      if (referenced.has(root)) continue;
-      const outside = ids.some((id) =>
-        (referrers.get(id as SessionId) ?? []).some((referrer) => !removable.has(referrer)),
-      );
-      if (!outside) continue;
-      referenced.add(root);
-      for (const id of ids) removable.delete(id);
-      changed = true;
-    }
-  }
-  return referenced;
-}
-
 export async function purgeSessionDataWith(
   host: SessionDataHost,
   params: V4SessionDataParams,
 ): Promise<V4SessionDataPurgeResult> {
   const result: V4SessionDataPurgeResult = { deleted: [], kept: [], failed: [], memory: [] };
   const all = await trees(host, params);
-  // 运行中的会话（含其子会话在跑）整棵保留：删掉正在写入的会话会让 turn 写库失败。
-  const running = new Set(
-    all
-      .filter(({ ids }) => ids.some((id) => host.residency(id) === "busy"))
-      .map(({ root }) => root),
+  const idsOf = new Map(all.map(({ root, ids }) => [root, ids] as const));
+  const treeOf = new Map<string, string>();
+  for (const { root, ids } of all) for (const id of ids) treeOf.set(id, root);
+
+  // 引用关系只取一次：listArtifactReferrers 是对 part 表的全表 instr 扫描，此前按轮次对剩余候选
+  // 重取快照，32 棵树的单向引用链要把整库扫 32 遍。之后只按本批的删除结果推进依赖：
+  // 引用方删除成功，它的引用随行一起消失；引用方被保留（运行中）或删除失败，被它引用的树整棵
+  // 保留——附件不能先于引用方消失，否则留下永久悬挂引用。
+  const referrers = await host.store.listArtifactReferrers(
+    [...treeOf.keys()] as SessionId[],
   );
-  const candidates = all.filter(({ root }) => !running.has(root));
-  const referenced = await referencedRoots(
-    host,
-    candidates,
-    new Set(candidates.flatMap(({ ids }) => ids)),
-  );
-  for (const { root, ids } of all) {
-    if (running.has(root)) {
-      result.kept.push({ sessionId: root, reason: "running" });
-      continue;
-    }
-    if (referenced.has(root)) {
-      result.kept.push({ sessionId: root, reason: "referenced" });
-      continue;
-    }
-    try {
-      for (const id of ids) if (host.residency(id) === "idle") await host.release(id);
-      // 先删文件再删行：文件删除失败时行还在，重试仍能按会话找到这些文件。
-      let bytes = 0;
-      for (const id of ids) bytes += await host.files.removeSession(id);
-      await host.store.purgeSessions([root as SessionId]);
-      // 文件与行都删除后才从列表投影移除；失败时 sessions-index 与 Host 镜像保持原样。
-      for (const id of ids) host.forgetIndexed(id);
-      result.deleted.push({ sessionId: root, bytes });
-    } catch (error) {
-      result.failed.push({ sessionId: root, code: failureCode(error) });
+  // root → 本批内必须先删除的引用方树；root → 引用它的那些树。
+  const blockers = new Map<string, Set<string>>();
+  const dependents = new Map<string, Set<string>>();
+  const link = (map: Map<string, Set<string>>, from: string, to: string) =>
+    map.set(from, (map.get(from) ?? new Set<string>()).add(to));
+  const referencedFromOutside = new Set<string>();
+  for (const [id, root] of treeOf) {
+    for (const referrer of referrers.get(id as SessionId) ?? []) {
+      // 同一棵树内的引用（子会话引用父会话附件）随树一起删除，不构成阻塞。此前它被算作
+      // “待删集合里的引用方”，一棵空闲的树因此被反复推迟，最后按“被引用”保留，重试也无法释放。
+      const referrerTree = treeOf.get(referrer);
+      if (referrerTree === root) continue;
+      if (referrerTree === undefined) {
+        referencedFromOutside.add(root);
+        continue;
+      }
+      link(blockers, root, referrerTree);
+      link(dependents, referrerTree, root);
     }
   }
+
+  const removed = new Set<string>();
+  const finished = new Set<string>();
+  // 引用方仍在（批外会话、被保留或删除失败）：它引用的树以及下游全部保留。
+  const keepReferenced = (root: string): void => {
+    if (finished.has(root)) return;
+    finished.add(root);
+    result.kept.push({ sessionId: root, reason: "referenced" });
+    for (const dependent of dependents.get(root) ?? []) keepReferenced(dependent);
+  };
+  for (const root of referencedFromOutside) keepReferenced(root);
+
+  let pending = all.map(({ root }) => root).filter((root) => !finished.has(root));
+  while (pending.length > 0) {
+    const ready = pending.filter((root) =>
+      [...(blockers.get(root) ?? [])].every((blocker) => removed.has(blocker)),
+    );
+    if (ready.length === 0) {
+      // 剩余的树互相引用（不动点链），没有可以先删的一端：整批保留。
+      for (const root of pending) keepReferenced(root);
+      break;
+    }
+    for (const root of pending) {
+      if (!ready.includes(root)) continue;
+      const ids = idsOf.get(root) ?? [];
+      // 运行中的会话（含其子会话在跑）整棵保留：删掉正在写入的会话会让 turn 写库失败。
+      // 上游同步审查 2026-10-30 P1：批次头的快照在执行期间会失真——前一棵树删文件时，后一棵树
+      // 可能被命令准入变为 busy，所以每棵树删除前逐树复查运行态。
+      if (ids.some((id) => host.residency(id) === "busy")) {
+        finished.add(root);
+        result.kept.push({ sessionId: root, reason: "running" });
+        for (const dependent of dependents.get(root) ?? []) keepReferenced(dependent);
+        continue;
+      }
+      try {
+        for (const id of ids) if (host.residency(id) === "idle") await host.release(id);
+        // 先删文件再删行：文件删除失败时行还在，重试仍能按会话找到这些文件。
+        let bytes = 0;
+        for (const id of ids) bytes += await host.files.removeSession(id);
+        await host.store.purgeSessions([root as SessionId]);
+        // 文件与行都删除后才从列表投影移除；失败时 sessions-index 与 Host 镜像保持原样。
+        for (const id of ids) host.forgetIndexed(id);
+        result.deleted.push({ sessionId: root, bytes });
+        finished.add(root);
+        removed.add(root);
+      } catch (error) {
+        finished.add(root);
+        result.failed.push({ sessionId: root, code: failureCode(error) });
+        for (const dependent of dependents.get(root) ?? []) keepReferenced(dependent);
+      }
+    }
+    pending = pending.filter((root) => !finished.has(root));
+  }
+  // 保留项按请求顺序输出：依赖处理会让 running/referenced 的产生顺序与入参不同，
+  // 对外结果保持稳定的入参序，调用方（进度与警告横幅）不依赖内部顺序。
+  const order = new Map(all.map(({ root }, index) => [root, index]));
+  result.kept.sort((a, b) => (order.get(a.sessionId) ?? 0) - (order.get(b.sessionId) ?? 0));
   for (const directory of params.directories) {
     try {
       result.memory.push({
@@ -158,10 +188,7 @@ export async function measureSessionData(
   context: ZCodeProtocolAgentServerContext,
   rawParams: unknown,
 ): Promise<V4SessionDataMeasureResult> {
-  return measureSessionDataWith(
-    hostFromContext(context),
-    parseParams(v4SessionDataParamsSchema, rawParams),
-  );
+  return measureSessionDataWith(hostFromContext(context), parseParams(v4SessionDataParamsSchema, rawParams));
 }
 
 export async function purgeSessionData(
@@ -179,4 +206,8 @@ export async function purgeSessionData(
   return result;
 }
 
-export { previewSessionDeletion, executeSessionDeletion } from "./permanent-deletion.js";
+export {
+  previewSessionDeletion,
+  previewSessionDeletions,
+  executeSessionDeletion,
+} from "./permanent-deletion.js";

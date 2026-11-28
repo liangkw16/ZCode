@@ -5,19 +5,14 @@ import {
   CoreErrorType,
   DEFAULT_COMPACT_CONTEXT_WINDOW,
   SessionEventType,
+  applyCompactModelOverrides,
   createModelUsageSummaryFromEvents,
   runWithContextAsync,
   traceContextToLogContext,
   estimateMessageTokens,
   shouldAutoCompact,
 } from "../deps.js";
-import type {
-  AutoCompactPolicyConfig,
-  AutoCompactTokenOverride,
-  SessionEvent,
-  TraceContext,
-  TurnId,
-} from "../deps.js";
+import type { AutoCompactTokenOverride, SessionEvent, TraceContext, TurnId } from "../deps.js";
 import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 import {
   throwIfTurnAborted,
@@ -29,10 +24,10 @@ import {
 } from "../helpers/index.js";
 import type { TurnResult, RunModelTextRequestOptions } from "../types.js";
 import type { Model } from "../deps.js";
-import type { ProviderContextUsageSnapshot } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import { isCompactSummaryOutputLimitError } from "./compact-active-helpers.js";
 import { autoCompactDecisionLogContext } from "./compact-log-context.js";
-import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
+import { resolveAutoCompactPolicyConfig } from "./model-token-limits.js";
 import type {
   AutoCompactLoopContext,
   AutoCompactOutcome,
@@ -40,8 +35,7 @@ import type {
   ReactiveCompactLoopContext,
 } from "./turn-loop-state.js";
 import { recordTurnUsageFact } from "./usage-observability.js";
-import { findLatestCommittedAssistantUsage, latestContextTokens } from "./turn-model-step-usage.js";
-import { rollOverTotalTokensBudget } from "../helpers/total-tokens-budget.js";
+import { findLatestCommittedAssistantUsage } from "./turn-model-step-usage.js";
 
 export async function executeManualCompact(
   this: AgentRuntimeInternal,
@@ -82,6 +76,7 @@ export async function executeManualCompact(
     await this.appendEvent(turnStartedEvent, turnTraceContext);
     events.push(turnStartedEvent);
 
+    let compactCommitted = false;
     try {
       throwIfTurnAborted(abortSignal);
       const compactResult = await this.compactActiveConversation(
@@ -96,6 +91,8 @@ export async function executeManualCompact(
           ...(model ? { model } : {}),
         },
       );
+      compactCommitted = compactResult.outcome === "compacted";
+      if (compactResult.syncError) throw compactResult.syncError;
       throwIfTurnAborted(abortSignal);
 
       const turnUsage = createModelUsageSummaryFromEvents(events);
@@ -144,7 +141,11 @@ export async function executeManualCompact(
         projection,
       };
     } catch (error) {
-      const coreError = createTurnFailureError(error, abortSignal, "Compact failed");
+      const coreError = createTurnFailureError(
+        error,
+        abortSignal,
+        compactCommitted ? "Context compacted, but turn finalization failed" : "Compact failed",
+      );
       const preserveQueueAutoDrainOnCancel =
         coreError.type === CoreErrorType.TurnCancelled &&
         this.activeForegroundExecution?.preserveQueueAutoDrainOnCancel === true;
@@ -160,8 +161,10 @@ export async function executeManualCompact(
         turnPhase: "compact",
         inputId,
         traceContext: turnTraceContext,
-        fallbackMessage: "Compact failed",
-        logEvent: "compact.failed",
+        fallbackMessage: compactCommitted
+          ? "Context compacted, but turn finalization failed"
+          : "Compact failed",
+        logEvent: compactCommitted ? "compact.finalization.failed" : "compact.failed",
         logLabel: "Compact",
         preserveQueueAutoDrainOnCancel,
       });
@@ -191,14 +194,13 @@ export async function autoCompactIfNeeded(
 ): Promise<AutoCompactOutcome> {
   throwIfTurnAborted(abortSignal);
 
-  const config: AutoCompactPolicyConfig = {
-    contextWindow: context.model.properties.contextWindow,
-    ...this.config.compact,
-    maxOutputTokens: resolveNormalRequestMaxOutputTokens({
-      modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
-    }),
-    modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
-  };
+  // 与 autoCompactIfNeeded 共用按实际执行模型解析的组装方式：先取上游统一的策略基座，
+  // 再叠加 kcode 的 modelOverrides（micro 默认阈值由模型级 auto 阈值派生）。
+  const { config: config, source: compactPolicySource, matched: compactModelOverrideMatched } =
+    applyCompactModelOverrides(
+      resolveAutoCompactPolicyConfig(this, context.model),
+      { providerId: context.model.providerId, modelId: context.model.modelId },
+    );
   const activeEntries = context.turnRequestState.entries;
   const activeProjection = buildRuntimeProviderRequestMessages(this, {
     entries: activeEntries,
@@ -222,8 +224,12 @@ export async function autoCompactIfNeeded(
       event: "compact.auto.skipped",
       module: "core.runtime",
       compactReason: context.compactReason,
+      modelId: context.model.modelId,
+      modelOverrideMatched: compactModelOverrideMatched,
       modelStepIndex: context.modelStepIndex,
       phase: context.phase,
+      policySource: compactPolicySource,
+      providerId: context.model.providerId,
       reason: decision.reason,
       ...autoCompactDecisionLogContext(decision),
     });
@@ -253,12 +259,17 @@ export async function autoCompactIfNeeded(
     ...traceContextToLogContext(turnTraceContext),
     event: "compact.auto.started",
     compactReason: context.compactReason,
+    modelId: context.model.modelId,
+    modelOverrideMatched: compactModelOverrideMatched,
     modelStepIndex: context.modelStepIndex,
     module: "core.runtime",
     phase: context.phase,
+    policySource: compactPolicySource,
+    providerId: context.model.providerId,
     ...autoCompactDecisionLogContext(decision),
   });
 
+  let compactCommitted = false;
   try {
     const compactResult = await this.compactActiveConversation(
       undefined,
@@ -286,8 +297,10 @@ export async function autoCompactIfNeeded(
       return "skipped";
     }
     context.turnRequestState.entries = compactResult.entries;
-    rollOverTotalTokensBudgetAfterCompact(this, activeEntries);
     this.autoCompactConsecutiveFailures = 0;
+    compactCommitted = true;
+    if (compactResult.syncError) throw compactResult.syncError;
+    throwIfTurnAborted(abortSignal);
     this.logger?.info("Auto compact completed", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.auto.completed",
@@ -299,10 +312,14 @@ export async function autoCompactIfNeeded(
     });
     return "compacted";
   } catch (error) {
+    // 已提交的历史先交给当前请求，通知失败/用户取消不能再计为压缩失败或触发重压。
+    if (compactCommitted) throw error;
     if (isTurnCancellationError(error, abortSignal)) {
       throw error;
     }
     this.autoCompactConsecutiveFailures++;
+    // 输出恢复已经耗尽，不能先发相同主请求再通过 reactive compact 重置恢复预算。
+    if (isCompactSummaryOutputLimitError(error)) throw error;
     this.logger?.warn("Auto compact failed", {
       ...traceContextToLogContext(turnTraceContext),
       errorMessage: error instanceof Error ? error.message : String(error),
@@ -316,20 +333,6 @@ export async function autoCompactIfNeeded(
     });
     return "failed";
   }
-}
-
-/**
- * 主循环里的 auto / reactive compaction 提交后，把 compact 前的上下文加进预算计数，数值不会跳回；
- * 手动 compact 不调用，下一条真实用户消息会重新起算。
- */
-function rollOverTotalTokensBudgetAfterCompact(
-  runtime: AgentRuntimeInternal,
-  compactedEntries: readonly RuntimeMessageEntry[],
-): void {
-  runtime.totalTokensBudget = rollOverTotalTokensBudget(
-    runtime.totalTokensBudget,
-    latestContextTokens(compactedEntries),
-  );
 }
 
 function buildProviderUsageTokenOverride(
@@ -432,6 +435,7 @@ export async function reactiveCompactAfterContextExceeded(
     tokenCount: estimateMessageTokens(activeMessages),
   });
 
+  let compactCommitted = false;
   try {
     const compactResult = await this.compactActiveConversation(
       undefined,
@@ -461,8 +465,10 @@ export async function reactiveCompactAfterContextExceeded(
       return "skipped";
     }
     context.turnRequestState.entries = compactResult.entries;
-    rollOverTotalTokensBudgetAfterCompact(this, activeEntries);
     this.autoCompactConsecutiveFailures = 0;
+    compactCommitted = true;
+    if (compactResult.syncError) throw compactResult.syncError;
+    throwIfTurnAborted(abortSignal);
     this.logger?.info("Reactive compact completed; retrying model request", {
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.reactive.completed",
@@ -472,10 +478,14 @@ export async function reactiveCompactAfterContextExceeded(
     });
     return "compacted";
   } catch (error) {
+    // 已提交的历史先交给当前请求，通知失败/用户取消不能再计为压缩失败或触发重压。
+    if (compactCommitted) throw error;
     if (isTurnCancellationError(error, abortSignal)) {
       throw error;
     }
     this.autoCompactConsecutiveFailures++;
+    // 输出恢复已经耗尽，不能先发相同主请求再通过 reactive compact 重置恢复预算。
+    if (isCompactSummaryOutputLimitError(error)) throw error;
     this.logger?.warn("Reactive compact failed after model context overflow", {
       ...traceContextToLogContext(turnTraceContext),
       errorMessage: error instanceof Error ? error.message : String(error),

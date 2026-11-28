@@ -412,7 +412,7 @@ describe("main agent tool pool", () => {
       "Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands",
     );
     expect(byName.get("EnterPlanMode")?.description ?? "").toContain(
-      "using `find`/Glob, `grep`/Grep, and Read",
+      "`find`/Glob, `grep`/Grep, and Read when offered",
     );
   });
 });

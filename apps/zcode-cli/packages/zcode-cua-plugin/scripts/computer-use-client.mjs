@@ -88,6 +88,14 @@ const ERROR_CODE_BY_BROKER = Object.freeze({
   version_mismatch: "VERSION_MISMATCH",
   stale_socket: "HELPER_UNAVAILABLE",
   timeout: "TIMEOUT",
+  // 新原生 owner 的拒绝包含恢复语义；误归 INTERNAL 会让 SDK 建议盲重试旧索引或锁屏输入。
+  stale_state: "STALE_STATE",
+  desktop_locked: "DESKTOP_LOCKED",
+  desktop_unavailable: "HELPER_UNAVAILABLE",
+  stopped: "CONTROL_STOPPED",
+  control_stopped: "CONTROL_STOPPED",
+  cancelled: "CANCELLED",
+  cleanup_incomplete: "CLEANUP_INCOMPLETE",
   unimplemented: "ACTION_UNAVAILABLE",
   method_not_found: "INTERNAL",
   internal: "INTERNAL",
@@ -108,6 +116,9 @@ const NEVER_RETRY_CODES = new Set([
   "ACTION_UNAVAILABLE",
   "NOT_SETTABLE",
   "NOT_SELECTABLE",
+  "DESKTOP_LOCKED",
+  "CANCELLED",
+  "CLEANUP_INCOMPLETE",
 ]);
 
 class ComputerUseError extends Error {
@@ -176,6 +187,10 @@ function receiptOf(result) {
     const parsed = parseJsonRecord(text);
     if (!parsed) continue;
     candidates.push(parsed);
+    // 真机 producer 用 action_receipt 承载 possibly_sent；漏读会把原生拒绝误报成功。
+    if (parsed.action_receipt && typeof parsed.action_receipt === "object") {
+      candidates.push(parsed.action_receipt);
+    }
     if (parsed.action_outcome && typeof parsed.action_outcome === "object") {
       candidates.push(parsed.action_outcome);
     }
@@ -217,21 +232,21 @@ function frameIdOf(result) {
   return undefined;
 }
 
-function brokerErrorCodeOf(result) {
+function brokerErrorOf(result) {
   for (const text of textBlocks(result)) {
     const parsed = parseJsonRecord(text);
-    const code = parsed?.code ?? parsed?.error?.code;
-    if (typeof code === "string") return code;
+    if (typeof parsed?.code === "string") return parsed;
+    if (typeof parsed?.error?.code === "string") return parsed.error;
   }
-  const receipt = receiptOf(result);
-  return typeof receipt.code === "string" ? receipt.code : undefined;
+  return receiptOf(result);
 }
 
 function messageOf(result, fallback) {
   const texts = textBlocks(result);
   for (const text of texts) {
     const parsed = parseJsonRecord(text);
-    if (typeof parsed?.message === "string" && parsed.message) return parsed.message;
+    const message = parsed?.message ?? parsed?.error?.message;
+    if (typeof message === "string" && message) return message;
   }
   const plain = texts.find((text) => text && !parseJsonRecord(text));
   return plain ?? texts[0] ?? fallback;
@@ -281,19 +296,28 @@ function assertOk(methodName, result) {
   const dispatch = receipt.dispatch_status;
   const actionSent = receipt.action_sent === true;
   if (!isError && dispatch !== "possibly_sent") return receipt;
-  const brokerCode = brokerErrorCodeOf(result);
+  const brokerError = brokerErrorOf(result);
+  const brokerCode = brokerError.code;
+  const reasonCode = brokerError.details?.reason_code;
+  // Helper 对锁屏沿用既有的 permission_denied + reason:screen_locked 兼容形状；SDK 一侧仍给出
+  // 语义明确的 DESKTOP_LOCKED，调用方不会把它当成 TCC 拒绝授权。
+  const screenLocked = brokerError.details?.reason === "screen_locked";
   const code = isError
-    ? (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL")
+    ? screenLocked
+      ? "DESKTOP_LOCKED"
+      : (ERROR_CODE_BY_BROKER[brokerCode] ?? "INTERNAL")
     : "TIMEOUT";
-  throw new ComputerUseError(
-    messageOf(result, `${methodName} failed`),
-    {
-      code,
-      actionSent: actionSent || dispatch === "possibly_sent",
-      dispatchStatus: dispatch,
-      details: { method: methodName, ...(brokerCode ? { brokerCode } : {}) },
+  throw new ComputerUseError(messageOf(result, `${methodName} failed`), {
+    code,
+    actionSent: actionSent || dispatch === "possibly_sent",
+    dispatchStatus: dispatch,
+    details: {
+      method: methodName,
+      ...(typeof brokerCode === "string" ? { brokerCode } : {}),
+      ...(["input_recovery_focus_required", "input_recovery_release_uncertain",
+        "input_recovery_target_unverified"].includes(reasonCode) ? { reasonCode } : {}),
     },
-  );
+  });
 }
 
 // ─────────────────────────────────────────────────────────── 目标绑定
@@ -408,14 +432,19 @@ function alternateAppRef(target, windowId) {
  */
 function isAppNotFound(result) {
   if (!result?.isError) return false;
-  return textBlocks(result).some((text) =>
-    /target app is not running/u.test(text),
-  );
+  return textBlocks(result).some((text) => /target app is not running/u.test(text));
 }
 
 const DIRECTIONS = new Set(["up", "down", "left", "right", "u", "d", "l", "r"]);
 const LONG_DIRECTION = { u: "up", d: "down", l: "left", r: "right" };
-const MOUSE_BUTTONS = { left: "left", right: "right", middle: "middle", l: "left", r: "right", m: "middle" };
+const MOUSE_BUTTONS = {
+  left: "left",
+  right: "right",
+  middle: "middle",
+  l: "left",
+  r: "right",
+  m: "middle",
+};
 
 // ─────────────────────────────────────────────────────────── 展示
 
@@ -437,37 +466,39 @@ function emitText(globals, text, options) {
 
 function isFrameAuthorityText(value) {
   const parsed = parseJsonRecord(value);
-  return Boolean(
-    parsed && Object.keys(parsed).length === 1 && Object.hasOwn(parsed, "image_ref"),
-  );
+  return Boolean(parsed && Object.keys(parsed).length === 1 && Object.hasOwn(parsed, "image_ref"));
 }
 
 /**
  * 图片与 frame authority 走 host 的 structured sink，文本走 write。
  * 成功的纯文本动作不产生任何正文 —— 否则会和观察结果拼成两段输出。
  */
-function projectToHost(globals, result) {
+function projectToHost(globals, result, options) {
   const sink = globals.nodeRepl?.emitStructuredResult;
   if (typeof sink !== "function" || !result || !Array.isArray(result.content)) return;
-  const media = result.content.filter(
-    (block) => block?.type === "image" || (block?.type === "text" && isFrameAuthorityText(block.text)),
-  );
+  const raw = result.structuredContent;
+  const structured = raw && typeof raw === "object" ? forDisplay(raw) : undefined;
+  // 元数据曾只留在结构化字段，模型读取 content 时也需要它，并保持与本次截图一致。
+  // 合并修复：这两段定义在冲突解决时被 kcode 的旧 media 过滤器顶掉，函数体仍引用它们，
+  // 成功结果会抛 ReferenceError（codex-review P1）。
+  const metadataContent =
+    options?.emit !== false && structured
+      ? [{ type: "text", text: JSON.stringify(structured) }]
+      : [];
+  const media =
+    options?.emit === false
+      ? []
+      : result.content.filter(
+          (block) =>
+            block?.type === "image" || (block?.type === "text" && isFrameAuthorityText(block.text)),
+        );
   if (media.length > 0) {
-    // 带图的观察必须**保留**自己的 structuredContent（投影后）。
-    //
-    // Bug 根因（2026-09-17 真机，会话 sess_8ec5bb22）：这里原先无条件丢弃它，于是
-    // getAXStateAndScreenshot() 那次的元数据一个字都不显示，模型看到的 `Structured
-    // content` 是同 cell 里**没有图**的另一次调用 —— 也就是 getApp() 绑定时那次隐藏的
-    // 全量观察。可观测后果：请求了像素、图也确实附上了，`has_image` 却恒为 false
-    // （6 次调用全中），而 SKILL 里写着 "has_image: false 只表示这次没要像素"，两边对不上。
-    // 更危险的是 `window` 与 `state_id` 也是探针那次的：探针早于本 cell 的动作执行，
-    // 弹窗在动作后才出现时，模型读到的是**漂移前**的窗口，据此判断"对话框没出现"。
-    //
-    // 丢弃的原意是防元素全表泄漏（见 forDisplay 的注释），但那件事 forDisplay 已经做了，
-    // 不需要整块丢。这里走同一条投影，所以元素表照样不会外泄。
-    const { structuredContent: raw, ...rest } = result;
-    const structured = raw && typeof raw === "object" ? forDisplay(raw) : undefined;
-    sink({ ...rest, content: media, ...(structured ? { structuredContent: structured } : {}) });
+    const { structuredContent: _raw, ...rest } = result;
+    sink({
+      ...rest,
+      content: [...media, ...metadataContent],
+      ...(structured ? { structuredContent: structured } : {}),
+    });
     return;
   }
   if (result.isError === true) {
@@ -475,14 +506,10 @@ function projectToHost(globals, result) {
     return;
   }
   const meta = result._meta && typeof result._meta === "object" ? result._meta : undefined;
-  const structured =
-    result.structuredContent && typeof result.structuredContent === "object"
-      ? result.structuredContent
-      : undefined;
   if (!meta && !structured) return;
   sink({
-    content: [],
-    ...(structured ? { structuredContent: forDisplay(structured) } : {}),
+    content: metadataContent,
+    ...(structured ? { structuredContent: structured } : {}),
     ...(meta ? { _meta: meta } : {}),
   });
 }
@@ -522,7 +549,15 @@ function appStateOf(methodName, result) {
   for (const text of textBlocks(result)) {
     const parsed = parseJsonRecord(text);
     if (!parsed) continue;
-    for (const key of ["state_id", "app", "window", "elements", "text", "snapshot_mode", "base_state_id"]) {
+    for (const key of [
+      "state_id",
+      "app",
+      "window",
+      "elements",
+      "text",
+      "snapshot_mode",
+      "base_state_id",
+    ]) {
       if (merged[key] === undefined && parsed[key] !== undefined) merged[key] = parsed[key];
     }
   }
@@ -608,8 +643,8 @@ function createTarget(ctx, binding) {
     // 「也不能把自己算成基线」。同一个道理对 producer 侧的位移台账成立：没展示给模型的树
     // 不能被算作「模型看到过的」，否则索引位移校验变成当前树跟当前树自比（2026-09-15 探针实测）。
     if (yieldsTree !== true) args.tree_shown_to_model = false;
-    const result = await call("get_app_state", args);
-    assertOk("get_app_state", result);
+    if (includeScreenshot) binding.frameId = undefined;
+    const result = await call("get_app_state", args);    assertOk("get_app_state", result);
     const state = appStateOf("get_app_state", result);
     binding.stateId = state.state_id;
     binding.treeSeen = yieldsTree === true;
@@ -619,6 +654,8 @@ function createTarget(ctx, binding) {
   };
 
   const act = async (methodName, args) => {
+    // native 写入可能改变像素，后续坐标以 Host 新签发的帧为准。
+    binding.frameId = undefined;
     const result = await call(methodName, args);
     assertOk(methodName, result);
     // 这里原先动作后无条件 `binding.stateId = undefined`，逼下一次索引解析先重新观察。
@@ -758,12 +795,17 @@ function createTarget(ctx, binding) {
           { code: "INTERNAL" },
         );
       }
+      // macOS 未实现 element_scroll；直接走已有窗口事件，保留 Helper 的身份/freshness/输入锁校验。
+      const strategy =
+        ctx.platform === "darwin" && (!options?.strategy || options.strategy === "auto")
+          ? "event"
+          : options?.strategy;
       await act("scroll", {
         target: bindTarget(binding, target, "scroll"),
         app_ref: binding.appRef,
         scroll_direction: LONG_DIRECTION[dir] ?? dir,
         scroll_amount: pages === undefined ? 1 : pages,
-        ...(options?.strategy ? { strategy: options.strategy } : {}),
+        ...(strategy ? { strategy } : {}),
       });
     },
 
@@ -790,7 +832,12 @@ function createTarget(ctx, binding) {
       if (typeof text !== "string") {
         throw new ComputerUseError("typeText requires text", { code: "INTERNAL" });
       }
-      await act("type", { text, app_ref: binding.appRef });
+      // 中文输入法会改写逐键输入的网址标点；复用 Helper 会恢复剪贴板的纯文本粘贴路径。
+      if (ctx.platform === "darwin") {
+        await act("paste", { text, app_ref: binding.appRef, format: "text" });
+      } else {
+        await act("type", { text, app_ref: binding.appRef });
+      }
     },
 
     async performSecondaryAction(elementIndex, action) {
@@ -860,16 +907,32 @@ function resolveTextRange(binding, elementIndex, text, options) {
  * （macOS cmd，Linux / Windows ctrl）。
  */
 const KEY_ALIASES = Object.freeze({
-  return: "return", enter: "return", kp_enter: "return",
-  control_l: "ctrl", control_r: "ctrl", control: "ctrl", ctrl: "ctrl",
-  alt_l: "alt", alt_r: "alt", meta_l: "alt", alt: "alt",
-  shift_l: "shift", shift_r: "shift", shift: "shift",
-  escape: "esc", esc: "esc",
-  prior: "pageup", next: "pagedown",
+  return: "return",
+  enter: "return",
+  kp_enter: "return",
+  control_l: "ctrl",
+  control_r: "ctrl",
+  control: "ctrl",
+  ctrl: "ctrl",
+  alt_l: "alt",
+  alt_r: "alt",
+  meta_l: "alt",
+  alt: "alt",
+  shift_l: "shift",
+  shift_r: "shift",
+  shift: "shift",
+  escape: "esc",
+  esc: "esc",
+  prior: "pageup",
+  next: "pagedown",
   // 曾有 greater: ">"——输出 ">" 从未通过工具层白名单（S2 前后均如此），是端到端
   // 死路径，且会让组合契约测试（sdk-key-chord-contract.node-test.mjs）被迫开
   // 豁免口，故移除。需要输出 ">" 时应先给工具层 canonical 集补该 token。
-  period: ".", comma: ",", slash: "/", minus: "-", equal: "=",
+  period: ".",
+  comma: ",",
+  slash: "/",
+  minus: "-",
+  equal: "=",
 });
 
 function normalizeKeyChord(chord, platform) {
@@ -900,7 +963,7 @@ export async function setupComputerUseRuntime({ globals }) {
 
   const platform = globals.process?.platform ?? process.platform;
 
-  const call = async (methodName, args) => {
+  const call = async (methodName, args, options) => {
     // not-ready 是 Helper 冷启动的正常一步，不是失败：payload 明确要求"稍等后重试同一
     // 调用"。只在 retryable 为真时重试 —— possibly_sent 的动作绝不重放（见常量注释）。
     for (let attempt = 0; ; attempt += 1) {
@@ -908,7 +971,8 @@ export async function setupComputerUseRuntime({ globals }) {
       const result = await bridge.call(methodName, args ?? {});
       const notReady = notReadyEnvelopeOf(result);
       if (!notReady) {
-        projectToHost(globals, result);
+        // 展示由 SDK 的 emit 控制，不能用 producer 的索引记账标志推断。
+        projectToHost(globals, result, options);
         return result;
       }
       if (notReady.retryable !== true || attempt >= NOT_READY_MAX_ATTEMPTS - 1) {
@@ -974,7 +1038,7 @@ export async function setupComputerUseRuntime({ globals }) {
     let appRef = objectRef ?? appRefFor(target, windowId);
     const binding = createBinding(label, appRef);
     const app = createTarget(ctx, binding);
-    // 绑定即观察：返回前展示该 app 的**全量** AX 树。
+    // 绑定时只解析身份，观察结果留在宿主通道。
     let result = await call("get_app_state", {
       app_ref: appRef,
       include_screenshot: false,
@@ -983,7 +1047,7 @@ export async function setupComputerUseRuntime({ globals }) {
       // 「模型看到过的树」。不标的后果（2026-09-15 探针实测）：索引位移校验拿当前树
       // 跟当前树自比，必然一致，静默点错元素的保护完全失效。
       tree_shown_to_model: false,
-    });
+    }, { emit: false });
     if (isAppNotFound(result) && objectRef === undefined) {
       // 只有字符串需要猜字段；对象形态是显式的，猜错的是调用方而不是我们。
       const alternate = alternateAppRef(target, windowId);
@@ -995,7 +1059,7 @@ export async function setupComputerUseRuntime({ globals }) {
           include_screenshot: false,
           disable_diffing: true,
           tree_shown_to_model: false,
-        });
+        }, { emit: false });
       }
     }
     assertOk("get_app_state", result);
@@ -1081,11 +1145,14 @@ export async function setupComputerUseRuntime({ globals }) {
         //
         // diff 基线问题不受影响：binding.treeSeen 仍清空（treeSeen 管的是 emit
         // 展示面的整树承诺，与记账正交），下一次 getAXState 照旧强制整树。
-        const fresh = appStateOf(
-          "get_app_state",
-          await call("get_app_state", { app_ref: appRef, tree_shown_to_model: true }),
-        );
-        binding.stateId = fresh.state_id;
+        // 真机 AX 索引查询曾触发默认截图，截图失败时误报整棵 AX 树不可用。
+        const result = await call("get_app_state", {
+          app_ref: appRef,
+          tree_shown_to_model: true,
+          include_screenshot: false,
+        });
+        assertOk("get_app_state", result);
+        const fresh = appStateOf("get_app_state", result);        binding.stateId = fresh.state_id;
         binding.elements = fresh.elements;
         binding.treeSeen = false;
         return fresh.elements;
@@ -1095,7 +1162,7 @@ export async function setupComputerUseRuntime({ globals }) {
   };
 
   const inventory = async (options) => {
-    const result = await call("list_apps", {});
+    const result = await call("list_apps", {}, options);
     assertOk("list_apps", result);
     const apps = [];
     for (const text of textBlocks(result)) {
@@ -1122,12 +1189,19 @@ export async function setupComputerUseRuntime({ globals }) {
   const unwrapEnvelope = (result) => {
     if (result === null || typeof result !== "object") return result;
     if (!Array.isArray(result.content)) return result;
-    const textBlocks = result.content.filter(
+    // 新增的紧凑元数据副本已由宿主展示，解封时排除它以保持单载荷调用的返回类型。
+    const metadataText =
+      result.structuredContent && JSON.stringify(forDisplay(result.structuredContent));
+    const content =
+      result.content.length > 1 && typeof metadataText === "string"
+        ? result.content.filter((block) => block?.type !== "text" || block.text !== metadataText)
+        : result.content;
+    const textBlocks = content.filter(
       (block) => block && block.type === "text" && typeof block.text === "string",
     );
     // 只在"单一 text block"这种明确形态上解封；多块 / 图像等一律原样返回，
     // 避免把一个我们不认识的形状猜成裸值。
-    if (textBlocks.length !== 1 || result.content.length !== 1) return result;
+    if (textBlocks.length !== 1 || content.length !== 1) return result;
     const text = textBlocks[0].text;
     try {
       return JSON.parse(text);
@@ -1207,4 +1281,10 @@ export async function setupComputerUseRuntime({ globals }) {
   return cua;
 }
 
-export { COMPUTER_METHOD_NAMES, PLATFORM_EXCLUDED_METHODS, ComputerUseError, normalizeKeyChord, KEY_ALIASES };
+export {
+  COMPUTER_METHOD_NAMES,
+  PLATFORM_EXCLUDED_METHODS,
+  ComputerUseError,
+  normalizeKeyChord,
+  KEY_ALIASES,
+};

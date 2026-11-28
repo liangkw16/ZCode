@@ -18,6 +18,9 @@ import {
   WorkflowGraphRecordSchema,
   WorkflowRunSnapshotSchema,
 } from "@zcode/contracts";
+// 修复原因：默认工作流根硬编码 ".zcode"，kcode 构建下未显式传 rootDir 的调用会落到 ZCode 的
+// 目录，违反 kcode-full-isolation 设计 §2。运行时由 workflow-facade 显式传 rootDir，这里是兜底。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 
 export interface NodeWorkflowStoreOptions {
   rootDir?: string;
@@ -32,7 +35,7 @@ interface WorkflowIndexFile {
   runs: WorkflowRunListItem[];
 }
 
-const DEFAULT_WORKFLOW_ROOT = join(homedir(), ".zcode", "cli", "workflows");
+const DEFAULT_WORKFLOW_ROOT = join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", "workflows");
 const WORKFLOW_DEFINITION_FILE_EXTENSION = ".json";
 
 export class NodeWorkflowStore implements WorkflowStorePort {

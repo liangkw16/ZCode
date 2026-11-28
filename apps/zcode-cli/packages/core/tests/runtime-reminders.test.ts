@@ -6,6 +6,8 @@ import {
   buildDateChangeReminderBody,
   buildPlanModeExitReminderBody,
   buildRuntimeModeReminderBody,
+  buildRuntimeModeReminderBodyForTask,
+  hasFullRuntimeModeReminder,
   buildRuntimeOutputStyleReminderBody,
   buildTodoReminderBody,
   buildSilentTurnReminderBody,
@@ -23,7 +25,6 @@ import {
   systemReminderAttachmentEntry,
   type RuntimeMessageEntry,
 } from "../src/agent/message-history.js";
-import { buildCompactSummaryRequestMessages } from "../src/runtime/methods/compact-active-helpers.js";
 import { runtimeInputMetadata } from "../src/agent/runtime-input-presentation.js";
 
 describe("runtime request reminders", () => {
@@ -34,7 +35,6 @@ describe("runtime request reminders", () => {
       toolCalls: [{ id: "call", name, input: {} }],
     },
   });
-  const silentTurns = (count: number) => Array.from({ length: count }, () => silentTurn());
   const silentReminder = () =>
     systemReminderAttachmentEntry("silent_turn_reminder", "previous silence reminder");
   // 历史里作为普通 user 消息的输入都算一个用户轮次，不只真实 prompt。
@@ -57,20 +57,39 @@ describe("runtime request reminders", () => {
     },
   ];
 
-  it("emits a silent reminder after five responses, not five tool calls", () => {
-    const batch = silentTurn();
-    if (batch.kind !== "attachment") {
-      batch.message.toolCalls = Array.from({ length: 6 }, (_, i) => ({
-        id: `call-${i}`,
-        name: "Read",
-        input: {},
-      }));
-    }
-    expect(buildSilentTurnReminderBody([batch])).toBeNull();
-    expect(buildSilentTurnReminderBody(silentTurns(4))).toBeNull();
-    expect(buildSilentTurnReminderBody(silentTurns(5))).toBe(
+  // 静默提醒按时间判定（meta-user-context.md「Silent-turn reminder」）：最近一次提醒之后至少一次静默响应，
+  // 且距锚点（最近一次提醒与本段起点中较新的一个）满 60 秒。条目时间单位是毫秒，这里用秒构造。
+  const at = (seconds: number, entry: RuntimeMessageEntry): RuntimeMessageEntry => ({
+    ...entry,
+    time: seconds * 1000,
+  });
+  const prompt = (seconds: number) =>
+    at(seconds, {
+      message: { role: "user", content: "Inspect the code" },
+      metadata: realUserRuntimeMetadata(),
+    });
+  const silentAt = (...seconds: number[]) => seconds.map((second) => at(second, silentTurn()));
+  const reminderAt = (seconds: number) => at(seconds, silentReminder());
+  const fires = (entries: RuntimeMessageEntry[], nowSeconds: number) =>
+    buildSilentTurnReminderBody(entries, nowSeconds * 1000) !== null;
+
+  it("emits a silent reminder after 60 seconds and one silent response", () => {
+    expect(buildSilentTurnReminderBody([prompt(0), ...silentAt(61)], 61_000)).toBe(
       "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan.",
     );
+    // 满 60 000 毫秒才发：59.999 秒还不到。
+    expect(buildSilentTurnReminderBody([prompt(0), ...silentAt(10)], 59_999)).toBeNull();
+    expect(fires([prompt(0), ...silentAt(10)], 60)).toBe(true);
+    // 时钟回拨（现在早于锚点）时不发。
+    expect(fires([prompt(100), ...silentAt(110)], 50)).toBe(false);
+    // 没有静默响应时不发。
+    expect(fires([prompt(0)], 600)).toBe(false);
+  });
+
+  it("does not emit for many fast silent responses", () => {
+    const fast = Array.from({ length: 20 }, (_, index) => at(index / 10, silentTurn()));
+    expect(fires([prompt(0), ...fast], 2)).toBe(false);
+    expect(fires([prompt(0), ...fast], 60)).toBe(true);
   });
 
   it("counts reasoning, empty text and placeholders as silent responses", () => {
@@ -86,7 +105,7 @@ describe("runtime request reminders", () => {
       { message: { role: "assistant", content: "(no content)" } },
       { message: { role: "assistant", content: "No response requested." } },
     ];
-    expect(buildSilentTurnReminderBody(entries)).not.toBeNull();
+    for (const entry of entries) expect(fires([prompt(0), at(70, entry)], 70)).toBe(true);
   });
 
   it.each<RuntimeMessageEntry>([
@@ -108,38 +127,59 @@ describe("runtime request reminders", () => {
     ...userTurnInputs,
     silentTurn("AskUserQuestion"),
     silentTurn("ExitPlanMode"),
-  ])("ends the silent stretch at effective communication %j", (boundary) => {
-    const oldStretch = [silentReminder(), silentReminder(), silentReminder(), ...silentTurns(5)];
-    expect(buildSilentTurnReminderBody([...oldStretch, boundary, ...silentTurns(4)])).toBeNull();
-    expect(
-      buildSilentTurnReminderBody([...oldStretch, boundary, ...silentTurns(5)]),
-    ).not.toBeNull();
+  ])("restarts the timer at effective communication %j", (boundary) => {
+    const oldStretch = [prompt(0), reminderAt(61), ...silentAt(70, 130)];
+    const entries = [...oldStretch, at(200, boundary), ...silentAt(210)];
+    expect(fires(entries, 259)).toBe(false);
+    expect(fires(entries, 260)).toBe(true);
+    // 边界之后还没有静默响应时不发。
+    expect(fires([...oldStretch, at(200, boundary)], 600)).toBe(false);
   });
 
-  it("ignores tool results and synthetic context when counting silent responses", () => {
-    const entries: RuntimeMessageEntry[] = silentTurns(5).flatMap((entry) => [
-      entry,
-      { message: { role: "tool", content: "read result", toolCallId: "call" } },
-      { message: { role: "user", content: "legacy tool result", toolCallId: "call" } },
-      systemReminderAttachmentEntry("environment", "environment"),
-      {
-        message: { role: "user", content: "background notice" },
-        metadata: legacySyntheticRuntimeMetadata(),
-      },
-    ]);
-    expect(buildSilentTurnReminderBody(entries)).not.toBeNull();
+  it("does not move the timer for tool results, synthetic context or mid-turn steers", () => {
+    const entries: RuntimeMessageEntry[] = [
+      prompt(0),
+      ...silentAt(10).flatMap((entry) => [
+        entry,
+        at(20, { message: { role: "tool", content: "read result", toolCallId: "call" } }),
+        at(30, { message: { role: "user", content: "legacy tool result", toolCallId: "call" } }),
+        at(40, systemReminderAttachmentEntry("environment", "environment")),
+        at(50, {
+          message: { role: "user", content: "background notice" },
+          metadata: legacySyntheticRuntimeMetadata(),
+        }),
+        at(55, {
+          message: { role: "user", content: "also check the tests" },
+          metadata: runtimeInputMetadata("user_steer"),
+        }),
+      ]),
+    ];
+    expect(fires(entries, 60)).toBe(true);
   });
 
-  it("waits five more silent responses and caps a stretch at three reminders", () => {
-    const entries = silentTurns(5);
-    for (let reminder = 0; reminder < 3; reminder++) {
-      expect(buildSilentTurnReminderBody(entries)).not.toBeNull();
-      entries.push(silentReminder(), ...silentTurns(4));
-      expect(buildSilentTurnReminderBody(entries)).toBeNull();
-      entries.push(silentTurn());
+  it("waits 60 seconds after each reminder and has no cap per stretch", () => {
+    const entries = [prompt(0), ...silentAt(30)];
+    let reminder = 60;
+    for (let count = 0; count < 6; count++) {
+      expect(fires(entries, reminder)).toBe(true);
+      entries.push(reminderAt(reminder));
+      // 提醒之后还没有静默响应。
+      expect(fires(entries, reminder + 120)).toBe(false);
+      entries.push(...silentAt(reminder + 1));
+      expect(fires(entries, reminder + 59)).toBe(false);
+      reminder += 60;
     }
-    entries.push(...silentTurns(20));
-    expect(buildSilentTurnReminderBody(entries)).toBeNull();
+    expect(fires(entries, reminder)).toBe(true);
+  });
+
+  it("does not emit when the anchor has no time", () => {
+    const untimedPrompt: RuntimeMessageEntry = {
+      message: { role: "user", content: "Inspect the code" },
+      metadata: realUserRuntimeMetadata(),
+    };
+    expect(fires([untimedPrompt, ...silentAt(70)], 600)).toBe(false);
+    // 最近一次提醒没有时间：不退回更早的锚点。
+    expect(fires([prompt(0), silentReminder(), ...silentAt(70)], 600)).toBe(false);
   });
 
   it("does not count mid-turn user steers as plan-mode human turns", () => {
@@ -203,17 +243,6 @@ describe("runtime request reminders", () => {
     ).toContain("Plan mode still active");
   });
 
-  it("keeps the silent stretch across a mid-turn user steer", () => {
-    // 中途输入是附件，不结束静默段；只有新的用户轮次才结束。
-    const steer: RuntimeMessageEntry = {
-      message: { role: "user", content: "also check the tests" },
-      metadata: runtimeInputMetadata("user_steer"),
-    };
-    expect(
-      buildSilentTurnReminderBody([...silentTurns(3), steer, ...silentTurns(2)]),
-    ).not.toBeNull();
-  });
-
   it.each([0, 5])(
     "restarts both plan reminder counters after exit with %s new inputs",
     (newInputs) => {
@@ -229,7 +258,7 @@ describe("runtime request reminders", () => {
         })),
       ];
       const full = buildRuntimeModeReminderBody(entries, "plan");
-      expect(full).toContain("## Plan Workflow");
+      expect(full).toContain("recommended approach, and verification method");
       entries.push(systemReminderAttachmentEntry("runtime_mode", full!));
       expect(buildRuntimeModeReminderBody(entries, "plan")).toBeNull();
       for (let count = 1; count <= 5; count++) {
@@ -243,7 +272,7 @@ describe("runtime request reminders", () => {
           ]).flat(),
         );
         const next = buildRuntimeModeReminderBody(entries, "plan")!;
-        expect(next).toContain(count === 5 ? "## Plan Workflow" : "Plan mode still active");
+        expect(next).toContain(count === 5 ? "verification method" : "Plan mode still active");
         entries.push(systemReminderAttachmentEntry("runtime_mode", next));
       }
     },
@@ -528,8 +557,8 @@ describe("runtime request reminders", () => {
     expect(firstBody).toContain("Plan mode is active");
     expect(firstBody).not.toContain("<system-reminder>");
 
-    expect(firstBody).toContain("MUST NOT make any edits");
-    expect(firstBody).toContain("## Plan Workflow");
+    expect(firstBody).toContain("Do not write or edit files");
+    expect(firstBody).toContain("recommended approach, and verification method");
     expect(firstBody).not.toContain("ExitPlanModeV2");
 
     const recent = buildRuntimeModeReminderBody(
@@ -569,9 +598,9 @@ describe("runtime request reminders", () => {
       "plan",
     );
     expect(sparse).toContain("Plan mode still active");
-    expect(sparse).toContain("Read-only.");
-    expect(sparse).toContain("Follow 5-phase workflow.");
-    expect(sparse).not.toContain("## Plan Workflow");
+    expect(sparse).toContain("Read-only;");
+    expect(sparse).toContain("research-only task");
+    expect(sparse).not.toContain("verification method");
     expect(sparse).not.toContain("<system-reminder>");
 
     const nextFull = buildRuntimeModeReminderBody(
@@ -599,36 +628,84 @@ describe("runtime request reminders", () => {
     expect(buildRuntimeModeReminderBody([], "build")).toBeNull();
   });
 
-  it("prepares a complete plan argument across five phases without a file-writing exception", () => {
-    const body = buildRuntimeModeReminderBody([], "plan")!;
-    expect(body.match(/^### Phase \d: .+$/gm)).toEqual([
-      "### Phase 1: Initial Understanding",
-      "### Phase 2: Design",
-      "### Phase 3: Review",
-      "### Phase 4: Final Plan",
-      "### Phase 5: Call ExitPlanMode",
-    ]);
-    expect(body).toContain(
-      "Provide comprehensive background context from Phase 1 exploration including filenames and code path traces",
+  it.each([
+    [true, true],
+    [true, false],
+    [false, true],
+    [false, false],
+  ])(
+    "uses available plan capabilities (Ask=%s Exit=%s) in full and sparse reminders",
+    (ask, exit) => {
+      const tools = [
+        ...(ask ? [{ name: "AskUserQuestion", deferred: true }] : []),
+        ...(exit ? [{ name: "ExitPlanMode", deferred: true }] : []),
+      ];
+      const sparseHistory: RuntimeMessageEntry[] = [
+        systemReminderAttachmentEntry("runtime_mode", "prior reminder"),
+        ...Array.from({ length: 5 }, (_, index) => [
+          {
+            message: { role: "user" as const, content: `follow up ${index}` },
+            metadata: realUserRuntimeMetadata(),
+          },
+          { message: { role: "assistant" as const, content: "answer" } },
+        ]).flat(),
+      ];
+      for (const entries of [[], sparseHistory]) {
+        const body = buildRuntimeModeReminderBodyForTask(entries, {
+          mode: "plan",
+          planEnabled: true,
+          taskType: undefined,
+          tools,
+        })!;
+        expect(body).toMatch(/read-only/i);
+        expect(body).toContain("research-only task");
+        expect(body).toContain("no implementation approval or final tool call is required");
+        expect(body).not.toMatch(
+          /The user indicated|### Phase|5-phase|Explore agents|should only end with/,
+        );
+        if (ask) expect(body).toContain("use AskUserQuestion");
+        else {
+          expect(body).not.toContain("AskUserQuestion");
+          expect(body).toContain("ask the user directly");
+        }
+        if (exit) {
+          expect(body).toContain(
+            "call ExitPlanMode with the complete plan in its `plan` parameter",
+          );
+          expect(body).toContain("even if the previous mode was yolo");
+        } else {
+          expect(body).not.toContain("ExitPlanMode");
+          expect(body).toContain("plan mode remains active");
+          expect(body).toContain("A text reply does not switch modes");
+        }
+      }
+    },
+  );
+
+  it("recognizes preserved legacy full reminders without treating sparse reminders as full", () => {
+    const old = systemReminderAttachmentEntry(
+      "runtime_mode",
+      "Plan mode is active. The user indicated that they do not want you to execute yet",
     );
-    expect(body).toContain("Read the critical files you identified during exploration");
-    expect(body).toContain(
-      "Prepare your complete final plan for the `plan` parameter of ExitPlanMode.",
-    );
-    expect(body).toContain("Begin with a **Context** section");
-    expect(body).toContain("Include only your recommended approach, not all alternatives");
-    expect(body).toContain("describe the pattern once and list a few representative paths");
-    expect(body).toContain("Reference existing functions and utilities");
-    expect(body).toContain("Include a verification section");
-    expect(body).toContain("pass the complete final plan in its `plan` parameter");
-    expect(body).not.toMatch(/plan file|Launch Plan|Phase 6/i);
+    expect(hasFullRuntimeModeReminder([old])).toBe(true);
+    expect(
+      hasFullRuntimeModeReminder([old, systemReminderAttachmentEntry("plan_mode_exit", "exited")]),
+    ).toBe(false);
+    expect(
+      hasFullRuntimeModeReminder([
+        systemReminderAttachmentEntry("runtime_mode", "Plan mode still active. Read-only."),
+      ]),
+    ).toBe(false);
   });
 
   // 修复原因：子会话继承 Plan 后收到主会话的五阶段提醒，被要求再派生 Explore、以
   // AskUserQuestion 或 ExitPlanMode 收尾，而子会话没有这些工具。
   it("gives subagent children a read-only plan reminder without the main workflow", () => {
     for (const askUserQuestionAvailable of [true, false]) {
-      const body = buildRuntimeModeReminderBody([], "build", true, { askUserQuestionAvailable })!;
+      const body = buildRuntimeModeReminderBody([], "build", true, {
+        subagent: true,
+        askUserQuestionAvailable,
+      })!;
       expect(body).toContain("Plan mode is active.");
       expect(body).toContain("read-only");
       expect(body).not.toMatch(/### Phase|ExitPlanMode|Explore agents|should only end with/);
@@ -636,9 +713,12 @@ describe("runtime request reminders", () => {
       else expect(body).not.toContain("AskUserQuestion");
     }
     expect(
-      buildRuntimeModeReminderBody([], "build", false, { askUserQuestionAvailable: true }),
+      buildRuntimeModeReminderBody([], "build", false, {
+        subagent: true,
+        askUserQuestionAvailable: true,
+      }),
     ).toBeNull();
-    expect(buildRuntimeModeReminderBody([], "plan")).toContain("### Phase 5: Call ExitPlanMode");
+    expect(buildRuntimeModeReminderBody([], "plan")).toContain("verification method");
   });
 
   it("builds model anomaly reminder bodies without wrapping", () => {
@@ -737,8 +817,9 @@ describe("runtime request reminders", () => {
   });
 
   it("projects compact summary requests with attachment ordering and skipped cache write", () => {
-    const messages = buildCompactSummaryRequestMessages(
-      [
+    // 压缩请求与普通请求同一投影：摘要提示接在历史最后，跳过缓存写入。
+    const { messages } = buildProviderRequestMessages({
+      entries: [
         { message: { role: "system", content: "system prompt" } },
         {
           message: { role: "user", content: "<system-reminder>\nprefix\n</system-reminder>" },
@@ -749,9 +830,11 @@ describe("runtime request reminders", () => {
           metadata: realUserRuntimeMetadata(),
         },
         systemReminderAttachmentEntry("output_style", "Use concise output for this turn."),
+        { message: { role: "user", content: "Create compact summary." } },
       ],
-      "Create compact summary.",
-    );
+      applyCacheControl: true,
+      skipCacheWrite: true,
+    });
 
     expect(messages).toHaveLength(5);
     // 不传合并能力：不补换行。

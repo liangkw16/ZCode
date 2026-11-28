@@ -8,6 +8,7 @@ import type {
   SettingsDirectoryLocation,
   SettingsDirectorySource,
 } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import {
   resolveWorkspaceHookTrustIdentity,
   type WorkspaceHookTrustIdentityFs,
@@ -16,6 +17,7 @@ import {
   buildWorkspaceHookBundleSnapshot,
   createWorkspaceHookSourceInput,
   readWorkspaceHookProjectSources,
+  readWorkspaceHookScriptStates,
   resolveWorkspaceHookRuntimeRoot,
   workspaceHooksConfigSchema,
   type WorkspaceHookBundleSnapshotData,
@@ -71,7 +73,7 @@ function resolveUserHomeDir(): string {
 function getRootDir(source: SettingsDirectorySource, workspacePath?: string): string {
   const baseDir = workspacePath ?? resolveUserHomeDir();
   if (source === "zcode") {
-    return workspacePath ? join(baseDir, ".zcode") : join(baseDir, ".zcode", "cli");
+    return workspacePath ? join(baseDir, ".zcode") : join(baseDir, ZCODE_DATA_DIR_SEGMENT, "cli");
   }
   return join(baseDir, source === "agents" ? ".agents" : ".claude");
 }
@@ -180,7 +182,7 @@ async function readPersistentWorkspaceHookTrustDigests(
       : isAbsolute(configured)
         ? resolve(configured)
         : resolve(home, configured)
-    : join(home, ".zcode");
+    : join(home, ZCODE_DATA_DIR_SEGMENT);
   const trustFilePath = join(storageRoot, "security", "workspace-hook-trust-v1.json");
 
   // 异步读取 + ENOENT 区分：不用 existsSync 预检——同步调用会阻塞服务
@@ -275,6 +277,8 @@ async function loadHooksImpl(
     workspacePath,
     sources: projectSources,
     runtimeRoot,
+    // 与 Runtime 同一入口脚本绑定（D24），Settings 展示的 digest 才能与 Agent 的 Trust 判定一致。
+    scriptStates: await readWorkspaceHookScriptStates({ workspacePath, sources: projectSources }),
   });
   const persistentTrust = await readPersistentWorkspaceHookTrustDigests(trustIdentity, logger);
   const persistentTrustedDigests = persistentTrust.digests;

@@ -85,6 +85,10 @@
     "./telemetry": {
       "types": "./dist/telemetry/index.d.ts",
       "import": "./dist/telemetry/index.js"
+    },
+    "./path": {
+      "types": "./dist/path/index.d.ts",
+      "import": "./dist/path/index.js"
     }
   },
   "scripts": {
@@ -98,8 +102,7 @@
   },
   "dependencies": {
     "@zcode/shared": "workspace:*",
-    "zod": "^3.24.0",
-    "zod-to-json-schema": "3.25.2"
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

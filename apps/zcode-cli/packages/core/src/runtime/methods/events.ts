@@ -13,6 +13,7 @@ import type {
   MessageId,
   PartId,
   SessionEvent,
+  SessionEventSink,
   SessionId,
   TargetCompletionVerificationPayload,
   TraceContext,
@@ -79,10 +80,26 @@ export function createEvent(
   });
 }
 
+export interface SessionEventSinkFailure {
+  sink: SessionEventSink;
+  /** 实际投递的事件（已落库、带序号）。补投必须复用它，不能另起事件或序号。 */
+  event: SessionEvent;
+  error: unknown;
+}
+
+export interface AppendSessionEventOptions {
+  /**
+   * 给出时收集本次投递中抛错的 sink，由调用方决定是否补投。
+   * 不给出时与以往一致：sink 失败只记日志。
+   */
+  sinkFailures?: SessionEventSinkFailure[];
+}
+
 export async function appendEvent(
   this: AgentRuntimeInternal,
   event: SessionEvent,
   traceContext: TraceContext,
+  options: AppendSessionEventOptions = {},
 ): Promise<void> {
   // live sink 以前拿到的是 createSessionEvent 默认的 sequenceNumber=0，
   // 而 replay/read 路径拿到的是 eventStore 补号后的事件，导致同一 session 有两套顺序事实。
@@ -107,7 +124,7 @@ export async function appendEvent(
     phase = "session_event.record_usage";
     await recordToolUsageFromEvent(this, storedEvent, traceContext);
     phase = "session_event.notify_sinks";
-    await this.notifyEventSinks(storedEvent, traceContext);
+    await publishSessionEventToSinks.call(this, storedEvent, traceContext, options);
     if (shouldLogLifecycle) {
       this.logger?.info("Session event persistence completed", {
         ...traceContextToLogContext(traceContext),
@@ -145,6 +162,36 @@ export async function appendEvent(
     }
     throw error;
   }
+}
+
+/** 只补完已编号事件的后半段，避免 append 的部分成功产生第二个 sequence。 */
+export async function resumeStoredSessionEventPublication(
+  runtime: AgentRuntimeInternal,
+  event: SessionEvent,
+  traceContext: TraceContext,
+  options: AppendSessionEventOptions = {},
+): Promise<void> {
+  await persistDurableSessionEvent.call(runtime, event, traceContext);
+  await recordToolUsageFromEvent(runtime, event, traceContext);
+  await publishSessionEventToSinks.call(runtime, event, traceContext, options);
+}
+
+// 修复原因：为收集失败的 sink 改写发布路径时出过两个问题。一是写成
+// `options.sinkFailures?.push(...(await deliverSessionEventToSinks(...)))`，可选链在收集参数缺席时连参数
+// 求值一起短路——普通路径只落库、不通知任何 sink，依赖 sink 取事件的 v4 网关收不到会话事件，
+// 对话帧不再产出，而模型照常运行。二是绕开运行时的 notifyEventSinks 直接投递，丢掉了这一层间接调用。
+// 现在不收集时与以往完全一致地走 notifyEventSinks；只有调用方要收集失败项时才逐个投递并返回结果。
+async function publishSessionEventToSinks(
+  this: AgentRuntimeInternal,
+  event: SessionEvent,
+  traceContext: TraceContext,
+  options: AppendSessionEventOptions,
+): Promise<void> {
+  if (!options.sinkFailures) {
+    await this.notifyEventSinks(event, traceContext);
+    return;
+  }
+  options.sinkFailures.push(...(await deliverSessionEventToSinks.call(this, event, traceContext)));
 }
 
 function recordSessionEventAppendAggregate(
@@ -542,15 +589,22 @@ async function readExistingTimelineTiming(
   return undefined;
 }
 
-export async function notifyEventSinks(
+/**
+ * 逐个 sink 投递并返回失败项。通用路径（notifyEventSinks）只记日志；提交后的 compact 事件
+ * 据此用同一事件补投一次。
+ */
+export async function deliverSessionEventToSinks(
   this: AgentRuntimeInternal,
   event: SessionEvent,
   traceContext: TraceContext,
-): Promise<void> {
-  for (const sink of this.eventSinks) {
+  sinks: Iterable<SessionEventSink> = this.eventSinks,
+): Promise<SessionEventSinkFailure[]> {
+  const failures: SessionEventSinkFailure[] = [];
+  for (const sink of sinks) {
     try {
       await sink.onSessionEvent(event);
     } catch (error) {
+      failures.push({ sink, event, error });
       this.logger?.warn("Session event sink failed", {
         ...traceContextToLogContext(traceContext),
         errorMessage: error instanceof Error ? error.message : String(error),
@@ -561,6 +615,15 @@ export async function notifyEventSinks(
       });
     }
   }
+  return failures;
+}
+
+export async function notifyEventSinks(
+  this: AgentRuntimeInternal,
+  event: SessionEvent,
+  traceContext: TraceContext,
+): Promise<void> {
+  await deliverSessionEventToSinks.call(this, event, traceContext);
 }
 
 /**

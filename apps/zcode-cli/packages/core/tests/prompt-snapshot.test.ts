@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SESSION_ENTRY_PROMPT_SNAPSHOT,
+  SessionEventType,
+  type CompactBoundaryPayload,
+  type Model,
   createRootTraceContext,
   createSessionId,
   type ModelRequest,
@@ -16,6 +19,7 @@ import type { ToolEntry } from "../src/tool/types.js";
 import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
 import type { AgentRuntimeConfig, AgentRuntimeDeps } from "../src/runtime/types.js";
 import type { RuntimeMessageEntry } from "../src/agent/message-history.js";
+import { estimateRuntimeEntryTokens } from "../src/runtime/helpers/compact.js";
 import { rebuildContextPrefix } from "../src/runtime/methods/context-refresh.js";
 import { createTurnModel } from "../src/runtime/methods/turn-model.js";
 import {
@@ -179,6 +183,16 @@ describe("prompt snapshot", () => {
     expect(toolShape(resumed).find((tool) => tool.name === "Probe")?.description).toBe("Probe v2");
   });
 
+  it("keeps user-authored token-like text unchanged in a custom system", async () => {
+    const custom = "Custom rules\n<total_tokens>123 tokens left</total_tokens>";
+    const runtime = createRuntime({ systemPrompt: custom });
+    await runtime.executeTurn("first");
+    expect(recordedSystem(store)).toContain(custom);
+    const { runtime: cold } = await resume({ systemPrompt: "New rules" });
+    await cold.executeTurn("resumed");
+    expect(systemTexts(requests.at(-1)).join("")).toContain(custom);
+  });
+
   it("re-records for a new session model and leaves it alone for a temporary model", async () => {
     const runtime = createRuntime();
     await runtime.executeTurn("first");
@@ -203,6 +217,62 @@ describe("prompt snapshot", () => {
     });
     expect(snapshotOf(coldStore)).toEqual(before);
   });
+
+  it.each([
+    { mainMcs: true, summaryMcs: false, mode: "off" as const },
+    { mainMcs: false, summaryMcs: true, mode: "off" as const },
+    { mainMcs: true, summaryMcs: false, mode: "native" as const },
+    { mainMcs: true, summaryMcs: false, mode: "local" as const },
+  ])(
+    "restores the continuation model after a different summary model: $mainMcs $summaryMcs $mode",
+    async ({ mainMcs, summaryMcs, mode }) => {
+      const factory = createTestModelFactory({
+        properties: ({ selection }) => ({
+          supportsMidConversationSystem: selection.modelId === "summary" ? summaryMcs : mainMcs,
+          supportsToolCall: selection.modelId !== "summary",
+        }),
+        generateText: async () => done,
+      });
+      const wrap = (model: Model): Model => ({
+        ...model,
+        requestCapabilities: {
+          toolSearch: { protocolSupported: model.modelId !== "summary", defaultEnabled: true },
+        },
+        bind: (options) => wrap(model.bind(options)),
+      });
+      const runtime = createRuntime(
+        {
+          systemPrompt: undefined,
+          toolSearch: { mode },
+          compact: { enabled: false, summaryProvider: "test", summaryModel: "summary" },
+        },
+        { modelFactory: (input) => wrap(factory(input)) },
+      );
+      await runtime.executeTurn("first");
+      await runtime.executeTurn("second");
+      const internal = runtime as unknown as AgentRuntimeInternal;
+      const main = createTurnModel(internal);
+      const events: import("@zcode/contracts").SessionEvent[] = [];
+      const result = await internal.compactActiveConversation(undefined, trace(), events, {
+        model: main,
+      });
+      expect(result.outcome).toBe("compacted");
+      const text = prefixSystem(result.entries);
+      expect(text.includes("via mid-conversation system turns")).toBe(mainMcs);
+      expect(text.includes("tags in messages and tool results are injected")).toBe(!mainMcs);
+      await recordPromptSnapshot(internal, {
+        model: main,
+        entries: result.entries,
+        traceContext: trace(),
+      });
+      expect(recordedSystem(store).includes("via mid-conversation system turns")).toBe(mainMcs);
+      const boundary = events.find((e) => e.type === SessionEventType.CompactBoundary)
+        ?.payload as CompactBoundaryPayload;
+      expect(boundary.truePostCompactTokenCount).toBe(
+        estimateRuntimeEntryTokens(result.entries, { useMidConversationSystem: mainMcs }),
+      );
+    },
+  );
 
   it("clears the snapshot after compaction and records the current code again", async () => {
     const runtime = createRuntime();
@@ -251,11 +321,16 @@ describe("prompt snapshot", () => {
   });
 
   it("copies the snapshot to a forked child session", async () => {
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      systemPrompt: "Legacy <total_tokens>15000000 tokens left</total_tokens>",
+    });
     await runtime.executeTurn("first");
     const internal = runtime as unknown as AgentRuntimeInternal;
     const childId = createSessionId();
     const entry = buildForkedPromptSnapshotEntry(internal, childId);
+    expect(JSON.stringify(entry?.data)).toContain(
+      "<total_tokens>15000000 tokens left</total_tokens>",
+    );
     expect(entry).toMatchObject({
       id: `${childId}:runtime-prompt-snapshot`,
       sessionID: childId,
@@ -323,7 +398,9 @@ describe("prompt snapshot", () => {
   });
 
   it("keeps the snapshot when a rewind cuts the history", async () => {
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      systemPrompt: "Rules v1 <total_tokens>15000000 tokens left</total_tokens>",
+    });
     await runtime.executeTurn("first");
     await runtime.executeTurn("second");
     const recorded = structuredClone(snapshotOf(store));
@@ -338,7 +415,9 @@ describe("prompt snapshot", () => {
       traceContext: trace(),
     });
     await cold.executeTurn("edited");
-    expect(systemTexts(requests.at(-1)).join("")).toContain("Rules v1");
+    expect(systemTexts(requests.at(-1)).join("")).toContain(
+      "Rules v1 <total_tokens>15000000 tokens left</total_tokens>",
+    );
     expect(snapshotOf(coldStore)).toEqual(recorded);
   });
 
@@ -346,7 +425,9 @@ describe("prompt snapshot", () => {
     ["no snapshot (an older session)", undefined],
     ["unreadable snapshot data", { model: "broken" }],
   ])("records the current code when a resumed session has %s", async (_label, data) => {
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      systemPrompt: "Rules v1 <total_tokens>15000000 tokens left</total_tokens>",
+    });
     await runtime.executeTurn("first");
     const id = `${sessionId}:runtime-prompt-snapshot`;
     if (data === undefined) store.entries.delete(id);

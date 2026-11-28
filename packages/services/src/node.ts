@@ -1,3 +1,4 @@
+import { ZCODE_PREINSTALLED_TOOLS_AVAILABLE_ENV } from "@zcode/shared/preinstalled-tools";
 import {
   createRemoteProjectService,
   IRemoteProjectService,
@@ -56,12 +57,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { prependPathEntries } from "#src/runtime-tools/runtimeToolResolver.js";
 import {
   createNodeProviderRuntimePathEnv,
   NodeModelSelectionConfigRepository,
   PERSONAL_PROVIDER_CONFIG_FILE_NAME,
 } from "@zcode/provider-node";
-import { getAppConfigDir as resolveAppConfigDir } from "./paths.js";
+import { getAppConfigDir as resolveAppConfigDir, getCredentialsFilePath } from "./paths.js";
 import {
   createSystemCredentialCipher,
   createServerCredentialCipher,
@@ -155,6 +157,7 @@ export {
   getZCodeDataRootDir,
   getConversationWorkspaceDir,
   getAppConfigDir,
+  getCredentialsFilePath,
   getExportLogStageDir,
   getExportLogDir,
   getFeedbackRootDir,
@@ -174,7 +177,11 @@ export { createTerminalService } from "./terminal/terminalService.js";
 export {
   createSettingService,
   createSettingServiceWithMigrations,
+  resolveSettingsFilePath,
 } from "./setting/settingService.js";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
+
+export { ZCODE_DATA_DIR_SEGMENT };
 export { createCredentialService } from "./credential/credentialService.js";
 export { createBroadcastService } from "./broadcast/broadcastService.js";
 export { createZCodeAgentService } from "./zcode-agent/zcodeAgentService.js";
@@ -267,7 +274,6 @@ export type {
 export {
   createProviderProvisioningSource,
   listProviderProvisioningCredentialKeys,
-  resolveCredentialFilePath,
   type ProviderProvisioningSource,
   type ProviderProvisioningSourceOptions,
 } from "./model-provider/providerProvisioningSource.js";
@@ -540,7 +546,6 @@ import {
   createProviderProvisioningSource,
   listProviderProvisioningCredentialKeys,
   PROVIDER_PROVISIONING_OAUTH_CREDENTIAL_KEYS,
-  resolveCredentialFilePath,
   type ProviderProvisioningSource,
 } from "./model-provider/providerProvisioningSource.js";
 import { createProviderProvisioningTarget } from "./model-provider/providerProvisioningTarget.js";
@@ -900,29 +905,15 @@ export async function runCuaScreenCaptureReadinessProbe(
   }
 }
 
-/**
- * Screen Recording 的展示态取值：优先短命 Helper 读到的 TCC 真值，拿不到才沿用常驻 Helper 的报告。
- *
- * 为什么不能直接信常驻 Helper：macOS 撤销 Screen Recording 对**已运行进程**不生效 ——
- * 进程在退出前保留已获得的录屏能力，`CGPreflightScreenCaptureAccess()` 也继续返回撤销前的值。
- * 于是用户在系统设置里关掉授权后，常驻 broker Helper 会一直报 granted 直到它自己重启，
- * 设置页跟着显示「已授权」；而下一次 Helper 重启 CUA 就真的不可用了。
- * 授予方向同样陈旧：刚授权完常驻 Helper 仍可能报 denied。
- *
- * fail-open 是刻意的：预检失败（open 失败 / 超时 / 结果不合法）时沿用报告值，
- * 不比不做预检更糟。硬报 denied 会把已授权用户推进一次无意义的授权引导。
- */
+/** 新进程预检是授权事实；预检失败不能沿用常驻进程缓存的 granted。 */
 export async function resolveCuaScreenRecordingState(
   host: Pick<CuaHelperHost, "queryScreenRecordingPreflight">,
-  reported: "granted" | "denied" | "unknown",
+  _reported: "granted" | "denied" | "unknown",
 ): Promise<"granted" | "denied" | "unknown"> {
-  // unknown 表示连 CGPreflight 符号都没拿到（macOS 10.15 前）。预检跑的是同一个 native 调用，
-  // 换个进程也只会得到 unknown，不值得花一次 LaunchServices 冷启。
-  if (reported === "unknown") return reported;
   try {
-    return (await host.queryScreenRecordingPreflight()) ?? reported;
+    return (await host.queryScreenRecordingPreflight()) ?? "unknown";
   } catch {
-    return reported;
+    return "unknown";
   }
 }
 
@@ -1211,7 +1202,7 @@ export { isOfficialCuaPluginEnabledForWorkspace };
 
 export function hasGlobalCliZCodeCuaServer(env: NodeJS.ProcessEnv = process.env): boolean {
   const home = env.HOME?.trim() || homedir();
-  const configPath = join(home, ".zcode", "cli", "config.json");
+  const configPath = join(home, ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configPath, "utf8"));
@@ -1277,6 +1268,8 @@ export function createLocalServices(options: {
   hostApiNetworkTransport?: HostApiNetworkTransport;
   /** Desktop Host 注入 Main 推送的实时界面语言，供 ZCode endpoint 的 X-Client-Language；远端 server 不注入。 */
   resolveClientLanguage?: () => string | undefined;
+  /** Desktop Host 注入 Main 推送的 Agent 回复语言（null 为未设置）；远端与 Web 不注入，CLI 读到 null。 */
+  resolveReplyLanguage?: () => string | null;
   /** Desktop Host 请求 Main 登记 Agent 已授权的精确本地视频路径。 */
   authorizeLocalMediaPreviewPath?: (path: string) => Promise<string>;
   /**
@@ -1322,6 +1315,8 @@ export function createLocalServices(options: {
   zcodeAgentCommandResolver?: ZCodeAgentCommandResolver;
   /** Desktop Main 提前异步采集的本机 runtime 环境；Local Host 注入后不再同步启动 login shell。 */
   runtimeProcessEnvPatch?: Record<string, string>;
+  /** 仅桌面 Local Host 有本机发布目标时注入；安装前路径固定，仅定位程序，不下发给远端或 Web。 */
+  preinstalledToolsBinDir?: string;
   /** 本地桌面上次 workspace 缺失时，仅用于 Agent 子进程 spawn.cwd 兜底。 */
   zcodeAgentSpawnFallbackCwd?: string;
   /** desktop-attached remote server 从 Desktop Host 收到的一次性 Agent 网络配置。 */
@@ -1429,7 +1424,7 @@ export function createLocalServices(options: {
   const provisioningOAuthKeys = new Set<string>(PROVIDER_PROVISIONING_OAUTH_CREDENTIAL_KEYS);
   const credentialCipherProvider =
     options.credentialCipherProvider ??
-    createSystemCredentialCipher({ filePath: join(resolveAppConfigDir(), "credentials.json") });
+    createSystemCredentialCipher({ filePath: getCredentialsFilePath() });
   const credentialService = createCredentialService({
     cipherProvider: credentialCipherProvider,
     onDidMutate: ({ keys, operation }) => {
@@ -1663,7 +1658,7 @@ export function createLocalServices(options: {
           providerConfigLog.info(undefined, "ZCode Built-in CDN 配置已更新", event);
         else providerConfigLog.debug(undefined, "ZCode Built-in 刷新检查", event);
       },
-      fetchRelease: (endpointOrigin, signal) =>
+      fetchRelease: (endpointOrigin, signal, { reuseUrl }) =>
         fetchZCodeBuiltinRemoteRelease({
           apiClient,
           resolveZcodeJwtToken: () => credentialService.load("zcodejwttoken"),
@@ -1671,6 +1666,7 @@ export function createLocalServices(options: {
           signal,
           appVersion: ZCODE_VERSION,
           platform: clientConfigPlatform,
+          reuseUrl,
         }),
     },
     onZCodeBuiltinRefreshError: (error) => {
@@ -1726,7 +1722,7 @@ export function createLocalServices(options: {
     cipherProvider: credentialCipherProvider,
     personalRepository: providerConfigRuntime.personalRepository,
     settingService,
-    credentialFilePath: resolveCredentialFilePath(resolveAppConfigDir()),
+    credentialFilePath: getCredentialsFilePath(),
     personalConfigFilePath: join(resolveAppConfigDir(), PERSONAL_PROVIDER_CONFIG_FILE_NAME),
   });
   const providerProvisioningDisposers = [
@@ -1928,36 +1924,10 @@ export function createLocalServices(options: {
     const socketPath =
       process.platform === "win32" ? getStableCuaPipeName() : resolveBrokerSocketPath();
     try {
-      const { createConnection } = await import("node:net");
-      return await new Promise<string | null>((resolve) => {
-        const socket = createConnection(socketPath);
-        const finish = (value: string | null): void => {
-          socket.destroy();
-          resolve(value);
-        };
-        const timer = setTimeout(() => finish(null), 300);
-        socket.on("connect", () => {
-          clearTimeout(timer);
-          socket.write(`{"id":0,"method":"ping","params":{}}\n`);
-          let buffer = "";
-          socket.on("data", (chunk: Buffer) => {
-            buffer += chunk.toString("utf8");
-            if (buffer.includes("\n")) {
-              try {
-                const nl = buffer.indexOf("\n");
-                const reply = JSON.parse(buffer.slice(0, nl)) as { ok?: boolean };
-                finish(reply.ok === true ? socketPath : null);
-              } catch {
-                finish(null);
-              }
-            }
-          });
-        });
-        socket.on("error", () => {
-          clearTimeout(timer);
-          finish(null);
-        });
-      });
+      // 真实 Helper 只接受认证后的 broker_info；旧裸 ping 不在协议中，且关闭连接会让探测悬挂。
+      const { probeHelperHealth } = await import("@zcode/zcode-cua/broker/helperHealth");
+      await probeHelperHealth(socketPath, { timeoutMs: 300, perTryTimeoutMs: 300 });
+      return socketPath;
     } catch {
       return null;
     }
@@ -1982,15 +1952,11 @@ export function createLocalServices(options: {
   // 编译期门自动生效，不需要再回来改这里。
 
   const cuaStatusLaunchLog = createServiceLogger("cua-status-launch");
-  const launchStandaloneCuaHelperForStatus = async (): Promise<string | null> => {
+  const resolveStandaloneStatusAppPath = async (): Promise<string | null> => {
     if (process.platform !== "darwin") return null;
     const { existsSync } = await import("node:fs");
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const socketPath = resolveBrokerSocketPath();
-    let appPath: string | null;
     try {
-      appPath = await resolveStandaloneStatusLaunchAppPath({
+      return await resolveStandaloneStatusLaunchAppPath({
         env: process.env,
         bundledAppPath: resolveBundledCuaHelperAppPath(),
         exists: existsSync,
@@ -2007,19 +1973,29 @@ export function createLocalServices(options: {
       });
       return null;
     }
+  };
+  const launchStandaloneCuaHelperForStatus = async (): Promise<string | null> => {
+    if (process.platform !== "darwin") return null;
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const socketPath = resolveBrokerSocketPath();
+    const appPath = await resolveStandaloneStatusAppPath();
     if (!appPath) return null;
     // Helper 启动参数统一由 buildHelperOpenArgs 构造，避免多处手写导致漏传或漂移。
-    // 设置页只读权限探测不承载 PiP，不传 --launcher-pid 和 --pip-mode；
     // exit-log 使用 .settings.exit.log。新增参数应定义在 HelperLaunchSpec 中供调用方共用。
     // ghostCursorOverlay 必须传：overlay 是进程级开关，Helper 常驻，设置页先拉起后
     // 真实 CUA 动作会复用同一进程 —— 漏传则整轮操作没有虚拟光标（2026-10-27 本机实测，
     // 第 6 次 argv 漏传，见 docs/cua/producer/ghost-cursor-revival-and-polish.md §0）。
-    // PiP 不同：它依赖 --launcher-pid 的生命周期绑定，按原设计仍不传。
+    // pipMode 同理（修复原因）：原先以"PiP 依赖 --launcher-pid 的生命周期绑定"为由不传，
+    // 但源码构建的 Helper 不读 --launcher-pid，PiP 只剩进程级开关这一道门。设置页先拉起
+    // 的常驻 Helper 不带它，随后 PiP 握手返回 version_mismatch，服务把这条传输禁用到
+    // 回合结束，之后真实 CUA 操作复用的还是这个进程 —— 先开过设置页的那一轮没有 PiP。
     const args = buildHelperOpenArgs({
       appPath,
       socketPath,
       exitLogPath: `${socketPath}.settings.exit.log`,
       ghostCursorOverlay: true,
+      pipMode: true,
       ...(isCuaLocalDevelopmentRuntime(process.env)
         ? { allowUnsignedLauncherLocalDev: true, allowExternalBrokerClientLocalDev: true }
         : {}),
@@ -2132,7 +2108,8 @@ export function createLocalServices(options: {
         }
         // standalone Helper 上直接查权限真值（身份模式，无 token）。
         try {
-          const { callBrokerMethod } = await import("@zcode/zcode-cua/broker/helperHealth");
+          const { callBrokerMethod, readFreshHelperPermissions } =
+            await import("@zcode/zcode-cua/broker/helperHealth");
           const report = await callBrokerMethod<{
             grant_owner: string;
             owner?: { display_name?: string };
@@ -2144,12 +2121,21 @@ export function createLocalServices(options: {
             method: "permission_status",
             timeoutMs: 3000,
           });
+          // 修复原因：常驻 standalone Helper 的 permission_status 读的是它进程内的 preflight，系统撤销
+          // 录屏授权后仍可能返回旧的 granted（规范 §8.3）。与托管路径一样，用同一 bundle 的短命进程
+          // 重新采样；采样失败或拿不到 bundle 一律 unknown，不能沿用常驻进程的 granted。
+          const appPath = await resolveStandaloneStatusAppPath();
+          const fresh = appPath
+            ? await readFreshHelperPermissions({ appPath, env: process.env }).catch(() => null)
+            : null;
+          const state = (value: unknown): CuaPermissionState =>
+            value === "granted" || value === "denied" || value === "stale" ? value : "unknown";
           return {
             grantOwner: report.grant_owner,
             grantOwnerDisplayName: report.owner?.display_name ?? report.grant_owner,
-            accessibility: report.accessibility,
-            accessibilityProbeOk: report.accessibility_probe_ok === true,
-            screenRecording: report.screen_recording,
+            accessibility: state(fresh?.accessibility),
+            accessibilityProbeOk: false,
+            screenRecording: state(fresh?.screen_recording),
             screenCaptureProbeOk: false,
           };
         } catch {
@@ -2161,16 +2147,20 @@ export function createLocalServices(options: {
         }
       }
       try {
-        const report = await host.queryPermissionStatus();
+        const report = await host.queryPermissionStatus({
+          includeFunctionalProbes: queryOptions?.includeFunctionalProbes === true,
+        });
         if (!helper || !isDefaultCuaProductHelperCurrent(helper)) {
           return {
             available: false,
             reason: "ZCode Computer Use lifecycle is disposed.",
           };
         }
-        // Screen Recording 的真值必须来自一个新进程：撤销对已运行的常驻 Helper 不生效，
-        // 它会一直报撤销前的 granted。拿不到真值时 fail-open 沿用 report 值。
-        const screenRecording = await resolveCuaScreenRecordingState(host, report.screen_recording);
+        // source Host 已读取同 bundle 的短命进程；失败必须未知，不能沿用常驻 granted。
+        const screenRecording =
+          report.fresh_preflight === true
+            ? report.screen_recording
+            : await resolveCuaScreenRecordingState(host, report.screen_recording);
         if (!isDefaultCuaProductHelperCurrent(helper)) {
           return {
             available: false,
@@ -2198,6 +2188,15 @@ export function createLocalServices(options: {
           grantOwner: report.grant_owner,
           grantOwnerDisplayName: reportedOwnerDisplayName ?? report.grant_owner,
           accessibility: report.accessibility,
+          helperGeneration:
+            typeof report.helper_generation === "string" ? report.helper_generation : undefined,
+          desktopEpoch: typeof report.desktop_epoch === "number" ? report.desktop_epoch : undefined,
+          desktopAvailability: ["unlocked", "locked", "unknown"].includes(
+            String(report.desktop_availability),
+          )
+            ? (report.desktop_availability as "unlocked" | "locked" | "unknown")
+            : "unknown",
+          freshPreflight: report.fresh_preflight === true,
           accessibilityProbeOk:
             report.accessibility_probe?.ok === true &&
             report.accessibility_probe?.classification === "functional",
@@ -2402,6 +2401,7 @@ export function createLocalServices(options: {
   const worktreeRemovalGate = createWorktreeRemovalGate();
   const zcodeAgentService = createZCodeAgentService({
     credentialCipherProvider,
+    reportPluginTelemetryEvent: options?.reportPluginTelemetryEvent,
     runSessionOperation: (target, operation) =>
       worktreeRemovalGate.runSessionOperation(
         target.sessionId,
@@ -2600,6 +2600,11 @@ export function createLocalServices(options: {
       // 先拿到尚不存在的 provider_config.json 并发布短暂空 Registry。
       await providerConfigRuntime.start();
       return {
+        [ZCODE_PREINSTALLED_TOOLS_AVAILABLE_ENV]:
+          !isDesktopAttachedRemote && options.preinstalledToolsBinDir ? "1" : undefined,
+        ...(!isDesktopAttachedRemote && options.preinstalledToolsBinDir
+          ? { PATH: prependPathEntries(process.env.PATH ?? "", [options.preinstalledToolsBinDir]) }
+          : {}),
         ...buildAgentRuntimeEnv({
           httpProxy: agentNetwork.httpProxy,
           noProxy: agentNetwork.noProxy,
@@ -2635,6 +2640,8 @@ export function createLocalServices(options: {
           readSubagentRuntimeConfig: subagentsService.readRuntimeConfig,
         }
       : {}),
+    // 只有 Desktop Host 注入回复语言；远端与 Web 不注入，CLI 读到 null 后按对话语言回复。
+    resolveReplyLanguage: options?.resolveReplyLanguage,
     ...(isDesktopAttachedRemote
       ? { sessionRuntimePreferencesAuthority: "external" as const }
       : {
@@ -2648,6 +2655,8 @@ export function createLocalServices(options: {
                 settings.askUserQuestionAutoResolutionEnabled !== false,
               nativeSearchEnhancementsEnabled: settings.nativeSearchEnhancementsEnabled !== false,
               toolSearchMode: settings.toolSearchMode ?? DEFAULT_APP_TOOL_SEARCH_MODE,
+              totalTokensReminderEnabled: settings.totalTokensReminderEnabled === true,
+              agentAlwaysBackgroundEnabled: settings.agentAlwaysBackgroundEnabled !== false,
               memoryEnabled: settings.memoryEnabled === true,
               modelContextBudgetStrategy,
               // user-execution 只消费 Shell；共享默认策略是统一 result schema 的兼容占位，
@@ -2670,6 +2679,11 @@ export function createLocalServices(options: {
   const zcodeTaskIndexSyncer = createZCodeTaskIndexSyncer({
     agentService: zcodeAgentService,
     taskIndexRepo,
+    // v4 命令只返回准入回执，退出保护必须消费权威会话状态而不是 RPC 在途数。
+    reportActiveSessionCount: options?.taskRuntimeReporter?.onActiveSessionCountChanged
+      ? (runningTaskCount) =>
+          options.taskRuntimeReporter?.onActiveSessionCountChanged?.({ runningTaskCount })
+      : undefined,
   });
   // 自动归档只由这里的定时扫描触发（启动首轮 + 每小时 + 设置变更补扫）；readTree 与任务点击
   // 都不再执行 archiveInactive。判据仍排除 syncer 观察到的非终态会话，不为扫描启动 CLI。
@@ -3353,7 +3367,7 @@ export function createLocalServices(options: {
         personalConfigFilePath: join(resolveAppConfigDir(), PERSONAL_PROVIDER_CONFIG_FILE_NAME),
         stateFilePath: join(resolveAppConfigDir(), "runtime", "provider", "provisioning.json"),
         listProvisioningCredentialKeys: () =>
-          listProviderProvisioningCredentialKeys(resolveCredentialFilePath(resolveAppConfigDir())),
+          listProviderProvisioningCredentialKeys(getCredentialsFilePath()),
       }),
     );
   }
@@ -3592,9 +3606,7 @@ export async function createServerHostServices(options: {
   // 无桌面环境不能等到首次登录或 Provisioning 才发现系统库缺失。
   const credentialCipherProvider =
     options.credentialCipherProvider ??
-    (await createServerCredentialCipher({
-      filePath: join(resolveAppConfigDir(), "credentials.json"),
-    }));
+    (await createServerCredentialCipher({ filePath: getCredentialsFilePath() }));
   const projectStorageHostId = remoteHostIdFromWorkspaceIdentity(
     buildServerRemoteWorkspaceIdentity({ serverId: options.sourceServerId, workspacePath: "/" }),
   );

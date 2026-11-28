@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
   desktopProductIdentities,
   resolveDesktopArtifactSuffix,
+  resolveDesktopDataDirSegment,
   resolveDesktopProductFlavor,
   resolveWindowsAppUserModelId,
   resolveWindowsAppUserModelIdForFlavor,
@@ -30,6 +31,8 @@ describe("desktop product identity", () => {
       linuxExecutableName: "zcode-preview",
       linuxPackageName: "zcode-preview",
       cuaHelperInstallVariant: "preview",
+      macIconPath: "build/icon.icns",
+      resourceIconPath: "build/icon.png",
     });
   });
 
@@ -65,11 +68,57 @@ describe("desktop product identity", () => {
     );
   });
 
-  it("产物后缀只标记后端环境，生产后端的 Preview 包靠 productName 区分", () => {
+  it("ZCODE_KCODE_IDENTITY=1 得到自用 KCode 身份，优先级高于 Preview 开关", () => {
+    // KCode 是与 Preview 同构的并排安装档：独立 appId/productName/userData/Helper variant，
+    // 但必须显式选择，普通构建（含生产后端）不受影响。
+    const env = { ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: "1" };
+    expect(resolveDesktopProductFlavor(env)).toBe("kcode");
+    expect(resolveDesktopProductIdentity(env)).toEqual({
+      flavor: "kcode",
+      appId: "dev.zcode.app.kcode",
+      productName: "KCode",
+      linuxExecutableName: "kcode",
+      linuxPackageName: "kcode",
+      cuaHelperInstallVariant: "kcode",
+      macIconPath: "build/kcode/icon.icns",
+      resourceIconPath: "build/kcode/icon.png",
+    });
+    expect(resolveDesktopProductIdentity(env)).toBe(desktopProductIdentities.kcode);
+    expect(resolveDesktopProductFlavor({ ZCODE_ENV: "production" })).toBe("production");
+    expect(
+      resolveDesktopProductFlavor({
+        ZCODE_ENV: "production",
+        ZCODE_PREVIEW_IDENTITY: "1",
+        ZCODE_KCODE_IDENTITY: "1",
+      }),
+    ).toBe("kcode");
+    // 身份与后端环境分轴：测试后端 + KCode 开关仍是 KCode 身份。
+    expect(resolveDesktopProductFlavor({ ZCODE_ENV: "test", ZCODE_KCODE_IDENTITY: "1" })).toBe(
+      "kcode",
+    );
+  });
+
+  it("KCode 开关与 Preview 开关共用严格 1/0 语义，误拼写必须构建期失败", () => {
+    for (const flag of ["true", "yes", "on", "false", "no", "off", "2"]) {
+      expect(() =>
+        resolveDesktopProductFlavor({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: flag }),
+      ).toThrow(/expected 1 or 0/);
+    }
+    for (const flag of ["", "0"]) {
+      expect(
+        resolveDesktopProductFlavor({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: flag }),
+      ).toBe("production");
+    }
+  });
+
+  it("产物后缀只标记后端环境，生产后端的 KCode 包靠 productName 区分", () => {
     expect(resolveDesktopArtifactSuffix({ ZCODE_ENV: "test" })).toBe("_TEST");
     expect(resolveDesktopArtifactSuffix({ ZCODE_ENV: "production" })).toBe("");
     expect(
       resolveDesktopArtifactSuffix({ ZCODE_ENV: "production", ZCODE_PREVIEW_IDENTITY: "1" }),
+    ).toBe("");
+    expect(
+      resolveDesktopArtifactSuffix({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: "1" }),
     ).toBe("");
     expect(resolveDesktopArtifactSuffix({})).toBe("_TEST");
   });
@@ -85,6 +134,8 @@ describe("desktop product identity", () => {
       linuxExecutableName: "zcode",
       linuxPackageName: "zcode",
       cuaHelperInstallVariant: null,
+      macIconPath: "build/icon.icns",
+      resourceIconPath: "build/icon.png",
     });
   });
 
@@ -110,9 +161,42 @@ describe("desktop product identity", () => {
     expect(resolveWindowsAppUserModelIdForFlavor("production")).toBe(
       desktopProductIdentities.production.appId,
     );
+    expect(resolveWindowsAppUserModelIdForFlavor("kcode")).toBe(
+      desktopProductIdentities.kcode.appId,
+    );
   });
 
   it("开发态继续使用独立 AUMID，避免污染打包版 Shell 身份", () => {
     expect(resolveWindowsAppUserModelId({}, { isPackaged: false })).toBe("cn.aminer.zcode");
+  });
+
+  it("数据目录 segment 跟随 flavor：kcode 用 .kcode，其余一律 .zcode", () => {
+    expect(
+      resolveDesktopDataDirSegment({ ZCODE_ENV: "production", ZCODE_KCODE_IDENTITY: "1" }),
+    ).toBe(".kcode");
+    expect(resolveDesktopDataDirSegment({ ZCODE_ENV: "production" })).toBe(".zcode");
+    expect(
+      resolveDesktopDataDirSegment({ ZCODE_ENV: "production", ZCODE_PREVIEW_IDENTITY: "1" }),
+    ).toBe(".zcode");
+    expect(resolveDesktopDataDirSegment({ ZCODE_ENV: "test" })).toBe(".zcode");
+    expect(resolveDesktopDataDirSegment({})).toBe(".zcode");
+  });
+
+  it("KCode 使用专属图标资产且文件真实存在；production/preview 保持默认 ZCode 图标", () => {
+    // KCode 与 ZCode 并排安装，若图标回退成 ZCode 的黑底 Z 会在 Dock/启动台失去辨识度。
+    // 这里同时断言路径指向专属目录与磁盘文件存在，防止资产被误删后打出错图标的包。
+    const kcode = desktopProductIdentities.kcode;
+    const shared = desktopProductIdentities.production;
+    expect(kcode.macIconPath).toBe("build/kcode/icon.icns");
+    expect(kcode.resourceIconPath).toBe("build/kcode/icon.png");
+    expect(desktopProductIdentities.preview.macIconPath).toBe(shared.macIconPath);
+    expect(desktopProductIdentities.preview.resourceIconPath).toBe(shared.resourceIconPath);
+    expect(kcode.macIconPath).not.toBe(shared.macIconPath);
+    expect(kcode.resourceIconPath).not.toBe(shared.resourceIconPath);
+    for (const flavor of [kcode, shared]) {
+      for (const iconPath of [flavor.macIconPath, flavor.resourceIconPath]) {
+        expect(existsSync(resolve(import.meta.dirname, "..", iconPath))).toBe(true);
+      }
+    }
   });
 });

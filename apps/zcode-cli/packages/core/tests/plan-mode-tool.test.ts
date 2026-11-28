@@ -14,10 +14,7 @@ import {
 } from "@zcode/contracts";
 import { PermissionService, defaultPermissionConfig } from "../src/permission/service.js";
 import { createToolExecutor } from "../src/tool/executor.js";
-import {
-  enterPlanModeToolEntry,
-  exitPlanModeToolEntry,
-} from "../src/tool/handlers/plan-mode.js";
+import { enterPlanModeToolEntry, exitPlanModeToolEntry } from "../src/tool/handlers/plan-mode.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import { MemoryFileSystem } from "./memory-test-utils.js";
 
@@ -71,7 +68,13 @@ describe("plan mode tools", () => {
       previousMode: "build",
     });
     expect(result.modelContent).toContain("Entered plan mode.");
-    expect(result.modelContent).toContain("DO NOT write or edit any files yet");
+    expect(result.modelContent).toContain(
+      "Do not write or edit files, including spec or plan files",
+    );
+    expect(result.modelContent).toContain("entering did not require a separate approval prompt");
+    expect(result.modelContent).toContain("For pure research, return your findings directly");
+    expect(result.modelContent).toContain("If the tool is unavailable, show the plan");
+    expect(result.modelContent).not.toContain("The user indicated");
     expect(mode).toBe("plan");
     expect(prePlanMode).toBe("build");
     expect(requestCount).toBe(0);

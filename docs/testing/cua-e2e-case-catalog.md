@@ -87,6 +87,8 @@ model-visible raster -> integer x/y only
 | CU-56 |  P0 | Agent spawn credentials are process-stable pure data (MC-1/3/4/8): darwin stable socket + per-spawn authority; win32 stable pipe + ZCODE_CUA_WIN_HELPER_RECIPE; no Helper IO, no health verdict, no marker, no acquire; authorization-flow managed host does not feed spawn credentials | agentProxyEnv lazy-spawn source contract + stableCuaTransport pipe contracts | consumer integration + live-macos (win32 pending real-machine) |
 | CU-57 |  P1 | win32 settings getStatus truth chain (MC-9): probe stable pipe -> host fork -> permission_status truth; launch failure degrades to idle:true copy | stableCuaTransport pipe contracts; full chain owned by the live lane | live-windows (pending real-machine) |
 
+| CU-58 | P0 | Same plugin version and Helper build id with changed node-repl runtime invalidates the seeded cache; installed real-profile cold start executes actual model CUA observation, edit and save | node-repl bundle digest smoke + bootstrap same-build-id reseed + dedicated TextEdit model task | CLI regression + live-macos |
+
 ## Deterministic application launch model lane
 
 CU-47 is split into independent setup/action/oracle cases so a broad native-app
@@ -227,3 +229,51 @@ lanes remain mandatory and must not be inferred from the macOS pass.
 
 - darwin on-machine MC-1/2/3: pending manual run (dev:desktop checklist in delivery notes)
 - MC-4..7/9: pending Windows real-machine
+
+## 2026-11-16 KCode local runtime recovery
+
+CU-58 (pending): `settings/computer-use/manual-review/pending/computer-use-permission-status.test.ts`.
+Use an isolated E2E home and the real settings UI; replace only the permission service response to
+cover unavailable, RPC rejection after bounded retries, explicit retry and a normal granted result
+without an `available: true` field. Queries must not request screenshot probes, and unresolved
+results must never claim a grant. The local import additionally requires signed Helper verification,
+an authenticated standalone `broker_info` probe (including socket-close and timeout cases), a live
+permission query and a reversible native operation after installing the rebuilt app.
+
+CU-58 live macOS follow-up: after a manual grant, restart only the Helper and verify the UI
+converges. Exercise the real signed standalone Helper: authenticated health, both granted statuses,
+a decoded non-uniform foreign-window screenshot, and an AX tree with a screenshot. Presentation
+authority must accept a signed KCode Host whose responsible/parent passes the exact Main requirement,
+and reject the same Host identity under another signed parent. Retired or invented element tokens
+must still fail before input dispatch. Native action and post-install evidence remain required.
+
+### CU-59：macOS Helper 原生启动就绪
+
+- 从未运行状态由设置页启动 Helper，及直接打开已安装 Helper，检查 macOS 启动完成状态。
+- 加载 addon 后、原生初始化前的隔离探针必须能复现未就绪；已有 `ghostInit` / `ghostHide`
+  初始化后必须完成启动，覆盖层保持隐藏，不以外部 ready signal 或延长超时替代。
+- 保留旧 build ID 的已安装 Helper；生产模式安装器须识别 payload 新 build ID 并自动替换，严格签名校验继续通过。
+- 再次打开不出现“不响应”；真实模型通过 UI 完成专用 TextEdit 文档修改与保存。
+- 权限主体、严格 peer 签名/父进程校验、控制权租约与空闲自退规则保持有效。
+
+
+### CU-60：已安装模型截图依赖
+
+- 保留旧版 node-repl-host 0.7.0 缓存，真实用户配置冷启动后自动生成 0.7.1 完整缓存。
+- CLI 回归验证宿主携带已暂存的 Sharp JS、平台 addon 和 libvips，不依赖其他插件目录。
+- 新缓存能解码合成 PNG，真实模型通过电脑工具取得专用 TextEdit 窗口的 image block。
+- 文字读取、编辑保存、权限和 Helper 正常启动继续有效；不以 AX 文字替代图片通过。
+
+
+### CU-61：中断后含残缺 Unicode 的工具历史恢复
+
+- 构造 AX 工具结果包含被截断的半个 emoji；模型适配层回归覆盖字符串、结构化文本、失败结果和各 provider 投影。
+- 同一份旧历史连续重发时，provider 收到的解码后文本无孤立 surrogate；合法 emoji、历史原文、媒体配对和错误语义保持有效。
+- 已安装版本中，保留发生 UTF-8 编码 500 的原会话，发送仅查询窗口与截图的后续请求，验证无需删除历史即可完成。
+- 在专用验收会话发起真实模型电脑操作，主动中断，再次发送只读电脑操作；须重新取得真实窗口 AX 与 image block，并检查无该编码 500 或 Helper“不响应”。
+
+### 2026-11-17 source Helper 权限回归
+
+沿用设置页候选用例，增加 granted→unknown、granted→denied 与 locked 样本，确认旧授权/功能探针不覆盖新事实，后台查询从不带主动截图意图。source Helper 的真实 TCC 授予/撤销/重授、代际变化和锁定恢复仍需 M2 M05/M06 运行证据；注入响应的 UI 用例不能代替真实 OS 验收。
+
+设置页候选 E2E 已在 `packages/desktop/.e2e-artifacts/desktop-e2e-20261117152424494-p64959-0de6a1c3203b4ec4` 通过（2/2，显式 common fixture replay；不调用模型）。此前两次运行分别停在 capture 缺配置、相对 fixture 路径解析的准备阶段，未执行 UI 断言。真实 OS 与模型矩阵仍为 pending。

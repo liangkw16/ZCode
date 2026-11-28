@@ -2,9 +2,14 @@
 // 只做纯路径计算；"是否真的是受管 worktree"还要叠加 git worktree list 与 .git 反向链接校验，
 // 由调用方（Git 服务 / Trust identity resolver）完成。
 import { basename, isAbsolute, join, relative, sep } from "node:path";
+import { ZCODE_DATA_DIR_SEGMENT } from "../env.js";
 
-/** 受管根目录相对数据根目录的路径段：<dataBaseDir>/.zcode/worktrees。 */
-export const MANAGED_WORKTREE_HOME_SEGMENTS = [".zcode", "worktrees"] as const;
+/**
+ * 受管根目录相对数据根目录的路径段：<dataBaseDir>/<segment>/worktrees。
+ * 修复原因：首段原先写死 ".zcode"，kcode 与 ZCode 会共用 ~/.zcode/worktrees，互相列出、
+ * 回收对方的 worktree（kcode-full-isolation 设计 §2 的全局派生点）。
+ */
+export const MANAGED_WORKTREE_HOME_SEGMENTS = [ZCODE_DATA_DIR_SEGMENT, "worktrees"] as const;
 
 /** bucket 是 4 位小写 hex；位数同时用来控制 Windows 路径长度。 */
 export const MANAGED_WORKTREE_BUCKET_LENGTH = 4;

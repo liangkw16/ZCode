@@ -57,6 +57,22 @@ export function resolveEffectiveConfigResult(
   };
 }
 
+type ConfiguredLogLevel = NonNullable<ConfigResult["config"]["logging"]>["level"];
+
+/**
+ * 用户配置文件显式声明的 logging.level。
+ *
+ * 修复原因：合并后的 config.logging.level 总有值（系统默认会补出 "info"），直接把它当
+ * “显式配置”会在开发态覆盖环境默认的 Debug，默认文件日志从此丢失 debug 事件。
+ * 只有配置文件真正写了这一键，才优先于环境默认。项目配置只开放扩展声明，写不了这一键。
+ */
+export function resolveConfiguredLoggingLevel(
+  configResult: ConfigResult,
+): ConfiguredLogLevel | undefined {
+  if (!configResult.sources.user.hasLoggingLevel) return undefined;
+  return configResult.config.logging.level;
+}
+
 export function resolveEffectiveLocale(
   requestedLocale: UiLocale,
   options: ZCodeAppOptions,

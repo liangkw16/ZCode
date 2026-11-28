@@ -10,6 +10,14 @@ Compact 需要一组可手动运行、可定时调度的 E2E，用来验证它�
 
 ## Case Matrix
 
+### background-bash
+
+scripted provider 执行后台 Bash，再用前台 Bash 等待完成。验收前台输出与后台落盘输出的 stdout/stderr 顺序、单一输出路径，以及 provider 收到的完整完成通知。通知必须包含 `loop/turn-steering.md` 定义的“系统通知，非用户输入”前言和原有 `<task-notification>` XML；使用完整文本相等断言，不通过剥离前言放宽检查。
+
+### usage-anchor
+
+scripted provider 分别覆盖 full、reactive、input-only、hydration 和 rewind 场景，校验压缩与后续请求的 usage anchor、live history 和持久 assistant history。App 的创建与重建统一等待异步 `createApp()` 完成，再调用公开的 `submitPrompt`、`resume` 和 `close`；重启仍使用原 session ID，不另建会话。
+
 ### microcompact
 
 Fixture 构造一个临时 workspace，包含 Node emitter script。runner 使用 `deepseek/deepseek-v4-flash`，提示模型必须调用两次 `Bash`：
@@ -98,7 +106,7 @@ cases/
 
 ## 暂不纳入 passing E2E 的规划项
 
-`session memory compact`、`partial compact`、compact 后自动恢复最近文件目前仍是 plan 中明确的后续能力，不应伪装成已通过的定时 case。当前定时套件只覆盖第一批已实现主路径：manual full compact、auto compact、PTL retry、reactive compact 和 provider-neutral local microcompact。等这些能力落地后，必须先扩展本 spec，再新增 passing E2E。
+`session memory compact` 与 `partial compact` 目前仍是 plan 中明确的后续能力，不应伪装成已通过的定时 case。compact 后自动恢复最近文件已经实现（`compact-post-reminders.ts`，由 core 的 `post-compact-file-restore.test.ts` 等单测覆盖），但尚未纳入 passing E2E；补入前先在本 spec 登记 case。当前定时套件只覆盖第一批已实现主路径：manual full compact、auto compact、PTL retry、reactive compact 和 provider-neutral local microcompact。等这些能力落地后，必须先扩展本 spec，再新增 passing E2E。
 
 ## 配置边界
 

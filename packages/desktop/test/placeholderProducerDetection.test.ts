@@ -30,7 +30,11 @@ afterEach(() => {
 
 describe("Computer Use producer detection", () => {
   it("真实 producer：已安装且未声明占位", () => {
-    const desktopRoot = createWorkspace({ name: "@zcode/zcode-cua", version: "0.6.4" });
+    const desktopRoot = createWorkspace({
+      name: "@zcode/zcode-cua",
+      version: "0.6.5",
+      zcodeCuaProducer: { kind: "source", protocol: 3, platforms: ["darwin"] },
+    });
     expect(readComputerUseProducer({ desktopPackageRoot: desktopRoot })).toMatchObject({
       installed: true,
       placeholder: false,

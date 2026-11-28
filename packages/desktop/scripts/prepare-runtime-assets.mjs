@@ -22,7 +22,8 @@ const shouldPrepareWindowsBrowserImportHelper =
   target.os === "win32" && process.env.ZCODE_ENABLE_WINDOWS_BROWSER_IMPORT === "1";
 // Windows Computer Use Helper 由真实 producer 提供；开源占位包没有 Helper runtime，跳过准备。
 const shouldPrepareWindowsCuaHelper =
-  target.os === "win32" && isRealComputerUseProducerInstalled({ desktopPackageRoot: desktopRoot });
+  target.os === "win32" &&
+  isRealComputerUseProducerInstalled({ desktopPackageRoot: desktopRoot, platform: target.os });
 // CUA 权限浮窗的吸附数据源。仅 macOS；缺 swiftc 时脚本内部自行降级为跳过（浮窗 fail-open
 // 到屏幕底部，仍可用），所以无条件挂在 darwin 上不会让构建变脆。
 const shouldPrepareMacosWindowBounds = target.os === "darwin";
@@ -35,6 +36,8 @@ const localRuntimeScripts = [
   ...(shouldPrepareWindowsCuaHelper ? ["prepare:windows-cua-helper"] : []),
   ...(nativeSearchReleasePlan.enabled ? ["prepare:native-search"] : []),
   ...(shouldPrepareWindowsBrowserImportHelper ? ["prepare:browser-import-helper"] : []),
+  // 预装工具的 Windows 入口都由这个 shim 提供；缺失时入口无法写入。
+  ...(target.os === "win32" ? ["prepare:preinstalled-entry-shim"] : []),
   ...(shouldPrepareMacosWindowBounds ? ["prepare:macos-window-bounds"] : []),
 ];
 
@@ -51,6 +54,27 @@ function runTimedPnpmScript(scriptName) {
       `[ci][timer] prepare-runtime-assets:${scriptName} end duration_ms=${Date.now() - startMs}`,
     );
   }
+}
+
+// 源码 producer 必须先构建 JS；macOS 再构建同一份原生 Helper，禁止消费恢复目录的产物。
+if (isRealComputerUseProducerInstalled({ desktopPackageRoot: desktopRoot })) {
+  runCommand(pnpmCommand, ["--filter", "@zcode/zcode-cua", "build", "--typescript-only"], {
+    cwd: resolve(desktopRoot, "../.."),
+    env: process.env,
+  });
+  if (target.os === "darwin")
+    runCommand(
+      process.execPath,
+      [
+        resolve(desktopRoot, "../zcode-cua/scripts/build-native.mjs"),
+        "--arch",
+        target.arch,
+        ...(process.env.APPLE_SIGNING_IDENTITY || process.env.CSC_NAME
+          ? ["--identity", process.env.APPLE_SIGNING_IDENTITY || process.env.CSC_NAME]
+          : []),
+      ],
+      { cwd: desktopRoot, env: process.env },
+    );
 }
 
 for (const scriptName of localRuntimeScripts) {

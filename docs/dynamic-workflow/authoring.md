@@ -751,7 +751,10 @@ request only (below). This keeps the model's behaviour identical whether the gra
 or off: the only thing the gate changes is whether the door exists. Under the `onDemand` mode
 the prose door does not exist until the session has been activated: `CreateWorkflow` is not
 registered, so a prose request is handled the way it is under `disabled`, with `Agent` or by
-the model itself, and `/workflow` is the one door until then. After activation both doors
+the model itself, and `/workflow` is the one door until then. If the model loads the
+`dynamic-workflows` skill in that state, the `Skill` result starts with a notice that the
+workflow tools are not enabled yet and that the user should send a message starting with
+`/workflow`; the notice does not open the door. After activation both doors
 are open for the rest of the session (launch.md "On demand: activation").
 
 The command appears in the `/` menu in the desktop app and the TUI. In the desktop `/`
@@ -928,6 +931,12 @@ size budget per description; `core/tests/workflow-skill-gate.test.ts` and
 
 ### The system prompt
 
+2026-11-15 revision implemented: the shared security-task notice has been removed
+from the default main and workflow-actor prompts. The sequence below describes the
+current contract; tool permissions and general action authorization are unchanged.
+Real-model task-completion improvements still require a separate controlled evaluation.
+See the [system prompt contract](../../apps/zcode-cli/docs/design/v2/loop/system-prompt-contract.md).
+
 A workflow subagent does not get the interactive agent's identity. The context builder
 takes a third path when the runtime config carries `workflowActor` (mutually exclusive
 with a custom system prompt; both present is a wiring error). The CLI prefix ("You are
@@ -940,8 +949,8 @@ ZCode, an interactive coding agent") is skipped, and the identity section is rep
    The name clause appears only when the subagent has a name.
 2. The author's persona, if any. It sits after the opening sentence so the role is
    prominent, and after it so the opening cannot be overridden.
-3. The security notice and the `# Harness` block, reused verbatim from the interactive
-   identity.
+3. The `# Harness` block, reused verbatim from the interactive identity. No separate
+   security-task notice or equivalent replacement is injected.
 4. The workflow contract, `# Working inside a workflow`:
    - You have the regular working tools (reading, searching, editing, running commands)
      plus `submit_result` and `escalate`. There is no tool that asks a person anything.
@@ -964,8 +973,10 @@ ZCode, an interactive coding agent") is skipped, and the identity section is rep
 
 The desktop context, the dynamic-behaviour section and the session guidance are skipped
 (they address a conversation with a user; the one rule worth keeping, "report outcomes
-faithfully", moved into the contract). Memory, skills, user instructions and project
-instructions follow as they do for any session. The child runtime strips any system prompt
+faithfully", moved into the contract). The `# Finishing work` and
+`# Memory, notes and feedback` sections are skipped too (see
+`apps/zcode-cli/docs/design/v2/loop/system-prompt-contract.md`). Memory, skills, user
+instructions and project instructions follow as they do for any session. The child runtime strips any system prompt
 inherited from the parent session so a parent with a custom prompt cannot leak it in.
 
 The amend-resume cache matches subagents on the script-level persona, not on the composed

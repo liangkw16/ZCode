@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,8 +36,7 @@ const require = __zcodeCreateRequire(import.meta.url);`;
 //
 // 取值与 desktop 侧保持同一来源：CI 注入 ZCODE_CUA_HELPER_BUILD_ID env；dev 为空串走兜底
 // （dev Helper 不走下载/pin 校验）。见 packages/desktop/tsup.config.ts 同名 define 的注释。
-const resolveCuaHelperBuildId = (env = process.env) =>
-  env.ZCODE_CUA_HELPER_BUILD_ID?.trim() ?? "";
+const resolveCuaHelperBuildId = (env = process.env) => env.ZCODE_CUA_HELPER_BUILD_ID?.trim() ?? "";
 
 export const buildNodeReplHostBundle = async ({
   outfile = resolve(packageRoot, "dist", "mcp", "server.js"),
@@ -59,8 +59,8 @@ export const buildNodeReplHostBundle = async ({
   });
   // 构建期守卫：define 名一旦漂移（改名、被 createSharedDefines 之类重构吞掉），
   // 产物会静默退回空串，而症状只在正式包出现且表现为超时。这里立刻失败，别再让它溜到用户手上。
+  const bundled = await readFile(outfile, "utf8");
   if (cuaHelperBuildId) {
-    const bundled = await readFile(outfile, "utf8");
     if (!bundled.includes(cuaHelperBuildId)) {
       throw new Error(
         `[node-repl-host] ZCODE_CUA_HELPER_BUILD_ID=${cuaHelperBuildId} 未折叠进 ${outfile}：` +
@@ -68,12 +68,11 @@ export const buildNodeReplHostBundle = async ({
       );
     }
   }
-  // 修复原因：官方插件 seed 按版本复用缓存，而 server.js 的 build id 每条流水线都变、版本号不变。
-  // 写出构建身份文件，供 bootstrap 的 buildIdentityPath 比较，桌面升级后才会重新 seed。
+  // 同版本且 Helper build id 相同/为空时，旧占位 runtime 会被误复用；摘要让真实 bundle 变化触发既有 reseed。
   // 写在 outfile 所在 dist 根目录（默认 dist/build-identity.json），测试的临时输出不会改写真实 dist。
   await writeFile(
     resolve(dirname(outfile), "..", "build-identity.json"),
-    `${JSON.stringify({ cuaHelperBuildId })}\n`,
+    `${JSON.stringify({ cuaHelperBuildId, runtimeSha256: createHash("sha256").update(bundled).digest("hex") })}\n`,
   );
   return { outfile, cuaHelperBuildId };
 };

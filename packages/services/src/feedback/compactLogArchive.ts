@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { CLI_MEMORY_DIAGNOSTIC_DIRECTORY } from "@zcode/shared";
+import { CLI_MEMORY_DIAGNOSTIC_DIRECTORY, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import { getAppConfigDir, getFeedbackLogArchiveDir } from "../paths.js";
 import { createFeedbackDiagnosticArchive } from "./feedbackLogArchive.js";
 
@@ -25,7 +25,9 @@ export async function prepareCompactLogArchive(options?: {
   return createFeedbackDiagnosticArchive({
     sources: [
       {
-        directory: join(homedir(), ".zcode", "cli", CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
+        // 修复原因：目录原先硬编码 "~/.zcode"，kcode 构建下反馈包会带上 ZCode 的 memory 诊断。
+        // archivePrefix 是压缩包内的布局约定（消费方按它定位），不随产品变化。
+        directory: join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", CLI_MEMORY_DIAGNOSTIC_DIRECTORY),
         archivePrefix: ".zcode/cli/memory-diagnostics",
         contentPolicy: "cli-memory",
         onlyCurrentDay: false,

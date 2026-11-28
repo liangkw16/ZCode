@@ -4,7 +4,7 @@ import { cp, lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { PluginSyncMarketplaceMirrorInspection } from "@zcode/shared";
-import { PLUGIN_DATA_SYNC_MAX_ITEM_BYTES } from "@zcode/shared";
+import { PLUGIN_DATA_SYNC_MAX_ITEM_BYTES, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { IPluginSyncService } from "./pluginSync.js";
 import {
   createPluginSyncArchive,
@@ -117,11 +117,11 @@ export function resolveUserHomeDir(): string {
 }
 
 export function getUserZcodeConfigPath(): string {
-  return join(resolveUserHomeDir(), ".zcode", "cli", "config.json");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
 }
 
 export function getUserZcodePluginRoot(): string {
-  return join(resolveUserHomeDir(), ".zcode", "plugins");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "plugins");
 }
 
 async function exportMarketplaceSourceArchiveInternal(
@@ -375,7 +375,9 @@ function parseMarketplaceManifest(value: unknown): MarketplaceManifestInfo {
   };
 }
 
-function readMarketplacePluginRoot(value: Record<string, unknown>): { pluginRoot?: string } {
+function readMarketplacePluginRoot(value: Record<string, unknown>): {
+  pluginRoot?: string;
+} {
   if (typeof value.pluginRoot === "string" && value.pluginRoot.trim()) {
     return { pluginRoot: value.pluginRoot.trim() };
   }
@@ -601,7 +603,10 @@ function buildMirroredMarketplaceManifest(
         }
       : {}),
     plugins: entries.map((entry) => {
-      const raw: Record<string, unknown> = { ...entry.entry.raw, name: entry.entry.name };
+      const raw: Record<string, unknown> = {
+        ...entry.entry.raw,
+        name: entry.entry.name,
+      };
       if (entry.mirroredSourceRelativePath) {
         raw.source = `./${entry.mirroredSourceRelativePath.split("/").slice(1).join("/")}`;
       }

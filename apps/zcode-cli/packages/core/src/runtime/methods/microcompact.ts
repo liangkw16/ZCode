@@ -1,6 +1,7 @@
 import {
   CompactPhase,
   SessionEventType,
+  applyCompactModelOverrides,
   buildDefaultMicrocompactThreshold,
   getAutoCompactThreshold,
   traceContextToLogContext,
@@ -15,12 +16,9 @@ import type {
 import { maybeLocalMicrocompactRuntimeEntries, throwIfTurnAborted } from "../helpers/index.js";
 import { shouldUseMidConversationSystem } from "../helpers/runtime-provider-request-messages.js";
 import type { AgentRuntimeInternal } from "../internal.js";
-import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
+import { resolveAutoCompactPolicyConfig } from "./model-token-limits.js";
 import type { TurnRequestState } from "./turn-loop-state.js";
-import {
-  filterOutputTokenContinuationEntries,
-  preserveCanonicalContextPrefix,
-} from "./turn-output-token-continuation.js";
+import { preserveCanonicalContextPrefix } from "./turn-output-token-continuation.js";
 
 export async function microcompactIfNeeded(
   this: AgentRuntimeInternal,
@@ -37,14 +35,13 @@ export async function microcompactIfNeeded(
   if (this.config.compact?.enabled === false) return;
   throwIfTurnAborted(abortSignal);
 
-  const autoConfig: AutoCompactPolicyConfig = {
-    contextWindow: context.model.properties.contextWindow,
-    ...this.config.compact,
-    maxOutputTokens: resolveNormalRequestMaxOutputTokens({
-      modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
-    }),
-    modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
-  };
+  // 与 autoCompactIfNeeded 共用按实际执行模型解析的组装方式：先取上游统一的策略基座，
+  // 再叠加 kcode 的 modelOverrides（micro 默认阈值由模型级 auto 阈值派生）。
+  const { config: autoConfig, source: compactPolicySource, matched: compactModelOverrideMatched } =
+    applyCompactModelOverrides(
+      resolveAutoCompactPolicyConfig(this, context.model),
+      { providerId: context.model.providerId, modelId: context.model.modelId },
+    );
   const microcompactConfig = resolveLocalMicrocompactConfig(autoConfig);
   const useMidConversationSystem = shouldUseMidConversationSystem(this.config, context.model);
   const result = maybeLocalMicrocompactRuntimeEntries({
@@ -59,9 +56,13 @@ export async function microcompactIfNeeded(
       ...traceContextToLogContext(turnTraceContext),
       event: "compact.micro.skipped",
       estimatedTokenCount: result.decision.estimatedTokenCount,
+      modelId: context.model.modelId,
+      modelOverrideMatched: compactModelOverrideMatched,
       modelStepIndex: context.modelStepIndex,
       module: "core.runtime",
       phase: context.phase,
+      policySource: compactPolicySource,
+      providerId: context.model.providerId,
       reason: result.decision.reason,
       thresholdTokens: result.decision.thresholdTokens,
       trigger: result.decision.trigger,
@@ -69,11 +70,10 @@ export async function microcompactIfNeeded(
     return;
   }
 
-  const recordableEntries = filterOutputTokenContinuationEntries(result.entries);
   this.messageHistory.replaceMessages(
     preserveCanonicalContextPrefix(
       this.messageHistory.borrowReadOnlyRuntimeEntries(),
-      recordableEntries,
+      result.entries,
     ),
   );
   context.turnRequestState.entries = result.entries;
@@ -91,11 +91,16 @@ export async function microcompactIfNeeded(
     ...traceContextToLogContext(turnTraceContext),
     clearedMessageCount: payload.clearedMessageCount,
     event: "compact.micro.applied",
+    modelId: context.model.modelId,
+    modelOverrideMatched: compactModelOverrideMatched,
     modelStepIndex: context.modelStepIndex,
     module: "core.runtime",
     phase: context.phase,
+    policySource: compactPolicySource,
+    providerId: context.model.providerId,
     postMicrocompactTokenCount: payload.postMicrocompactTokenCount,
     preMicrocompactTokenCount: payload.preMicrocompactTokenCount,
+    thresholdTokens: microcompactConfig.thresholdTokens,
     tokensSaved: payload.tokensSaved,
     trigger: payload.trigger,
   });

@@ -13,6 +13,8 @@ import {
   DefaultRuntimeConfig as DefaultConfig,
 } from "@zcode/contracts";
 
+import { mergeCompactModelOverrides } from "./config-merger.js";
+
 type Handler<K extends ConfigKey> = (value: ConfigValue<K>, prev: ConfigValue<K>) => void;
 type AllHandler = (key: ConfigKey, value: unknown, prev: unknown) => void;
 
@@ -206,6 +208,34 @@ class ConfigStore {
         scope,
       );
     }
+    if (config.compact) {
+      const previous = this.get(ConfigKey.Compact) ?? DefaultConfig.compact;
+      // 与启动 mergeConfigs 共用三层合并 helper：增量 merge 只改一个模型字段时
+      // 不能丢掉已合并的其他条目，否则两条路径产生不同语义。
+      const mergedModelOverrides = mergeCompactModelOverrides(
+        previous.modelOverrides,
+        config.compact.modelOverrides,
+      );
+      this.set(
+        ConfigKey.Compact,
+        {
+          ...previous,
+          ...config.compact,
+          // 子对象按层合并，避免高优先层只写 enabled 时抹掉低优先层的阈值调优；
+          // 两侧都没有 microcompact 时不生成空键，保持默认策略对象干净。
+          ...((previous.microcompact || config.compact.microcompact)
+            ? {
+                microcompact: {
+                  ...previous.microcompact,
+                  ...config.compact.microcompact,
+                },
+              }
+            : {}),
+          ...(mergedModelOverrides !== undefined ? { modelOverrides: mergedModelOverrides } : {}),
+        },
+        scope,
+      );
+    }
     if (config.ui?.locale !== undefined) {
       this.set(ConfigKey.UiLocale, config.ui.locale, scope);
     }
@@ -329,6 +359,7 @@ export class ConfigPortImpl implements ConfigPort {
       modelAnomalyGuard:
         this.store.get(ConfigKey.ModelAnomalyGuard) ?? DefaultConfig.modelAnomalyGuard,
       hooks: this.store.get(ConfigKey.Hooks) ?? DefaultConfig.hooks,
+      compact: this.store.get(ConfigKey.Compact) ?? DefaultConfig.compact,
       ui: {
         locale: this.store.get(ConfigKey.UiLocale) ?? DefaultConfig.ui.locale,
         theme: this.store.get(ConfigKey.UiTheme) ?? DefaultConfig.ui.theme,
@@ -439,6 +470,8 @@ function getDefaultValue(key: ConfigKey): unknown {
       return defaults.modelAnomalyGuard;
     case ConfigKey.Hooks:
       return defaults.hooks;
+    case ConfigKey.Compact:
+      return defaults.compact;
     case ConfigKey.UiLocale:
       return defaults.ui.locale;
     case ConfigKey.UiTheme:
@@ -499,6 +532,8 @@ export {
 } from "./config-factory.js";
 export {
   PLUGIN_SECRETS_FILE_NAME,
+  resolvePluginSecretsPath,
+  resolvePluginSecretOverrides,
   createEmptyPluginSecretsFile,
   getPluginSecretsForScope,
   normalizePluginConfigPathForComparison,

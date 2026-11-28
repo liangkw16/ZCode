@@ -11,6 +11,9 @@ import type {
   TelemetryResourceContext,
 } from "@zcode/contracts/telemetry";
 import type { ModelStatusSink } from "@zcode/contracts/model";
+// 修复原因：独立运行的设备标识状态文件回退到硬编码的 "~/.zcode"，kcode 构建下会复用 ZCode 的
+// 设备标识。按 kcode-full-isolation 设计 §2 走 segment；设备标识读取方已按 segment 解析。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import { NoopAgentExecutionTelemetry } from "./agent-trace-runtime.js";
 
 type EnvRecord = Record<string, string | undefined>;
@@ -225,7 +228,7 @@ async function resolveStandaloneDeviceMid(
 ): Promise<string | undefined> {
   const stateFile = zcodeHome
     ? join(zcodeHome, "v2", "telemetry-state.json")
-    : join(homedir(), ".zcode", "v2", "telemetry-state.json");
+    : join(homedir(), ZCODE_DATA_DIR_SEGMENT, "v2", "telemetry-state.json");
   const pending = pendingStandaloneDeviceMidByStateFile.get(stateFile);
   if (pending) return pending;
   const resolution = resolveStandaloneDeviceMidFromFile(stateFile);

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { createServer, type Server, type Socket } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -20,6 +20,7 @@ export interface NodeReplCuaBroker {
   /** 只有地址；token 每次调用由账本签发（20-node-repl-call-ledger.md「账本与 token」）。 */
   connection: { socketPath: string };
   ready: Promise<void>;
+  finishCall(token: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -33,8 +34,37 @@ export function createNodeReplCuaBroker(input: {
     input.platform === "win32"
       ? `\\\\.\\pipe\\zcode-node-repl-cua-${randomUUID()}`
       : join(tmpdir(), `znrc-${randomUUID()}.sock`);
+  const pending = new Map<string, Map<AbortController, Promise<void>>>();
+  const execute = async (
+    token: string,
+    controller: AbortController,
+    request: Parameters<ComputerUseRuntime["execute"]>[0],
+  ): Promise<CallToolResult> => {
+    let work = pending.get(token);
+    if (!work) {
+      work = new Map();
+      pending.set(token, work);
+    }
+    const finished = Promise.withResolvers<void>();
+    work.set(controller, finished.promise);
+    try {
+      return await input.runtime.execute(request);
+    } finally {
+      work.delete(controller);
+      if (work.size === 0) pending.delete(token);
+      finished.resolve();
+    }
+  };
+  const finishCall = async (token: string): Promise<void> => {
+    const work = pending.get(token);
+    if (!work) return;
+    const requests = [...work];
+    // 断连不等于原生输入结束；在 producer 上下文之外取消并排空，保留 session 的保持编号。
+    for (const [controller] of requests) controller.abort();
+    await Promise.all(requests.map(([, finished]) => finished));
+  };
   const server = createServer((socket) => {
-    void handleSocket(socket, input.runtime, input.ledger).catch((error) => {
+    void handleSocket(socket, execute, input.ledger).catch((error) => {
       input.logger?.warn("Node REPL CUA broker request failed", {
         event: "node_repl.cua_broker.request.failed",
         error: error instanceof Error ? error.message : String(error),
@@ -55,6 +85,7 @@ export function createNodeReplCuaBroker(input: {
   return {
     connection: { socketPath },
     ready,
+    finishCall,
     close: async () => {
       await ready.catch(() => undefined);
       if (server.listening) {
@@ -69,7 +100,11 @@ export function createNodeReplCuaBroker(input: {
 
 async function handleSocket(
   socket: Socket,
-  runtime: ComputerUseRuntime,
+  execute: (
+    token: string,
+    controller: AbortController,
+    request: Parameters<ComputerUseRuntime["execute"]>[0],
+  ) => Promise<CallToolResult>,
   ledger: NodeReplCallLedger,
 ): Promise<void> {
   const abortController = new AbortController();
@@ -105,7 +140,7 @@ async function handleSocket(
     const context = parseContext(requestContext(entry.requestMeta));
     // Worker 侧 bridge 已先拒绝 subagent；这里兜住绕过 bridge 的请求。
     if (context.runtimeScope === "subagent") throw new Error(CUA_UNAVAILABLE_IN_SUBAGENT_MESSAGE);
-    const result = await runtime.execute({
+    const result = await execute(entry.token, abortController, {
       // 这里把 capability method 适配到 staging runtime 的内部 handler；
       // 外层 SDK/bridge 不再构造或调用 MCP tool envelope。
       toolName: payload.method as never,

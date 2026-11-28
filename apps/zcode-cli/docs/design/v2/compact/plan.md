@@ -33,7 +33,7 @@ hook results
 
 | 名称 | 初始值 | 用途 |
 | --- | ---: | --- |
-| summary output reserve | `min(modelMaxOutputTokens, 32_000)` | 给 summary 输出和后续请求留空间；没有模型输出上限时默认按 32k 预留。 |
+| summary output reserve | `min(modelMaxOutputTokens, max(21_000, contextWindow × 8%))` | 给 summary 输出和后续请求留空间，也是 summary 请求的 max_tokens；现行算法见 [模型请求输出上限策略](../../../../../../docs/model-request-output-tokens.md)。 |
 | auto compact buffer | `13_000` | 自动 compact 不等到满窗才触发。 |
 | warning/error buffer | `20_000` | UI/SDK 的 context warning。 |
 | manual compact buffer | `3_000` | 自动 compact 关闭时的阻塞保护。 |
@@ -114,7 +114,7 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 4. 运行 `PreCompact` hook，合并用户指令和 hook 指令。
 5. 构造 no-tools summary prompt。
 6. 通过 provider adapter 发起单轮 summary 请求。
-7. 清洗 `<analysis>`，只保留 `<summary>`。
+7. 按 README「摘要文本的选取」选出一个文本块，清洗 `<analysis>`，只保留 `<summary>`。
 8. 生成 boundary 和 compact summary。
 9. 追加 post-compact attachments。
 10. 写入 session log / message part。
@@ -133,7 +133,8 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 
 - 自定义 `/compact 重点保留测试输出` 会进入 summary prompt。
 - hook 指令会被追加，用户指令在前。
-- summary agent 尝试 tool call 时被拒绝，并转为失败或重试。
+- 摘要回复带 tool call 时，工具不执行；选出的块有摘要（成对的 `<summary>` 或行首 `<summary>`）时用它生成摘要。只有 tool call，或只有开场白（例如 "Let me read the file first."）时失败（auto 同一次压缩内重试）。
+- 摘要回复有多个文本块时，用最后一个含 `<summary>` 的块；都不含时用最后一个块。
 - compact 后下一轮 context builder 不再包含旧历史。
 - compact 失败不会写入半截 boundary。
 
@@ -151,7 +152,7 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 策略：
 
 ```text
-effectiveWindow = contextWindowForModel - min(modelMaxOutputTokens, 32_000)
+effectiveWindow = contextWindowForModel - min(modelMaxOutputTokens, max(21_000, contextWindowForModel × 8%))
 autoThreshold = effectiveWindow - 13_000
 shouldCompact = activeTokenEstimate >= autoThreshold
 ```
@@ -352,7 +353,7 @@ active context 的裁剪、summary 生成、boundary 持久化和 resume/replay 
 
 - compact lifecycle 必须额外写入一条 synthetic timeline message。它不是 provider-visible summary，也不是 tool call；它只服务 transcript、TUI、ZCode app-server replay 和恢复诊断。
 - timeline message 使用 `compaction` part，但 `timelineStatus` 表示 `started` / `completed` / `failed` / `interrupted`，只有带 `compactBoundary` 的 compaction part 才能作为 active-chain 截断边界。
-- compact 开始先写 timeline message + `compact_started` event；summary 和 boundary 写成功后，再把同一条 timeline message 更新为 `completed` 并写 `compact_completed` event。
+- compact 开始先写 timeline message + `compact_started` event；summary 产出后，`completed` timeline 与请求前公告、summary、compaction 附件整组在同一个 store 事务里提交，再写 `compact_completed` event（原先写成“summary 和 boundary 写成功后再把 timeline 更新为 completed”，现以 `compact-persistence.ts` 的 bundle 提交为准：后续事件写失败不能把已提交的 timeline 重新变成 failed）。
 - 进程在 summary 请求中被中断时，下一次 `resumeFromStore()` 扫描到没有 terminal 状态的 timeline part，应把它标记为 `interrupted`。如果已经存在同 operation 的 boundary，则恢复成 `completed`。
 - ZCode app-server 不新增主路径通知。bootstrap 把 compact lifecycle 投影成 `agent_message_chunk + messageId + _meta["zcode.timeline"]`，client 识别 meta 后渲染为 separator；泛 ZCode protocol client 显示 fallback 文本。
 

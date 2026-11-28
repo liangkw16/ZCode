@@ -15,6 +15,7 @@ import {
   toPersistedSettingsLocaleFields,
   USER_INSTRUCTIONS_MAX_BYTES,
   USER_INSTRUCTIONS_TOO_LARGE_ERROR_CODE,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 import { atomicWritePrivateTextFile } from "@zcode/shared/node";
 import type { ISettingService, WorkspaceSettingsProjection } from "./setting.js";
@@ -240,6 +241,14 @@ export interface SettingServiceDependencies {
   shareCredentialKeyWithDataRoot?: (targetBaseDir: string) => Promise<void>;
 }
 
+/**
+ * 设置文件路径唯一解析点：{home}/{segment}/v2/setting.json。远控设备身份等 AppSettings
+ * 存于此文件，kcode 镜像根下自成一套；desktop bootstrap 与 main 的 settingsFile 都从这里取，
+ * 不允许再出现第二处手拼设置文件路径。
+ */
+export function resolveSettingsFilePath(): string {
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "v2", "setting.json");
+}
 /** Host 私有迁移入口，不加入 Setting RPC；普通 get/update 从不等待 OAuth 查询。 */
 export function createSettingServiceWithMigrations(dependencies: SettingServiceDependencies = {}): {
   service: ISettingService;
@@ -252,7 +261,9 @@ export function createSettingServiceWithMigrations(dependencies: SettingServiceD
 } {
   // 原因：每次 IO 动态读 HOME 会让旧异步投影写进后来实例的目录。
   // 在实例创建时取值，既支持测试/Host 注入，也让读取、文件锁与替换始终同源。
-  const settingsFile = join(resolveUserHomeDir(), ".zcode", "v2", "setting.json");
+  // kcode 身份：settingsFile 经 resolveSettingsFilePath 解析（.kcode/.zcode 随 flavor），
+  // 不随上游同步回退到硬编码 .zcode。
+  const settingsFile = resolveSettingsFilePath();
   // 个性化指令文件与 settingsFile 同理：实例创建时取值，读取与写入始终同源。
   const userInstructionsFile = getAgentUserInstructionsFilePath();
   // 修复原因（评审 CR-01）：atomicWriteText 只保证单次替换完整，不保证多次保存的提交顺序；
@@ -283,7 +294,10 @@ export function createSettingServiceWithMigrations(dependencies: SettingServiceD
     | undefined;
   const projectSettings = async (settings: AppSettings): Promise<AppSettings> =>
     workspaceProjection
-      ? appSettingsSchema.parse({ ...settings, ...(await workspaceProjection(settings)) })
+      ? appSettingsSchema.parse({
+          ...settings,
+          ...(await workspaceProjection(settings)),
+        })
       : settings;
 
   const enqueueSettingsWrite = async (
@@ -430,7 +444,10 @@ export function createSettingServiceWithMigrations(dependencies: SettingServiceD
       await this.update({ dataBaseDir: newDir });
     },
 
-    async getUserInstructions(): Promise<{ content: string; filePath: string }> {
+    async getUserInstructions(): Promise<{
+      content: string;
+      filePath: string;
+    }> {
       // 读取等待已接纳的写入排空：保存后立即重开分区时不能把旧内容当基线。
       await userInstructionsWriteQueue;
       try {
@@ -462,10 +479,16 @@ export function createSettingServiceWithMigrations(dependencies: SettingServiceD
         // 修复原因（评审 CR-01 回归）：acquireFileLock 以不带 recursive 的 mkdir(lockFile)
         // 创建锁文件，父目录 ~/.zcode 不存在时会 ENOENT 抛出——建目录必须发生在取锁之前，
         // 否则首次保存（目录尚不存在）永远失败。
-        maybeThrowInjectedFsFault({ operation: "mkdir", path: dirname(userInstructionsFile) });
+        maybeThrowInjectedFsFault({
+          operation: "mkdir",
+          path: dirname(userInstructionsFile),
+        });
         await mkdir(dirname(userInstructionsFile), { recursive: true });
         await withAtomicFileLock(userInstructionsFile, async () => {
-          maybeThrowInjectedFsFault({ operation: "writeFile", path: userInstructionsFile });
+          maybeThrowInjectedFsFault({
+            operation: "writeFile",
+            path: userInstructionsFile,
+          });
           // 修复原因（评审 CR-01 权限）：atomicWriteText 的临时文件不带 mode，rename 换 inode
           // 后会把既有 0600 文件放宽为 umask 默认（常见 0644），同机其他账号可读。
           // 私有写入固定 0600，只会收紧不会放宽权限。
@@ -524,7 +547,10 @@ export function createSettingServiceWithMigrations(dependencies: SettingServiceD
             };
           }
           await writeSettings(
-            await projectSettings({ ...migrated, providerFamilyConnectionSelections: selections }),
+            await projectSettings({
+              ...migrated,
+              providerFamilyConnectionSelections: selections,
+            }),
             shouldCommit,
             enterCommitPhase,
             true,

@@ -129,16 +129,23 @@ read it only for an argument shape or response field this page does not give.
 
 Observe once, act, then observe again before deciding the next step.
 
+On macOS, `typeText` inserts exact plain text through clipboard-preserving paste
+while the target app is frontmost, so the current input method does not rewrite
+punctuation. Into a background app it sends the text one character at a time as
+key events and stops after the first character if the focused field did not
+change. A tab moves the focus, as it does when the user presses it.
+Default/`auto` scroll uses the window-scoped event backend; explicit `a11y` still
+requires native support.
+
 `agent.computerUse.getApp(...)` binds an app and shows nothing; call `getAXState`
 when you need to see its state. Binding also launches it if not running; there is
 no separate launch tool. Its argument is a display name or a bundle identifier —
 the same strings `listApps()` returns — or an `AppRef`.
 
 When the user names an application, copy it character-for-character into the app
-identifier. Do not translate, localize, normalize, shorten, or remove a suffix:
-`{"name":"网易云音乐app"}` is not `{"name":"网易云音乐"}`; `{"name":"日历"}` is not
-`{"name":"Calendar"}`. A rewritten name resolves to a different app or to nothing,
-and the failure reads "app not found". If the exact string does not resolve, call
+identifier. Do not translate, localize, normalize, shorten, or remove a suffix.
+A rewritten name resolves to a different app or to nothing, and the failure reads
+"app not found". If the exact string does not resolve, call
 `agent.computerUse.listApps()` once and pick the matching identifier.
 
 Batch related actions and a single closing observation into one cell:
@@ -185,6 +192,16 @@ Never pass their return value to `nodeRepl.write(...)` or
 rule and the frame is removed entirely, so you end up with no picture at all.
 Pass `{ emit: false }` to suppress the display and still receive the value.
 
+`getAXState()` returns a **string**, not an MCP content object. To inspect it:
+
+```javascript
+const tree = await app.getAXState({ emit: false, disableDiffing: true });
+const line = tree.split("\n").find((text) => text.includes("Submit"));
+```
+
+Do not read `tree.content`: it is undefined. `getAXStateAndScreenshot()` returns
+`{ state, screenshot? }`; its tree is the string `result.state`.
+
 Action methods display nothing.
 
 ## Coordinates
@@ -200,6 +217,10 @@ accessibility results.
 Act on the current raster when the target is clear; if it is too small or ambiguous,
 re-observe rather than guessing at geometry.
 
+After input or an unsuccessful screenshot request, get a new screenshot before
+another pixel action. An AX-only read does not refresh the pixels. Use a current
+element index when its role and name identify the target.
+
 A pointer action accepted with no change usually means the app acted where the real
 pointer sits: repeating it will not help — use an element index or the keyboard.
 
@@ -207,6 +228,11 @@ A coordinate refusal may name an unexpected owner, or say the frame is stale —
 window moved, resized or was replaced. Observe again for a current raster, or act on
 an element index, which does not depend on window geometry. Never move, resize or
 close a window to make a coordinate land.
+
+If input recovery asks for the original window, tell the user which recovery is
+required and wait. After they restore the window's focus or close it as requested,
+re-observe before continuing. Read back the outcome of interrupted actions before
+deciding what remains to be done.
 
 ## Keyboard
 
@@ -303,5 +329,14 @@ Argument shapes: `app_ref` / `app` is an `AppRef`, but a bare string here is
 read as a bundle id, so pass `{name: "Notes"}` for a display name.
 `scroll_direction` is `up|down|left|right`, `scroll_amount` is pages, `strategy`
 is `auto|a11y|event`, and `return_state` is `compact|full|none` to return the app
-state in the same call. For `target`, `text_range`, `modifiers` and the response
+state in the same call. Of the tools above, only `left_click`, `left_click_drag`,
+`scroll`, `type`, `key` and `set_value` take a `strategy`. An explicit strategy
+forces that path and is refused, with nothing sent, when the action has no such
+path: `a11y` serves element clicks, `scroll` and `set_value`; `event` serves
+clicks, drags, `scroll`, `type` and `key`. `get_app_state` captures a raster only
+when `include_screenshot` is `true`; a tree-only observation keeps the latest
+valid raster usable. For `target`, `text_range`, `modifiers`
+and the response
 shapes, see `nodeRepl.write(await agent.documentation.get("computer-use"))`.
+
+On macOS, one scroll page is 80% of the target window’s size on the requested axis. Re-observe the viewport to confirm movement; a successful dispatch alone does not prove it scrolled.

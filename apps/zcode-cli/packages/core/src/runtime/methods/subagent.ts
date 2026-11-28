@@ -2,6 +2,7 @@
 import {
   RESPOND_TO_COORDINATOR_TOOL_NAME,
   SESSION_ENTRY_MODEL_SELECTION,
+  SkillNotFoundError,
   parseModelSelectionValue,
 } from "@zcode/contracts";
 import type { CollaborationMode, SubagentRunOptions, WorkspaceId } from "@zcode/contracts";
@@ -15,9 +16,9 @@ import {
   CoreErrorType,
 } from "../deps.js";
 import type {
+  AutoCompactPolicyConfig,
   ExploreSubagentRuntimeRequest,
   McpConnectionSnapshot,
-  McpPort,
   Model,
   ModelSelection,
   SkillContent,
@@ -33,12 +34,12 @@ import { cloneModelSelection } from "../model-selection.js";
 import { resolveSubagentSelection } from "../helpers/subagent-selection.js";
 import type { AgentRuntimeDeps } from "../types.js";
 import { toMcpToolName } from "../../mcp/index.js";
-import { createBorrowedSubagentMcpAccess } from "../../subagent/borrowed-mcp-port.js";
 import { createSubagentMessageSink } from "../../subagent/message-steering.js";
 import { latestAnnouncedEnvironment } from "./context-refresh.js";
 import {
   extractRequiredMcpServerNames,
   matchesRequiredMcpServer,
+  resolveReferencedMcpServerNames,
 } from "../../subagent/mcp-config.js";
 import { mirrorSubagentToolEvent } from "../../subagent/tool-event-mirror.js";
 import { isBuiltInExploreAgentProfile } from "../../subagent/profile.js";
@@ -92,6 +93,9 @@ export function createDefaultSubagentPort(
     inactivityTimeoutMs: this.config.subagents?.inactivityTimeoutMs,
     autoBackgroundMs: this.config.subagents?.autoBackgroundMs,
     outputRootDir: this.config.subagents?.outputRootDir,
+    readChildSessionUpdatedAt: async (childSessionId) =>
+      (await this.sessionStore?.getSession(childSessionId))?.time.updated,
+    findTranscriptAgentOutputFile: (agentId) => this.transcriptAgentOutputFiles.get(agentId),
     getAgentDefinitions: this.getAgentDefinitions,
     builtInModelSelectionOverrides: this.config.subagents?.builtInModelSelectionOverrides,
     runtimeTaskRegistry: this.runtimeTaskRegistry,
@@ -198,9 +202,10 @@ export function createDefaultSubagentPort(
             : {}),
           cwd: request.workingDirectory,
         };
+        const mcpConfiguration = this.mcpSession?.read().configuration;
         const officialCuaServerNames = computeOfficialCuaServerNames(
-          this.config.mcp?.servers ?? {},
-          new Set(this.config.mcp?.trustedOfficialCuaServerNames ?? []),
+          mcpConfiguration?.servers ?? {},
+          new Set(mcpConfiguration?.trustedOfficialCuaServerNames ?? []),
         );
         const preflightCuaPolicy = createOfficialCuaPolicy(
           officialCuaServerNames,
@@ -313,6 +318,11 @@ export function createDefaultSubagentPort(
             modelSelection: cloneModelSelection(childSelection),
             modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
             workingDirectory: request.workingDirectory,
+            // child 只继承 modelOverrides 覆盖表（无则不设 compact 键，维持子代理默认策略）；
+            // 覆盖表在 child 组装点按 child 自己的模型身份解析。
+            ...(buildChildCompactConfig(this.config.compact)
+              ? { compact: buildChildCompactConfig(this.config.compact) }
+              : {}),
             // Bash cd 只改变执行 cwd；若丢失绑定身份，child 会落到另一个 workspace，重启后无法打开。
             workspacePath: this.config.workspacePath ?? request.workspaceRoot,
             workspaceIdentity:
@@ -329,6 +339,7 @@ export function createDefaultSubagentPort(
             bashTimeoutPolicy: this.config.bashTimeoutPolicy,
             midConversationSystem: this.config.midConversationSystem,
             toolSearch: this.config.toolSearch,
+            totalTokensReminder: this.config.totalTokensReminder,
             bashShellSelection,
             // child 只复用父 runtime 已解析的 instructions snapshot；Project Context 仍不继承。
             currentDate: this.contextSourceSnapshot?.currentDate ?? this.config.currentDate,
@@ -361,6 +372,11 @@ export function createDefaultSubagentPort(
             subagents: {
               backgroundBashMaxMs: this.config.subagents?.backgroundBashMaxMs,
               enabled: false,
+              // 构造时读一次 runner 的实时状态：前台启动的子代理之后转后台，仍按同步语义说明后台 Bash。
+              // 前提：前台转后台的入口（立即发送的认领、自动转后台计时器）都在 child session 就绪后才打开，
+              // 晚于这里的构造，所以前台启动时读到的一定是 false。以后若允许启动阶段转后台
+              // （例如 runner 的 backgroundTask() 接入 UI），要改为由 runner 传入启动时的静态值。
+              startedInForeground: request.background !== true,
             },
             mcp: childMcpAccess.config,
           },
@@ -411,7 +427,7 @@ export function createDefaultSubagentPort(
             imageProcessorPort: deps.imageProcessorPort,
             pdfDocumentPort: deps.pdfDocumentPort,
             memoryRoot: persistentMemory?.rootDir,
-            mcpPort: childMcpAccess.port,
+            ...childMcpAccess.deps,
             skillPort: childSkillPort,
             artifactStore: deps.artifactStore,
             appVersion: this.appVersion,
@@ -612,6 +628,18 @@ export function modelSelectionFromActiveModel(model: Model): ModelSelection {
   };
 }
 
+/** child 继承的父 compact 配置输入（未解析的策略对象）。 */
+export type ChildCompactConfigParent = AutoCompactPolicyConfig | undefined;
+
+export function buildChildCompactConfig(parentCompact: ChildCompactConfigParent): AutoCompactPolicyConfig | undefined {
+  // child 只继承未解析的 modelOverrides 覆盖表：全局阈值字段继续不传（维持现状，
+  // 否则老用户配置的全局字段会改变子代理压缩节奏）；child 在组装点用自己的
+  // Active Model 解析，父代理解析结果不传给 child。
+  return parentCompact?.modelOverrides
+    ? { modelOverrides: parentCompact.modelOverrides }
+    : undefined;
+}
+
 function createSubagentOverrideModelFactory(
   override: NonNullable<SubagentRunOptions["modelOverride"]>,
   fallbackFactory: AgentRuntimeDeps["modelFactory"],
@@ -719,7 +747,7 @@ function appendCoordinatorResponseTool(toolNames: readonly string[]): readonly s
 
 interface ResolvedSubagentMcpAccess {
   config: { enabled?: boolean } | undefined;
-  port: McpPort | undefined;
+  deps: Pick<AgentRuntimeDeps, "mcpPort">;
   parentSnapshot: McpConnectionSnapshot | undefined;
   snapshot: McpConnectionSnapshot | undefined;
 }
@@ -730,35 +758,59 @@ async function resolveSubagentMcpAccess(
   officialCuaServerNames: ReadonlySet<string>,
 ): Promise<ResolvedSubagentMcpAccess> {
   if (!shouldBorrowParentMcp(request)) {
-    return { config: undefined, parentSnapshot: undefined, port: undefined, snapshot: undefined };
+    return {
+      config: undefined,
+      parentSnapshot: undefined,
+      deps: { mcpPort: undefined },
+      snapshot: undefined,
+    };
   }
 
   const scopedServerNames = request.profile.mcpServers?.length
     ? request.profile.mcpServers
     : undefined;
-  if (!this.mcpPort || this.config.mcp?.enabled === false) {
+  if (!this.mcpPort || this.mcpSession?.read().configuration.enabled === false) {
     if (scopedServerNames) {
       throw createSubagentMcpUnavailableError(request);
     }
     return {
-      config: this.config.mcp?.enabled === false ? { enabled: false } : undefined,
+      config:
+        this.mcpSession?.read().configuration.enabled === false ? { enabled: false } : undefined,
       parentSnapshot: undefined,
-      port: undefined,
+      deps: { mcpPort: undefined },
       snapshot: undefined,
     };
   }
 
-  // child 不拥有连接生命周期，只能复用 parent constructor 已创建的启动快照。
-  const parentStartupSnapshot = await this.mcpStartupPromise;
-  if (!parentStartupSnapshot) {
+  // 启动任务只负责等待；新 child 的范围必须来自当前目录，否则 list_changed 永久不可继承。
+  // 等待集合 = mcpServers ∪ tools 引用的 server：修复前只等 mcpServers，只在 tools 里写
+  // MCP 工具的子 agent 在启动窗口内会被下面的校验判为工具缺失。继承全部工具时不校验，也不等。
+  const inheritsAvailableTools =
+    request.allowedTools.length === 0 || request.allowedTools.includes("*");
+  const referencedServerNames = inheritsAvailableTools
+    ? []
+    : resolveReferencedMcpServerNames(
+        request.allowedTools,
+        Object.keys(this.mcpPort.getToolSnapshot()),
+      );
+  const access = await this.createChildMcpAccess(scopedServerNames, officialCuaServerNames, {
+    waitFor: [...new Set([...(scopedServerNames ?? []), ...referencedServerNames])],
+  });
+  const parentSnapshot = access.parentSnapshot;
+  if (!parentSnapshot) {
     if (scopedServerNames) {
       throw createSubagentMcpUnavailableError(request);
     }
-    return { config: undefined, parentSnapshot: undefined, port: undefined, snapshot: undefined };
+    return {
+      config: undefined,
+      parentSnapshot: undefined,
+      deps: { mcpPort: undefined },
+      snapshot: undefined,
+    };
   }
 
   const unavailableScopedServerNames = (scopedServerNames ?? []).filter(
-    (serverName) => parentStartupSnapshot.statuses[serverName]?.status !== "connected",
+    (serverName) => parentSnapshot.statuses[serverName]?.status !== "connected",
   );
   if (unavailableScopedServerNames.length > 0) {
     throw createCoreError(
@@ -774,18 +826,7 @@ async function resolveSubagentMcpAccess(
     );
   }
 
-  const borrowed = createBorrowedSubagentMcpAccess(
-    this.mcpPort,
-    parentStartupSnapshot,
-    scopedServerNames,
-    officialCuaServerNames,
-  );
-  return {
-    config: { enabled: true },
-    parentSnapshot: parentStartupSnapshot,
-    port: borrowed.port,
-    snapshot: borrowed.snapshot,
-  };
+  return access;
 }
 
 function shouldBorrowParentMcp(request: ExploreSubagentRuntimeRequest): boolean {
@@ -812,7 +853,7 @@ function validateSubagentMcpRequirements(
     normalizedAllowedTools.filter(isMcpServerSelector),
   );
   if (requiredToolNames.length === 0 && requiredServerNames.length === 0) return;
-  if (!access.port || !access.snapshot) {
+  if (!access.deps.mcpPort || !access.snapshot) {
     throw createSubagentMcpUnavailableError(request, requiredToolNames);
   }
   const snapshot = access.snapshot;
@@ -840,7 +881,7 @@ function validateSubagentMcpRequirements(
 
   throw createCoreError(
     CoreErrorType.ConfigurationError,
-    `Required MCP tool is not available in the parent startup snapshot: ${missingToolNames.join(", ")}`,
+    `Required MCP tool is not available in the parent MCP snapshot: ${missingToolNames.join(", ")}`,
     {
       context: {
         agentType: request.agentType,
@@ -865,7 +906,7 @@ function createSubagentMcpUnavailableError(
 ) {
   return createCoreError(
     CoreErrorType.ConfigurationError,
-    "Subagent MCP is unavailable because the parent startup snapshot is unavailable",
+    "Subagent MCP is unavailable because the parent MCP snapshot is unavailable",
     {
       context: {
         agentType: request.agentType,
@@ -922,20 +963,10 @@ class FilteredSkillPort implements SkillPort {
       throw createSubagentComputerUseUnavailableError(request.name);
     }
     const resolvedName = await this.resolveAllowedSkillRequestName(request, options);
-    if (!resolvedName) {
-      throw createCoreError(
-        CoreErrorType.ToolExecutionFailed,
-        "Skill is not allowed for subagent",
-        {
-          context: {
-            allowedSkills: this.allowedSkills ? [...this.allowedSkills] : [],
-            skill: request.name,
-            toolName: "Skill",
-          },
-          recoverable: true,
-        },
-      );
-    }
+    // 修复原因：名称不在子代理能看到的目录里时原来抛不带 <tool_use_error> 的 `Skill is not allowed for subagent`，
+    // 与主会话的 `Unknown skill` 不一致。子代理看到的只有过滤后的目录，白名单之外与不存在对它是一回事；
+    // 抛 SkillNotFoundError 后由 Skill handler 统一报错，Did you mean 也只从过滤后的目录里选。
+    if (!resolvedName) throw new SkillNotFoundError(request.name);
     return this.parent.loadSkill({ ...request, name: resolvedName }, options);
   }
 

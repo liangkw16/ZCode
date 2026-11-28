@@ -3,6 +3,7 @@
 // ============================================================
 
 import { readFile, stat } from "node:fs/promises";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts";
 import { arch, homedir, release } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CONTEXT_SOURCE_INSTRUCTIONS_READ_FAILED, formatLocalIsoDate } from "@zcode/contracts";
@@ -266,7 +267,7 @@ async function findDefaultUserInstructionFile(
     return undefined;
   }
 
-  const filePath = join(resolveUserHomeDir(env), ".zcode", "AGENTS.md");
+  const filePath = join(resolveUserHomeDir(env), ZCODE_DATA_DIR_SEGMENT, "AGENTS.md");
   if (await isInstructionFileCandidate(filePath)) {
     return { filePath, fileName: "AGENTS.md" };
   }

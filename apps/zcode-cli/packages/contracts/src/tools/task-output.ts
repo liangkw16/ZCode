@@ -9,18 +9,12 @@ export const TASK_OUTPUT_ALIASES = [
   "BashOutput",
 ] as const;
 
-export const TASK_OUTPUT_PROVIDER_DESCRIPTION = `DEPRECATED: Background tasks return their output file path in the tool result, and you receive a <task-notification> with the same path when the task completes.
-- For bash tasks: prefer using the Read tool on that output file path — it contains stdout/stderr.
-- For local_agent tasks: use the Agent tool result directly. Do NOT Read the .output file — it is a symlink to the full subagent conversation transcript (JSONL) and will overflow your context window.
-- For remote_agent tasks: prefer using the Read tool on the output file path — it contains the streamed remote session output (same as bash).
-
-- Retrieves output from a running or completed task (background shell, agent, or remote session)
-- Takes a task_id parameter identifying the task
-- Returns the task output along with status information
-- Use block=true (default) to wait for task completion
-- Use block=false for non-blocking check of current status
-- Task IDs can be found using the /tasks command
-- Works with all task types: background shells, async agents, and remote sessions`;
+export const TASK_OUTPUT_PROVIDER_DESCRIPTION = `Query the status and output of a task registered in the current runtime, or wait for its completion.
+- Use the exact task_id returned by the task launch, a task notification, or an available task query. Never construct a task ID from a callId, tool-use-id, output path, or naming pattern.
+- Prefer completion notifications and already delivered Agent results. Continue independent work while a task runs. When its result is needed, use block=true for a bounded wait; use block=false for a current status check. Do not use sleep, no-op calls, or tight polling to provoke notifications.
+- Read retrieves logs; it does not wait for task completion or establish task status. Read only an output path explicitly returned and allowed for reading. An empty or unchanged file does not prove task failure or completion; do not read a full child conversation just to check status.
+- retrieval_status=success means the terminal result was retrieved, not that the task succeeded. Inspect task status, exit_code, and error. not_ready means the task is active; timeout means this wait did not obtain a terminal result. Neither means the task failed or stopped, and cancelling a wait does not stop the task.
+- If a task is not found, verify the original ID and current runtime. Increasing timeout cannot repair a wrong ID. A runtime restart may make an old handle unavailable; check existing notifications, returned output, and prior effects before deciding whether a retry is safe. Do not blindly rerun a task whose outcome is unknown.`;
 
 export const TaskOutputInputSchema = z
   .object({
@@ -32,12 +26,7 @@ export const TaskOutputInputSchema = z
 
 export type TaskOutputInput = z.infer<typeof TaskOutputInputSchema>;
 
-export const TaskOutputInputJsonSchema = {
-  ...toToolJsonSchema(TaskOutputInputSchema),
-
-  // 的 provider schema 仍要求模型显式传入 task_id、block 和 timeout。
-  required: ["task_id", "block", "timeout"],
-};
+export const TaskOutputInputJsonSchema = toToolJsonSchema(TaskOutputInputSchema);
 
 export const TaskOutputTaskSchema = z
   .object({
@@ -87,7 +76,7 @@ export const TaskOutputResultJsonSchema = toToolJsonSchema(TaskOutputResultSchem
 
 function semanticBoolean(
   schema: z.ZodDefault<z.ZodBoolean>,
-): z.ZodEffects<z.ZodDefault<z.ZodBoolean>, boolean, unknown> {
+): z.ZodPreprocess<z.ZodDefault<z.ZodBoolean>> {
   return z.preprocess((value) => {
     if (value === "true") return true;
     if (value === "false") return false;

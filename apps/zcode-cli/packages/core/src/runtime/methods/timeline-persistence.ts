@@ -7,6 +7,7 @@ import {
 import { createMessageId, createPartId } from "../deps.js";
 import type {
   MessageId,
+  MessageWithParts,
   ModelSelection,
   PartId,
   SessionId,
@@ -129,33 +130,29 @@ export async function persistPendingWorktreeCreationTimeline(
   );
 }
 
-export async function persistAssistantTimelinePartForSession(
-  this: AgentRuntimeInternal,
-  options: {
-    sessionId: SessionId;
-    messageID?: MessageId;
-    partID?: PartId;
-    parentID?: MessageId;
-    created?: number;
-    completed?: number;
-    finish?: string;
-    timeline: TimelinePartDraft;
-    traceContext: TraceContext;
-  },
-): Promise<{ messageID: MessageId; partID: PartId }> {
-  if (!this.sessionStore) {
-    return {
-      messageID: options.messageID ?? createMessageId(),
-      partID: options.partID ?? createPartId(),
-    };
-  }
+export type AssistantTimelineRecordInput = {
+  sessionId: SessionId;
+  messageID?: MessageId;
+  partID?: PartId;
+  parentID?: MessageId;
+  created?: number;
+  completed?: number;
+  finish?: string;
+  timeline: TimelinePartDraft;
+  traceContext: TraceContext;
+};
 
+/** 同一记录构建同时供单写与 compact bundle 使用，避免完成状态绕开事务。 */
+export function buildAssistantTimelineRecord(
+  runtime: AgentRuntimeInternal,
+  options: AssistantTimelineRecordInput,
+): MessageWithParts {
   const messageID = options.messageID ?? createMessageId();
   const partID = options.partID ?? createPartId();
   const created = options.created ?? options.timeline.time?.start ?? Date.now();
-  const selection = this.getSessionModelSelection();
-  await this.persistMessage(
-    {
+  const selection = runtime.getSessionModelSelection();
+  return {
+    info: {
       id: messageID,
       sessionID: options.sessionId,
       role: "assistant",
@@ -163,15 +160,15 @@ export async function persistAssistantTimelinePartForSession(
         created,
         completed: options.completed ?? options.timeline.time?.end,
       },
-      parentID: options.parentID ?? this.latestConversationMessageId ?? messageID,
+      parentID: options.parentID ?? runtime.latestConversationMessageId ?? messageID,
       modelId: selection && createModelId(selection.modelId),
       providerId: selection && createModelProviderId(selection.providerId),
-      mode: this.config.mode ?? "build",
-      planEnabled: this.getPlanEnabled(),
-      agent: this.config.agentName ?? "zcode-agent",
+      mode: runtime.config.mode ?? "build",
+      planEnabled: runtime.getPlanEnabled(),
+      agent: runtime.config.agentName ?? "zcode-agent",
       path: {
-        cwd: this.workingDirectory,
-        root: this.workspaceRoot,
+        cwd: runtime.workingDirectory,
+        root: runtime.workspaceRoot,
       },
       cost: 0,
       tokens: emptyTokenUsageInfo(),
@@ -184,20 +181,31 @@ export async function persistAssistantTimelinePartForSession(
         transcriptVisibility: "visible",
       },
     },
-    options.traceContext,
-  );
-  await this.persistPart(
-    {
-      ...options.timeline,
-      id: partID,
-      sessionID: options.sessionId,
-      messageID,
-      type: "timeline",
-    } as TimelinePart,
-    options.traceContext,
-  );
+    parts: [
+      {
+        ...options.timeline,
+        id: partID,
+        sessionID: options.sessionId,
+        messageID,
+        type: "timeline",
+      } as TimelinePart,
+    ],
+  };
+}
 
-  return { messageID, partID };
+export async function persistAssistantTimelinePartForSession(
+  this: AgentRuntimeInternal,
+  options: AssistantTimelineRecordInput,
+): Promise<{ messageID: MessageId; partID: PartId }> {
+  if (!this.sessionStore)
+    return {
+      messageID: options.messageID ?? createMessageId(),
+      partID: options.partID ?? createPartId(),
+    };
+  const record = buildAssistantTimelineRecord(this, options);
+  await this.persistMessage(record.info, options.traceContext);
+  await this.persistPart(record.parts[0], options.traceContext);
+  return { messageID: record.info.id, partID: record.parts[0].id };
 }
 
 function isSameModelSelection(left: ModelSelection, right: ModelSelection): boolean {

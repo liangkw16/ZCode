@@ -64,8 +64,9 @@ export function buildCuaAccessDetails(
     result.accessibility,
     permissionRequest?.accessibility,
   );
+  // 工具文档公开的 AccessStatus 用驼峰 screenRecording；status_after 对象是旧形状，两者都读。
   const screenRecording = readPermissionStatus(
-    result.screen_recording,
+    result.screenRecording ?? result.screen_recording,
     permissionRequest?.screen_recording,
   );
   // permission_guide lives at the top level in the runtime response and nested

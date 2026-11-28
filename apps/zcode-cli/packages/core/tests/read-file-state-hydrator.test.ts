@@ -15,6 +15,83 @@ import type { ReadFileStateEntry, ReadFileStateMap } from "../src/tool/types.js"
 const workspaceRoot = "/tmp/zcode-read-state-hydrator";
 
 describe("read file state hydrator", () => {
+  it.each([
+    "valid",
+    "ordinary-user",
+    "hidden-from-provider",
+    "other-source",
+    "not-synthetic",
+    "ignored",
+    "partial",
+    "range",
+    "missing-revision",
+    "legacy",
+  ])("restores only trusted complete compact file snapshots: %s", async (variant) => {
+    const sessionID = createSessionId(`compact-read-${variant}`);
+    const file = join(workspaceRoot, "src", "compact.ts");
+    const message = compactReadAttachmentMessage(sessionID, "compact-file", 20, file);
+    if (message.info.role !== "user") throw new Error("Expected user reminder");
+    const part = message.parts[0]!;
+    if (part.type !== "text") throw new Error("Expected text reminder");
+    if (variant === "ordinary-user") delete message.info.semantics;
+    if (variant === "hidden-from-provider") message.info.semantics!.providerVisibility = "hidden";
+    if (variant === "other-source") part.metadata!.source = "plan_file_reference";
+    if (variant === "not-synthetic") part.synthetic = false;
+    if (variant === "ignored") part.ignored = true;
+    const snapshot = part.metadata!.readFileState as Record<string, unknown>;
+    if (variant === "partial") snapshot.isPartialView = true;
+    if (variant === "range") snapshot.limit = 1;
+    if (variant === "missing-revision") delete snapshot.revisionId;
+    if (variant === "legacy") delete part.metadata!.readFileState;
+    const readFileState: ReadFileStateMap = new Map();
+    const result = await hydrateReadFileStateFromSession({
+      messages: [message],
+      readFileState,
+      markRestoredFromSession: true,
+      workingDirectory: workspaceRoot,
+      workspaceRoot,
+    });
+    expect(result.restoredCount).toBe(variant === "valid" ? 1 : 0);
+    if (variant === "valid")
+      expect([...readFileState.values()]).toEqual([
+        expect.objectContaining({
+          content: "compact body",
+          requestedPath: "src/compact.ts",
+          restoredFromSession: true,
+          isPartialView: false,
+          sourceTool: "Read",
+          mtimeMs: 1,
+        }),
+      ]);
+  });
+
+  it("uses only active compact attachments and lets later tool snapshots replace them", async () => {
+    const sessionID = createSessionId("compact-read-active");
+    const oldFile = join(workspaceRoot, "old.ts");
+    const file = join(workspaceRoot, "src", "compact.ts");
+    const readFileState: ReadFileStateMap = new Map();
+    await hydrateReadFileStateFromSession({
+      messages: [
+        compactReadAttachmentMessage(sessionID, "old-file", 10, oldFile),
+        compactionMessage(sessionID, "boundary", 20),
+        compactReadAttachmentMessage(sessionID, "current-file", 30, file),
+        assistantToolMessage(sessionID, "later-read", 40, [
+          completedToolPart(sessionID, "later-read", "read-later", "Read", {
+            input: { file_path: file },
+            output: "1\tlater body",
+            metadata: readStateMetadata(file, "later body"),
+          }),
+        ]),
+      ],
+      readFileState,
+      workingDirectory: workspaceRoot,
+      workspaceRoot,
+    });
+    expect([...readFileState.values()]).toEqual([
+      expect.objectContaining({ path: file, content: "later body" }),
+    ]);
+  });
+
   it("restores full Read state from structured completed metadata", async () => {
     const sessionID = createSessionId("hydrate-read-state-full");
     const file = join(workspaceRoot, "src", "index.ts");
@@ -717,6 +794,41 @@ function compactionMessage(
       } as MessageWithParts["parts"][number],
     ],
   };
+}
+
+function compactReadAttachmentMessage(
+  sessionID: ReturnType<typeof createSessionId>,
+  id: string,
+  created: number,
+  file: string,
+): MessageWithParts {
+  const message = compactionMessage(sessionID, id, created);
+  if (message.info.role !== "user") throw new Error("Expected user reminder");
+  message.info.synthetic = true;
+  message.info.semantics = {
+    origin: "agent_runtime",
+    kind: "system_reminder",
+    source: "resume_referenced_session_context",
+    uiVisibility: "hidden",
+    providerVisibility: "visible",
+    transcriptVisibility: "hidden",
+  };
+  message.parts = [
+    {
+      type: "text",
+      id: createPartId(`${id}-text`),
+      messageID: message.info.id,
+      sessionID,
+      synthetic: true,
+      text: "Called the Read tool with the following input: {}\nResult of calling the Read tool:\n1\tcompact body",
+      metadata: {
+        ...readStateMetadata(file, "compact body"),
+        source: "resume_referenced_session_context",
+        readFileStateRequestedPath: "src/compact.ts",
+      },
+    },
+  ];
+  return message;
 }
 
 function readStateMetadata(

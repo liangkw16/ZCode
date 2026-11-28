@@ -1,54 +1,131 @@
 import {
   COMPACT_PROMPT_TOO_LONG_USER_MESSAGE,
+  hasCompactSummaryBlock,
+  selectCompactSummaryText,
   CoreErrorType,
+  SessionEventType,
+  isCoreError,
+  MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+  getAutoCompactOutputReserveTokens,
   createCoreError,
   formatCompactSummary,
+  traceContextToLogContext,
 } from "../deps.js";
-import type { CompactTimelinePayload, SessionEvent, SessionEventType, TraceContext } from "../deps.js";
+import type {
+  CompactTimelinePayload,
+  AutoCompactPolicyConfig,
+  ModelSelection,
+  CompactTrigger,
+  Model,
+  SessionEvent,
+  ToolSearchMode,
+  TraceContext,
+} from "../deps.js";
 import {
   buildProviderRequestMessages,
+  selectCompactEntries,
+  selectCompactEntriesForInitialPromptTooLong,
   createModelContextExceededFinishError,
   isContextExceededFinishReason,
   readRawFinishReason,
 } from "../helpers/index.js";
 import type { RuntimeModelTextResult, RunModelTextRequestOptions } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import type { CompactRecentPreservationPolicy } from "../helpers/index.js";
 import type { RuntimeMessageEntry } from "../../agent/message-history.js";
 
+import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
+import {
+  deliverSessionEventToSinks,
+  resumeStoredSessionEventPublication,
+  type SessionEventSinkFailure,
+} from "./events.js";
+import { isOutputTokenLimitFinishReason } from "./turn-output-token-continuation.js";
+
+const COMPACT_SUMMARY_OUTPUT_LIMIT_REASON = "compact_summary_output_limit";
+
+export function isCompactSummaryOutputLimitError(error: unknown): boolean {
+  return isCoreError(error) && error.context?.reason === COMPACT_SUMMARY_OUTPUT_LIMIT_REASON;
+}
+
+export const COMPACT_SUMMARY_OUTPUT_RETRY_PROMPT =
+  "The previous summary exceeded the output limit. Rewrite the complete handoff substantially more concisely. Preserve the current goal, constraints, evidence gaps, and next action; omit repeated history and long excerpts.";
+
+export function createCompactSummaryOutputLimitError(
+  result: RuntimeModelTextResult,
+  options: { usageRecordingError?: unknown } = {},
+): Error {
+  return createCoreError(
+    CoreErrorType.ModelError,
+    // 修复原因：按设计，输出上限恢复耗尽后报不可原样重试的错误、不丢旧轮次；但原文案没有告诉用户
+    // 下一步怎么办。补上两个可操作的配置项，键名与 adapters 配置 schema 一致。
+    // 摘要预算取 summaryMaxOutputTokens 与摘要模型最大输出中的较小值（capCompactSummaryMaxOutputTokens），
+    // 所以加大上下文窗口并不会放宽它：先调预算，预算已到模型上限再换最大输出更高的模型。
+    "Compact summary exceeded the output limit twice; the original history was preserved. " +
+      "Raise compact.summaryMaxOutputTokens; if it already reaches the summary model's maximum " +
+      "output, set compact.summaryProvider and compact.summaryModel to a model with a larger " +
+      "maximum output, then retry.",
+    {
+      ...(options.usageRecordingError instanceof Error
+        ? { cause: options.usageRecordingError }
+        : {}),
+      context: {
+        reason: COMPACT_SUMMARY_OUTPUT_LIMIT_REASON,
+        finishReason: result.finishReason,
+        rawFinishReason: readRawFinishReason(result.providerMetadata),
+        // 截断摘要的真实用量没能入账；诊断时不要把它当成未发生过的请求。
+        ...(options.usageRecordingError !== undefined ? { usageRecordingFailed: true } : {}),
+      },
+      recoverable: true,
+      retryable: false,
+    },
+  );
+}
+
 export const COMPACT_TOOL_USE_DENIAL_MESSAGE = "Tool use is not allowed during compaction";
-export const COMPACT_TOOL_USE_DENIAL_REASON =
-  "compaction agent should only produce text summary";
+export const COMPACT_TOOL_USE_DENIAL_REASON = "compaction agent should only produce text summary";
+
+// 会话 toolSearch mode 是主模型的能力契约；compact 摘要请求可能路由到独立摘要模型
+// （跨 provider），直接沿用 native/local 会在请求构造前抛错（resolveToolSearchMode 对
+// native 要求 protocolSupported、对 local 要求 supportsToolCall）并阻断压缩。
+// 降级为 auto：按目标模型能力解析（native → local → off），保证不抛错。
+// exposure 侧两个 throw 条件若变化，此处的降级判断需同步。
+export function coerceToolSearchModeForModel(
+  mode: ToolSearchMode | undefined,
+  model: Model,
+): ToolSearchMode {
+  if (mode === "native" && !model.requestCapabilities?.toolSearch?.protocolSupported) {
+    return "auto";
+  }
+  if (mode === "local" && !model.properties.supportsToolCall) {
+    return "auto";
+  }
+  return mode ?? "off";
+}
 
 export function createCompactPromptTooLongError(options: {
   attempt: number;
   cause?: unknown;
   preCompactTokenCount: number;
 }): Error {
-  return createCoreError(
-    CoreErrorType.ModelContextExceeded,
-    COMPACT_PROMPT_TOO_LONG_USER_MESSAGE,
-    {
-      cause: options.cause instanceof Error ? options.cause : undefined,
-      context: {
-        compactPromptTooLongAttempts: options.attempt,
-        preCompactTokenCount: options.preCompactTokenCount,
-      },
-      recoverable: true,
-      // 修复原因：compact 内部已经完成最多 3 次旧轮次截断重试；
-      // 最终仍超窗时不能再被 auto compact 外层重试放大成 3x3。
-      retryable: false,
+  return createCoreError(CoreErrorType.ModelContextExceeded, COMPACT_PROMPT_TOO_LONG_USER_MESSAGE, {
+    cause: options.cause instanceof Error ? options.cause : undefined,
+    context: {
+      compactPromptTooLongAttempts: options.attempt,
+      preCompactTokenCount: options.preCompactTokenCount,
     },
-  );
+    recoverable: true,
+    // 修复原因：compact 内部已经完成最多 3 次旧轮次截断重试；
+    // 最终仍超窗时不能再被 auto compact 外层重试放大成 3x3。
+    retryable: false,
+  });
 }
 
 export function createCompactContextExceededFinishError(
   result: RuntimeModelTextResult,
 ): Error | undefined {
   const rawFinishReason = readRawFinishReason(result.providerMetadata);
-  if (
-    !isContextExceededFinishReason(result.finishReason, rawFinishReason) &&
-    !isCompactEmptyLengthFinish(result)
-  ) {
+  if (!isContextExceededFinishReason(result.finishReason, rawFinishReason)) {
     return undefined;
   }
 
@@ -58,10 +135,36 @@ export function createCompactContextExceededFinishError(
   });
 }
 
-function isCompactEmptyLengthFinish(result: RuntimeModelTextResult): boolean {
-  // GLM/Z.AI compact 可能以 length + 空文本完成，真实含义是没有可保存的 summary；
-  // 仅在 compact 路径把它归类为超窗压力，复用已有 prompt-too-long 降输入重试。
-  return result.finishReason.trim().toLowerCase() === "length" && result.text.trim().length === 0;
+/**
+ * 摘要成功但以输出上限结束时记 warn，摘要仍按原逻辑落库。
+ * 修复原因：有正文的 length 曾被当作普通成功，未闭合的 <summary> 原样落库且没有任何日志，
+ * 线上只能靠抓包发现。判定与 Output-limit Continue 相同（normalized length 或 raw max_tokens 等）。
+ * 合并自上游 v4.0.0：与 kcode 的 createCompactSummaryOutputLimitError 重试链互补——
+ * 先按 kcode 链路重试更短的摘要；重试后仍超限时由此处告警并接受截断落库。
+ */
+export function warnCompactSummaryOutputLimit(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  context: { maxOutputTokens: number; traceContext: TraceContext; trigger: CompactTrigger },
+): void {
+  const rawFinishReason = readRawFinishReason(result.providerMetadata);
+  if (!isOutputTokenLimitFinishReason(result.finishReason, rawFinishReason)) return;
+
+  runtime.logger?.warn("Compact summary hit the output limit; the summary may be truncated", {
+    ...traceContextToLogContext(context.traceContext),
+    event: "compact.summary.output_limit",
+    finishReason: result.finishReason,
+    module: "core.runtime",
+    // 日志脱敏按键名匹配 token；这些数量不是凭据，用不含 token 的键名，线上才能判断预算是否够用。
+    outputBudget: {
+      limit: context.maxOutputTokens,
+      output: result.usage.outputTokens,
+      reasoning: result.usage.reasoningTokens,
+    },
+    rawFinishReason,
+    textLength: result.text.length,
+    trigger: context.trigger,
+  });
 }
 
 export async function persistCompactTimelineEvent(
@@ -88,10 +191,7 @@ export function buildCompactSummaryRequestMessages(
   } = {},
 ): RunModelTextRequestOptions["messages"] {
   return buildProviderRequestMessages({
-    entries: [
-      ...entriesForSummary,
-      { message: { role: "user" as const, content: compactPrompt } },
-    ],
+    entries: [...entriesForSummary, { message: { role: "user" as const, content: compactPrompt } }],
     applyCacheControl: true,
     skipCacheWrite: true,
     useMidConversationSystem: options.useMidConversationSystem,
@@ -104,24 +204,22 @@ export function buildCompactSummaryRequestMessages(
 export function formatCompactSummaryOrThrow(
   runtime: AgentRuntimeInternal,
   result: RuntimeModelTextResult,
+  traceContext?: TraceContext,
 ): string {
   const compactToolCalls = runtime.extractToolCallsFromResult(result);
   if (compactToolCalls.length > 0) {
-    throw createCoreError(CoreErrorType.ModelError, COMPACT_TOOL_USE_DENIAL_MESSAGE, {
-      context: {
-        behavior: "deny",
-        decisionReason: {
-          reason: COMPACT_TOOL_USE_DENIAL_REASON,
-          type: "other",
-        },
-        toolNames: compactToolCalls.map((toolCall) => toolCall.name),
-      },
-      recoverable: true,
-      retryable: false,
+    runtime.logger?.info("Compact summary reply called tools; ignoring them", {
+      ...(traceContext ? traceContextToLogContext(traceContext) : {}),
+      event: "compact.summary.tool_calls_ignored",
+      module: "core.runtime",
+      toolNames: compactToolCalls.map((toolCall) => toolCall.name),
     });
   }
 
-  const summary = formatCompactSummary(result.text);
+  const text = selectCompactSummaryText(result);
+  // 带工具调用时，选出的块里没有摘要就不用它（例如调用工具前的开场白），按没有摘要失败。
+  const usable = compactToolCalls.length === 0 || hasCompactSummaryBlock(text);
+  const summary = usable ? formatCompactSummary(text) : "";
   if (!summary) {
     throw createCoreError(CoreErrorType.ModelError, "Failed to generate compact summary", {
       recoverable: true,
@@ -129,4 +227,187 @@ export function formatCompactSummaryOrThrow(
     });
   }
   return summary;
+}
+
+/** 提交后的通知最多补投一次；每个事件独立处理，失败不撤销已保存的 compact。 */
+export async function publishCommittedCompactEvents(
+  runtime: AgentRuntimeInternal,
+  pending: readonly SessionEvent[],
+  trace: TraceContext,
+  events: SessionEvent[],
+  operationId: string,
+): Promise<Error | undefined> {
+  let failure: Error | undefined;
+  for (const event of pending) {
+    try {
+      // 修复原因：sink 抛错被 notifyEventSinks 吞掉，只有 appendEvent 自身失败才走得到补投分支，
+      // 返回的 syncError 恒为空。客户端漏掉压缩完成状态，auto/reactive 仍继续下一次模型请求。
+      const sinkFailures: SessionEventSinkFailure[] = [];
+      try {
+        await runtime.appendEvent(event, trace, { sinkFailures });
+      } catch {
+        const stored = (await runtime.eventStore.getEvents(runtime.sessionId)).find(
+          (item) => item.id === event.id,
+        );
+        if (stored)
+          await resumeStoredSessionEventPublication(runtime, stored, trace, { sinkFailures });
+        else await runtime.appendEvent(event, trace, { sinkFailures });
+      }
+      events.push(event);
+      // 落库已经成功，sink 失败不改 compact 终态：对失败的 sink 用同一事件（原 ID 与序号）补投一次。
+      let rejected = 0;
+      for (const sinkFailure of sinkFailures) {
+        const remaining = await deliverSessionEventToSinks.call(runtime, sinkFailure.event, trace, [
+          sinkFailure.sink,
+        ]);
+        rejected += remaining.length;
+      }
+      if (rejected > 0)
+        throw new Error(
+          `${rejected} event sink(s) rejected ${event.type} again after one redelivery`,
+        );
+    } catch (error) {
+      failure ??= createCoreError(
+        CoreErrorType.ModelError,
+        "Context compacted, but status synchronization failed.",
+        {
+          cause: error instanceof Error ? error : undefined,
+          context: { reason: "compact_sync_failed", sessionEventType: event.type, operationId },
+          recoverable: true,
+          retryable: false,
+        },
+      );
+      runtime.logger?.warn("Committed compact event publication failed", {
+        ...traceContextToLogContext(trace),
+        event: "compact.committed_event.failed",
+        operationId,
+        sessionEventType: event.type,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return failure;
+}
+
+export function capCompactSummaryMaxOutputTokens(
+  model: Model,
+  config: AutoCompactPolicyConfig | undefined,
+): number {
+  const configured = config?.summaryMaxOutputTokens;
+  // 合并自上游 v4：未显式配置 summaryMaxOutputTokens 时，摘要上限取 Auto Compact 输出预留
+  // （触发压缩时这部分窗口正好留给摘要，大窗口按窗口比例加大），不再固定 20K。
+  // 不按 usage 估算剩余窗口：截断旧轮或剥离媒体后重试时，留下的旧 usage 已过期，会算错上限。
+  const summaryCap =
+    typeof configured === "number" && Number.isFinite(configured) && configured > 0
+      ? Math.floor(configured)
+      : getAutoCompactOutputReserveTokens(config);
+  // Compact 是独立执行链，在这里显式选择模型上限与 summary 上限中的较小值。
+  const desired = Math.min(
+    resolveNormalRequestMaxOutputTokens({
+      modelMaxOutputTokens: model.optionSpecs.maxOutputTokens.max,
+    }),
+    summaryCap,
+  );
+  return Math.min(desired, model.optionSpecs.maxOutputTokens.max);
+}
+
+export function resolveCompactRecentPreservationPolicy(
+  config: AutoCompactPolicyConfig | undefined,
+): CompactRecentPreservationPolicy | undefined {
+  if (config?.keepRecentTokens === undefined && config?.keepRecentRounds === undefined) {
+    return undefined;
+  }
+  return {
+    ...(config?.keepRecentRounds !== undefined
+      ? { keepRecentRounds: config.keepRecentRounds }
+      : {}),
+    ...(config?.keepRecentTokens !== undefined
+      ? { keepRecentTokens: config.keepRecentTokens }
+      : {}),
+  };
+}
+
+export function selectInitialCompactEntriesForActiveConversation(input: {
+  activeEntries: readonly RuntimeMessageEntry[];
+  initialPromptTooLongCause?: unknown;
+  preserveRecent?: CompactRecentPreservationPolicy;
+  trigger: CompactTrigger;
+  useMidConversationSystem?: boolean;
+}) {
+  const baseSelection = selectCompactEntries({
+    entries: input.activeEntries,
+    ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
+    trigger: input.trigger,
+  });
+  if (input.initialPromptTooLongCause === undefined) {
+    return baseSelection;
+  }
+
+  return (
+    selectCompactEntriesForInitialPromptTooLong({
+      entries: input.activeEntries,
+      promptTooLongCause: input.initialPromptTooLongCause,
+      ...(input.preserveRecent ? { preserveRecent: input.preserveRecent } : {}),
+      trigger: input.trigger,
+      useMidConversationSystem: input.useMidConversationSystem,
+    }) ?? baseSelection
+  );
+}
+
+export function resolveCompactSummaryModelSelection(
+  config: AutoCompactPolicyConfig | undefined,
+): ModelSelection | undefined {
+  const providerId = config?.summaryProvider?.trim();
+  const modelId = config?.summaryModel?.trim();
+  if (!providerId || !modelId) return undefined;
+  return { providerId, modelId };
+}
+
+/** 截断请求同样消耗真实用量；只发计量事件，不把半截文字保存成有效摘要。 */
+export async function recordCompactModelCompletion(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  content: string,
+  trace: TraceContext,
+  events: SessionEvent[],
+): Promise<void> {
+  const event = runtime.createEvent(
+    SessionEventType.ModelComplete,
+    {
+      content,
+      stopReason: result.finishReason,
+      usage: result.usage,
+      querySource: "compact",
+      toolCallCount: 0,
+    },
+    trace,
+  );
+  await runtime.appendEvent(event, trace);
+  events.push(event);
+}
+
+/**
+ * 截断摘要的用量入账。调用方先确定截断终态再调用：写入失败不能改变终态，也不能被外层当成
+ * 可重试错误，只把失败原因返回，由调用方带进不可重试的错误里。返回 undefined 表示已入账。
+ */
+export async function recordTruncatedCompactSummaryUsage(
+  runtime: AgentRuntimeInternal,
+  result: RuntimeModelTextResult,
+  trace: TraceContext,
+  events: SessionEvent[],
+  operationId: string,
+): Promise<unknown> {
+  try {
+    await recordCompactModelCompletion(runtime, result, "", trace, events);
+    return undefined;
+  } catch (error) {
+    runtime.logger?.warn("Truncated compact summary usage could not be recorded", {
+      ...traceContextToLogContext(trace),
+      event: "compact.summary.output_limit.usage_failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      module: "core.runtime",
+      operationId,
+    });
+    return error;
+  }
 }

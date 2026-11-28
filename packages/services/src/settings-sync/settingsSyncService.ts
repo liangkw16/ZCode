@@ -21,6 +21,7 @@ import type {
   SettingsSyncSourceRootSummary,
   SettingsSyncTaskImportResult,
 } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import { copyFile, cp, link, lstat, mkdir, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -137,33 +138,81 @@ interface ExternalAgentMcpPathSource {
 }
 
 const SUPPORTED_SKILL_AGENT_SOURCES: ExternalAgentPathSource[] = [
-  { agent: "claudeCode", projectPath: [".claude", "skills"], globalPath: [".claude", "skills"] },
-  { agent: "codexCli", projectPath: [".codex", "skills"], globalPath: [".codex", "skills"] },
+  {
+    agent: "claudeCode",
+    projectPath: [".claude", "skills"],
+    globalPath: [".claude", "skills"],
+  },
+  {
+    agent: "codexCli",
+    projectPath: [".codex", "skills"],
+    globalPath: [".codex", "skills"],
+  },
   {
     agent: "openCode",
     projectPath: [".opencode", "skills"],
     globalPath: [".config", "opencode", "skills"],
   },
-  { agent: "openClaw", projectPath: ["skills"], globalPath: [".openclaw", "skills"] },
-  { agent: "augment", projectPath: [".augment", "skills"], globalPath: [".augment", "skills"] },
+  {
+    agent: "openClaw",
+    projectPath: ["skills"],
+    globalPath: [".openclaw", "skills"],
+  },
+  {
+    agent: "augment",
+    projectPath: [".augment", "skills"],
+    globalPath: [".augment", "skills"],
+  },
   {
     agent: "continue",
     projectPath: [".continue", "skills"],
     globalPath: [".continue", "skills"],
   },
-  { agent: "goose", projectPath: [".goose", "skills"], globalPath: [".config", "goose", "skills"] },
-  { agent: "qwenCode", projectPath: [".qwen", "skills"], globalPath: [".qwen", "skills"] },
-  { agent: "qode", projectPath: [".qoder", "skills"], globalPath: [".qoder", "skills"] },
-  { agent: "qodeCn", projectPath: [".qoder", "skills"], globalPath: [".qoder-cn", "skills"] },
+  {
+    agent: "goose",
+    projectPath: [".goose", "skills"],
+    globalPath: [".config", "goose", "skills"],
+  },
+  {
+    agent: "qwenCode",
+    projectPath: [".qwen", "skills"],
+    globalPath: [".qwen", "skills"],
+  },
+  {
+    agent: "qode",
+    projectPath: [".qoder", "skills"],
+    globalPath: [".qoder", "skills"],
+  },
+  {
+    agent: "qodeCn",
+    projectPath: [".qoder", "skills"],
+    globalPath: [".qoder-cn", "skills"],
+  },
   {
     agent: "windsurf",
     projectPath: [".windsurf", "skills"],
     globalPath: [".codeium", "windsurf", "skills"],
   },
-  { agent: "trae", projectPath: [".trae", "skills"], globalPath: [".trae", "skills"] },
-  { agent: "traeCn", projectPath: [".trae", "skills"], globalPath: [".trae-cn", "skills"] },
-  { agent: "kiroCli", projectPath: [".kiro", "skills"], globalPath: [".kiro", "skills"] },
-  { agent: "roo", projectPath: [".roo", "skills"], globalPath: [".roo", "skills"] },
+  {
+    agent: "trae",
+    projectPath: [".trae", "skills"],
+    globalPath: [".trae", "skills"],
+  },
+  {
+    agent: "traeCn",
+    projectPath: [".trae", "skills"],
+    globalPath: [".trae-cn", "skills"],
+  },
+  {
+    agent: "kiroCli",
+    projectPath: [".kiro", "skills"],
+    globalPath: [".kiro", "skills"],
+  },
+  {
+    agent: "roo",
+    projectPath: [".roo", "skills"],
+    globalPath: [".roo", "skills"],
+  },
   {
     agent: "codeBuddy",
     projectPath: [".codebuddy", "skills"],
@@ -417,7 +466,7 @@ function getWorkspaceZcodeSkillRoot(workspacePath: string): string {
 }
 
 function getUserZcodeSkillRoot(): string {
-  return join(resolveUserHomeDir(), ".zcode", "skills");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "skills");
 }
 
 function getWorkspaceZcodeCommandRoot(workspacePath: string): string {
@@ -425,7 +474,7 @@ function getWorkspaceZcodeCommandRoot(workspacePath: string): string {
 }
 
 function getUserZcodeCommandRoot(): string {
-  return join(resolveUserHomeDir(), ".zcode", "commands");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "commands");
 }
 
 function getWorkspaceZcodePluginRoot(workspacePath: string): string {
@@ -433,11 +482,11 @@ function getWorkspaceZcodePluginRoot(workspacePath: string): string {
 }
 
 function getUserZcodePluginRoot(): string {
-  return join(resolveUserHomeDir(), ".zcode", "plugins");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "plugins");
 }
 
 function getUserZcodeCliConfigPath(): string {
-  return join(resolveUserHomeDir(), ".zcode", "cli", "config.json");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
 }
 
 function getWorkspaceZcodeConfigPath(workspacePath: string): string {
@@ -449,7 +498,7 @@ function getClaudeUserAgentsFileSourcePath(): string {
 }
 
 function getUserZcodeAgentsFilePath(): string {
-  return join(resolveUserHomeDir(), ".zcode", "AGENTS.md");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "AGENTS.md");
 }
 
 function resolveTargetRootForScope(

@@ -7,6 +7,7 @@ import type {
   DataSyncListItem,
   SkillDataSyncPayload,
 } from "@zcode/shared";
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import { pathExists, updateJsonObjectFile } from "#src/fs/atomicFileUtils.js";
 import { createServiceLogger } from "#src/logger/serviceLogger.js";
 import { checkRemoteSyncDirectoriesWriteAccess } from "#src/remote-sync/remoteSyncWriteAccess.js";
@@ -51,8 +52,9 @@ interface ResolvedUserSkill {
   isSymlink: boolean;
 }
 
+// 修复原因：路径原先硬编码 ".zcode"，kcode 构建下远端同步会读写 ZCode 的技能配置。
 function getCliConfigPath(): string {
-  return join(resolveUserHomeDir(), ".zcode", "cli", "config.json");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "cli", "config.json");
 }
 
 function normalizeSkillConfigPath(path: string): string {

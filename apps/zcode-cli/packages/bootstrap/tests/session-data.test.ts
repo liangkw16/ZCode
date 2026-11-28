@@ -11,30 +11,44 @@ function harness(
     loaded?: string[];
     failFiles?: string[];
     referrers?: Record<string, string[]>;
+    onRemoveSession?: (id: string) => void;
+    trees?: Record<string, string[]>;
   } = {},
 ) {
   const trees: Record<string, string[]> = {
     sess_a: ["sess_a", "sess_a_child"],
     sess_b: ["sess_b"],
     sess_c: ["sess_c"],
+    ...options.trees,
   };
   const sizes: Record<string, number> = { sess_a: 10, sess_a_child: 5, sess_b: 7, sess_gone: 3 };
   const calls: string[] = [];
+  // 镜像真实 store 语义：行被 purgeSessions 删除后，其引用从后续查询中消失。
+  const deletedRows = new Set<string>();
+  const counters = { referrerQueries: 0 };
   const host: SessionDataHost = {
     store: {
       listOwnedSessionTrees: async (ids) =>
         new Map(ids.map((id) => [id, trees[id] ?? []] as const)) as never,
-      listArtifactReferrers: async (ids) =>
-        new Map(
-          ids.flatMap((id) => (options.referrers?.[id] ? [[id, options.referrers[id]] as const] : [])),
-        ) as never,
+      listArtifactReferrers: async (ids) => {
+        counters.referrerQueries += 1;
+        return new Map(
+          ids.flatMap((id) =>
+            options.referrers?.[id]
+              ? [[id, options.referrers[id].filter((r) => !deletedRows.has(r))] as const]
+              : [],
+          ),
+        ) as never;
+      },
       purgeSessions: async (ids) => {
         calls.push(`purge:${ids.join(",")}`);
+        for (const id of ids) deletedRows.add(id);
       },
     },
     files: {
       measureSession: async (id) => sizes[id] ?? 0,
       removeSession: async (id) => {
+        options.onRemoveSession?.(id);
         if (options.failFiles?.includes(id)) throw Object.assign(new Error("busy"), { code: "EBUSY" });
         calls.push(`files:${id}`);
         return sizes[id] ?? 0;
@@ -54,7 +68,7 @@ function harness(
       calls.push(`forget:${id}`);
     },
   };
-  return { host, calls };
+  return { host, calls, counters };
 }
 
 const directories = [{ workspacePath: "/work/a" }];
@@ -132,7 +146,8 @@ describe("session data", () => {
       directories: [],
     });
     expect(result.kept).toEqual([]);
-    expect(result.deleted.map((entry) => entry.sessionId)).toEqual(["sess_a", "sess_b"]);
+    // 2026-10-30 修正后引用方先删：fork 先落地，source 在下一轮确认引用消失后删除。
+    expect(result.deleted.map((entry) => entry.sessionId)).toEqual(["sess_b", "sess_a"]);
   });
 
   it("keeps every tree in a chain once one link is kept", async () => {
@@ -153,10 +168,81 @@ describe("session data", () => {
     expect(result.deleted).toEqual([]);
   });
 
+  it("keeps a tree that becomes busy after the batch started, without purging its rows", async () => {
+    // 上游同步审查 P1 回归：running 不能只在批次开始计算——删除 sess_a 文件期间
+    // sess_b 被命令准入变为 busy，必须整棵保留，不能删文件/行。
+    const busy: string[] = [];
+    const { host, calls } = harness({ onRemoveSession: (id) => {
+      if (id === "sess_a") busy.push("sess_b");
+    } });
+    // harness 的 residency 读取 options.busy；这里通过闭包注入动态数组。
+    const dynamicHost: SessionDataHost = {
+      ...host,
+      residency: (id) => (busy.includes(id) ? "busy" : host.residency(id)),
+    };
+    const result = await purgeSessionDataWith(dynamicHost, {
+      sessionIds: ["sess_a", "sess_b"],
+      directories: [],
+    });
+    expect(result.deleted).toEqual([{ sessionId: "sess_a", bytes: 15 }]);
+    expect(result.kept).toEqual([{ sessionId: "sess_b", reason: "running" }]);
+    expect(calls.some((call) => call.includes("sess_b"))).toBe(false);
+  });
+
+  it("keeps the referenced source when its referrer candidate fails to delete", async () => {
+    // 上游同步审查 P2 回归：sess_b 引用 sess_a 的附件且删除失败（EBUSY）时，
+    // sess_a 必须保留——附件不能先于引用方消失，否则保留会话留下永久悬挂引用。
+    const { host, calls } = harness({
+      referrers: { sess_a: ["sess_b"] },
+      failFiles: ["sess_b"],
+    });
+    const result = await purgeSessionDataWith(host, {
+      sessionIds: ["sess_a", "sess_b"],
+      directories: [],
+    });
+    expect(result.failed).toEqual([{ sessionId: "sess_b", code: "EBUSY" }]);
+    expect(result.kept).toEqual([{ sessionId: "sess_a", reason: "referenced" }]);
+    expect(result.deleted).toEqual([]);
+    expect(calls.some((call) => call.startsWith("files:sess_a"))).toBe(false);
+    expect(calls).not.toContain("purge:sess_a");
+  });
+
   it("treats a session that no longer exists as deleted, still clearing leftover files", async () => {
     const { host, calls } = harness();
     const result = await purgeSessionDataWith(host, { sessionIds: ["sess_gone"], directories: [] });
     expect(result.deleted).toEqual([{ sessionId: "sess_gone", bytes: 3 }]);
     expect(calls).toEqual(["files:sess_gone", "purge:sess_gone", "forget:sess_gone"]);
+  });
+
+  it("deletes an idle tree whose child only references attachments inside the same tree", async () => {
+    // 回归：同树引用（子会话引用父会话附件）随树一起删除，不能被算作待删集合里的引用方；
+    // 否则这棵树被反复推迟，最后按“被引用”保留，重试也无法释放。
+    const { host } = harness({ referrers: { sess_a: ["sess_a_child"] } });
+    const result = await purgeSessionDataWith(host, { sessionIds: ["sess_a"], directories: [] });
+    expect(result).toEqual({
+      deleted: [{ sessionId: "sess_a", bytes: 15 }],
+      kept: [],
+      failed: [],
+      memory: [],
+    });
+  });
+
+  it("deletes a long reference chain from the referrer end with a single referrer scan", async () => {
+    // 回归：引用方先删。listArtifactReferrers 是对 part 表的全表 instr 扫描，按轮次重取快照会让
+    // 32 棵树的单向链扫描整库 32 次；引用关系只取一次，之后按本批的删除结果推进。
+    const depth = 32;
+    const names = Array.from({ length: depth }, (_, index) => `chain_${index}`);
+    const { host, counters } = harness({
+      trees: Object.fromEntries(names.map((name) => [name, [name]])),
+      // chain_(i+1) 引用 chain_(i) 的附件。
+      referrers: Object.fromEntries(
+        names.slice(1).map((name, index) => [names[index]!, [name]]),
+      ),
+    });
+    const result = await purgeSessionDataWith(host, { sessionIds: names, directories: [] });
+    expect(result.failed).toEqual([]);
+    expect(result.kept).toEqual([]);
+    expect(result.deleted.map((entry) => entry.sessionId)).toEqual(names.slice().reverse());
+    expect(counters.referrerQueries).toBe(1);
   });
 });

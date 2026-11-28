@@ -42,7 +42,7 @@ export async function prepareTasksIndexStorage(
   report("checking");
   await mkdir(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  let failure: unknown;
+  let dbCloseFailure: unknown;
   let migration: DatabaseMigrationFacts | undefined;
   try {
     db.exec("PRAGMA busy_timeout = 25");
@@ -74,15 +74,22 @@ export async function prepareTasksIndexStorage(
     await acquire("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     await acquire(() => {
-      migration = { kind: inspectTasksMigrationKind(db), executedCount: 0, committedCount: 0 };
+      migration = {
+        kind: inspectTasksMigrationKind(db),
+        executedCount: 0,
+        committedCount: 0,
+      };
     });
     report("checking", migration);
     await acquire("BEGIN IMMEDIATE");
-    await runTasksDatabaseMigrations(db, { transactionOpen: true, migration, onProgress: report });
+    await runTasksDatabaseMigrations(db, {
+      transactionOpen: true,
+      migration,
+      onProgress: report,
+    });
     // COMMIT 已成功，先发布事实；后续 close 失败不能把已提交误报为未提交。
     report("maintaining", migration);
   } catch (error) {
-    failure = error;
     // 失败事实随原异常交给 Worker，不倒退发布 checking/migrating，也不覆盖首因。
     if (migration && error && typeof error === "object") {
       try {
@@ -93,12 +100,16 @@ export async function prepareTasksIndexStorage(
     }
     throw error;
   } finally {
+    // lint 修复（no-unsafe-finally，2026-10-30）：finally 里条件 throw 会被判定为
+    // 可能覆盖 try/catch 的首因。语义等价改写：close 失败先记录，finally 之外仅在
+    // 无首因（try 正常完成）时抛出；有首因时 close 失败照旧被忽略。
     try {
       db.close();
     } catch (error) {
-      if (!failure) throw error;
+      dbCloseFailure = error;
     }
   }
+  if (dbCloseFailure !== undefined) throw dbCloseFailure;
   markTasksStorageMigrated(path);
   const repos = [
     new TaskIndexRepo(settings, undefined, path, LOCK_WAIT_MS),
@@ -106,6 +117,7 @@ export async function prepareTasksIndexStorage(
     new OffPeakTaskRepo(path, LOCK_WAIT_MS),
   ];
   let preparationFailure: unknown;
+  let reposCloseFailure: unknown;
   try {
     // 这些是原本就在初始化时执行的修复，不创建新的迁移或改变已有事务边界。
     for (const repo of repos) await repo.ensureReady();
@@ -113,16 +125,18 @@ export async function prepareTasksIndexStorage(
     preparationFailure = error;
     throw error;
   } finally {
-    let closeFailure: unknown;
+    // lint 修复（no-unsafe-finally，2026-10-30）：与上方 db.close 同一改写——close
+    // 失败记录后在 finally 之外抛出；try 已抛出（preparationFailure 置位）时不会到达，
+    // close 失败照旧被忽略，不覆盖首因。
     for (const repo of repos) {
       try {
         repo.close({ throwOnError: true });
       } catch (error) {
-        closeFailure ??= error;
+        reposCloseFailure ??= error;
       }
     }
-    if (!preparationFailure && closeFailure) throw closeFailure;
   }
+  if (!preparationFailure && reposCloseFailure) throw reposCloseFailure;
   markTasksStoragePrepared(path);
   report("ready", migration);
 }

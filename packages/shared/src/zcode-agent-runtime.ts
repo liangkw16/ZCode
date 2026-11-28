@@ -1,5 +1,7 @@
 export type ZCodeAgentBinaryKind = "native-binary";
 
+import { ZCODE_DATA_DIR_SEGMENT } from "./env.js";
+
 export interface ZCodeAgentRuntimeDescriptor {
   binaryKind: ZCodeAgentBinaryKind;
   binaryEnvVar: string;
@@ -29,7 +31,9 @@ export const ZCODE_AGENT_RUNTIME: ZCodeAgentRuntimeDescriptor = {
   bundledResourceDir: "glm",
   version: "0.13.3",
   spawnArgs: ["app-server", "--stdio"],
-  nativeConfigDir: ".zcode/cli",
+  // 全局 CLI 配置目录（{dataBaseDir}/{segment}/cli）；kcode 镜像根下随 segment 变化，
+  // 否则 getProviderWorkspaceConfigDir 的优先分支永远落在 .zcode/cli。
+  nativeConfigDir: `${ZCODE_DATA_DIR_SEGMENT}/cli`,
   nativeConfigFileName: "config.json",
   missingBinaryMessage:
     "[ZCode Agent] glm binary 未找到，请设置 ZCODE_AGENT_WORKDIR、GLM_BINARY_PATH 或先准备 GLM 运行时资源",

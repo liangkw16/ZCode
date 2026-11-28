@@ -1,3 +1,5 @@
+import { resolveEffectiveMcpConfiguration } from "../src/mcp-config.js";
+import type { McpServerConfig } from "@zcode/contracts";
 import { describe, expect, it } from "vitest";
 import { createConfig } from "@zcode/adapters/config";
 import { ZCODE_CUA_OFFICIAL_PLUGIN_ID, ZCODE_PLUGIN_ID_ENV_KEY } from "@zcode/shared";
@@ -13,17 +15,34 @@ const testModelSelection = {
   modelId: "test-model",
 } as const;
 
-function resolveAppRuntimeConfig(input: Parameters<typeof resolveProductionAppRuntimeConfig>[0]) {
-  return resolveProductionAppRuntimeConfig({
-    ...input,
-    options: {
-      ...input.options,
-      runtimeConfig: {
-        modelSelection: testModelSelection,
-        ...input.options.runtimeConfig,
-      },
-    },
+function resolveAppRuntimeConfig(
+  input: Omit<Parameters<typeof resolveProductionAppRuntimeConfig>[0], "mcpConfiguration"> & {
+    pluginMcpServers?: Record<string, McpServerConfig>;
+    builtInMcpServers?: Record<string, McpServerConfig>;
+  },
+) {
+  const effective = resolveEffectiveMcpConfiguration({
+    enabled: input.configResult.config.features.mcp,
+    servers: input.configResult.config.mcp.servers,
+    pluginServers: input.pluginMcpServers,
+    builtInServers: input.builtInMcpServers,
+    explicit: input.options.runtimeConfig?.mcp,
+    computerUse: input.pluginRuntimeFeatures?.computerUse === true,
   });
+  return {
+    configuredMcpServers: effective.configuredServers,
+    ...resolveProductionAppRuntimeConfig({
+      mcpConfiguration: effective.mcp,
+      ...input,
+      options: {
+        ...input.options,
+        runtimeConfig: {
+          modelSelection: testModelSelection,
+          ...input.options.runtimeConfig,
+        },
+      },
+    }),
+  };
 }
 
 function createConfigResult() {
@@ -53,6 +72,29 @@ function createConfigResult() {
 function createMainOnlyConfigResult() {
   return createConfig({
     cliOverrides: {
+      model: {
+        main: {
+          provider: "provider:test",
+          model: "glm-0531",
+          kind: "anthropic",
+          baseURL: "http://old.example.test/v1",
+        },
+      },
+    },
+    env: {},
+    skipUserConfig: true,
+    workingDirectory,
+  });
+}
+
+function createCompactConfigResult(input: {
+  compact?: Record<string, unknown>;
+  featuresCompact?: boolean;
+}) {
+  return createConfig({
+    cliOverrides: {
+      compact: input.compact,
+      ...(input.featuresCompact === undefined ? {} : { features: { compact: input.featuresCompact } }),
       model: {
         main: {
           provider: "provider:test",
@@ -752,6 +794,197 @@ describe("resolveAppRuntimeConfig", () => {
         modelId: "gpt-5.4",
         options: { reasoningLevel: "high" },
       },
+    });
+  });
+});
+
+describe("resolveAppRuntimeConfig：compact 策略接线", () => {
+  it("maps the compact file config into the runtime policy", () => {
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          bufferTokens: 8_000,
+          contextWindowTokens: 128_000,
+          keepRecentRounds: 2,
+          keepRecentTokens: 40_000,
+          outputReserveTokens: 16_000,
+          summaryMaxOutputTokens: 12_000,
+          summaryModel: "cheap-model",
+          summaryProvider: "test-provider",
+          thresholdRatio: 0.8,
+          microcompact: { enabled: true, keepRecentToolResults: 3 },
+        },
+      }),
+      options: {},
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toEqual({
+      enabled: true,
+      bufferTokens: 8_000,
+      contextWindow: 128_000,
+      keepRecentRounds: 2,
+      keepRecentTokens: 40_000,
+      outputReserveTokens: 16_000,
+      summaryMaxOutputTokens: 12_000,
+      summaryModel: "cheap-model",
+      summaryProvider: "test-provider",
+      thresholdRatio: 0.8,
+      microcompact: { enabled: true, keepRecentToolResults: 3 },
+    });
+  });
+
+  it("passes compact.modelOverrides through for per-model resolution at assembly time", () => {
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          thresholdRatio: 0.76,
+          modelOverrides: {
+            "account:bigmodel-individual-coding-plan": {
+              "GLM-5.3": { contextWindowTokens: 400_000 },
+            },
+          },
+        },
+      }),
+      options: {},
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toMatchObject({
+      thresholdRatio: 0.76,
+      modelOverrides: {
+        "account:bigmodel-individual-coding-plan": {
+          "GLM-5.3": { contextWindowTokens: 400_000 },
+        },
+      },
+    });
+  });
+
+  it("drops compact.modelOverrides when a programmatic runtime override takes over", () => {
+    // 程序化 runtimeOverride 是嵌入方对压缩行为的整体接管，优先级最高；
+    // 文件级按模型例外不得反超（组装点的覆盖会盖过程序化值），直接剔除。
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          thresholdRatio: 0.76,
+          modelOverrides: { p: { m: { contextWindowTokens: 400_000 } } },
+        },
+      }),
+      options: {
+        runtimeConfig: {
+          compact: { contextWindow: 600_000, bufferTokens: 1_000 },
+        },
+      },
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toMatchObject({
+      contextWindow: 600_000,
+      bufferTokens: 1_000,
+    });
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "modelOverrides")).toBe(false);
+  });
+
+  it("strips modelOverrides carried inside the programmatic runtime override itself", () => {
+    // 程序化对象自带的覆盖表若在末尾展开时保留，会重新带回覆盖表并反超程序化标量值。
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: {
+          thresholdRatio: 0.76,
+          modelOverrides: { p: { m: { contextWindowTokens: 400_000 } } },
+        },
+      }),
+      options: {
+        runtimeConfig: {
+          compact: {
+            contextWindow: 600_000,
+            modelOverrides: { p: { m: { contextWindowTokens: 400_000 } } },
+          },
+        },
+      },
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toMatchObject({ contextWindow: 600_000 });
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "modelOverrides")).toBe(false);
+  });
+
+  it("keeps unset keys absent so model-resolved windows keep driving thresholds by default", () => {
+    // autoCompactIfNeeded 以 `{ contextWindow: 模型窗口, ...compact }` 构造策略：
+    // 显式 undefined 的 contextWindow/maxOutputTokens 键会覆盖模型窗口并让阈值
+    // 回退 200K 兜底，改变 128K/1M 模型的压缩时机。
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createConfigResult(),
+      options: {},
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toEqual({ enabled: true });
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "contextWindow")).toBe(false);
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "maxOutputTokens")).toBe(false);
+    expect(Object.hasOwn(resolved.runtimeConfig.compact ?? {}, "microcompact")).toBe(false);
+  });
+
+  it("falls back to the features.compact master switch for enabled", () => {
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({ featuresCompact: false }),
+      options: {},
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+    expect(resolved.runtimeConfig.compact).toEqual({ enabled: false });
+
+    const explicitEnabled = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: { enabled: true },
+        featuresCompact: false,
+      }),
+      options: {},
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+    expect(explicitEnabled.runtimeConfig.compact).toEqual({ enabled: true });
+  });
+
+  it("gives programmatic runtime compact config precedence over file config", () => {
+    const resolved = resolveAppRuntimeConfig({
+      cliStorageRoot: "/tmp/zcode-cli",
+      configResult: createCompactConfigResult({
+        compact: { bufferTokens: 8_000, thresholdRatio: 0.8 },
+      }),
+      options: {
+        runtimeConfig: {
+          compact: { bufferTokens: 1_000 },
+        },
+      },
+      subagentOutputRootDir: "/tmp/zcode-cli/agents",
+      subagentProfiles: [],
+      workingDirectory,
+    });
+
+    expect(resolved.runtimeConfig.compact).toEqual({
+      enabled: true,
+      bufferTokens: 1_000,
+      thresholdRatio: 0.8,
     });
   });
 });

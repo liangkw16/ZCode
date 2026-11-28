@@ -6,6 +6,7 @@ import { contextCompositionSchema } from "@zcode/shared/zcode-protocol-v4";
 import { countContextPrefixMessages } from "../../src/agent/message-history.js";
 import type { AgentRuntimeInternal } from "../../src/runtime/internal.js";
 import type { ContextCompositionChangeReason } from "../../src/runtime/context-composition/index.js";
+import * as runtimeReminders from "../../src/runtime/helpers/runtime-reminders.js";
 import { createTestAgentRuntime } from "../test-agent-runtime.js";
 import { createTestSessionEventStore } from "../test-event-store.js";
 import { createTestModelFactory } from "../test-runtime-model.js";
@@ -15,19 +16,19 @@ const PROVIDER_INPUT_TOKENS = 1_234;
 const PROVIDER_OUTPUT_TOKENS = 5;
 const SUMMARY_MARKER = "create a detailed summary";
 
-function fixture() {
+function fixture(config: Parameters<typeof createTestAgentRuntime>[1] = {}, mcs = true) {
   const sessionId = createSessionId("context-composition");
   const store = createRecordingMessageStore();
   const createSession = vi.spyOn(store, "createSession");
   const requests: ModelRequest[] = [];
   const runtime = createTestAgentRuntime(
     sessionId,
-    { mode: "yolo", compact: { enabled: false }, titleGeneration: { enabled: false } },
+    { mode: "yolo", compact: { enabled: false }, titleGeneration: { enabled: false }, ...config },
     {
       eventStore: createTestSessionEventStore(),
       sessionStore: store as never,
       modelFactory: createTestModelFactory({
-        properties: { supportsMidConversationSystem: true },
+        properties: { supportsMidConversationSystem: mcs },
         async generateText(request) {
           requests.push(request);
           const isCompact = JSON.stringify(request.messages.at(-1)?.content).includes(
@@ -62,6 +63,68 @@ const tokensOf = (
 ) => composition?.categories.find((category) => category.id === id)?.tokens ?? 0;
 
 describe("context composition runtime", () => {
+  it.each([
+    { mcs: true, child: false, controls: true },
+    { mcs: false, child: false, controls: true },
+    { mcs: true, child: false, controls: false },
+    { mcs: false, child: false, controls: false },
+    { mcs: true, child: true, controls: false },
+    { mcs: false, child: true, controls: false },
+  ])(
+    "previews and sends the same capability-aware plan reminder: %j",
+    async ({ mcs, child, controls }) => {
+      const f = fixture(
+        {
+          planEnabled: true,
+          taskType: child ? "subagent_child" : undefined,
+          toolSearch: { mode: "local" },
+          toolAllowlist: [
+            "Read",
+            "ToolSearch",
+            "DeferredToolCall",
+            ...(controls ? ["AskUserQuestion", "ExitPlanMode"] : []),
+          ],
+        },
+        mcs,
+      );
+      const planTokens = (
+        composition: Awaited<ReturnType<typeof f.runtime.getContextComposition>>,
+      ) =>
+        composition?.categories
+          .find((category) => category.id === "reminders")
+          ?.items?.find((item) => item.name === "runtime_mode")?.tokens;
+      const reminderSpy = vi.spyOn(runtimeReminders, "buildRuntimeModeReminderBodyForTask");
+      const previewTokens = planTokens(await f.runtime.getContextComposition());
+      const previewBody = reminderSpy.mock.results.at(-1)?.value as string;
+      reminderSpy.mockRestore();
+      expect(previewTokens).toBeGreaterThan(0);
+      expect(previewBody).toContain("Only take read-only actions");
+      expect(f.conversationEntries()).toEqual([]);
+      await f.runtime.executeTurn("Inspect the implementation without editing");
+      expect(planTokens(await f.runtime.getContextComposition())).toBeGreaterThan(0);
+      const request = f.requests.at(-1)!;
+      const body = JSON.stringify(request.messages);
+      // MCS 合并后 token 按来源分摊，不能把预览和真实请求的分摊数量当作正文相同的证据。
+      expect(body).toContain(JSON.stringify(previewBody).slice(1, -1));
+      expect(body).toContain("Only take read-only actions");
+      expect(body).not.toMatch(/The user indicated|Follow 5-phase|### Phase/);
+      if (child) {
+        expect(body).toContain("Answer the delegated query");
+        expect(body).not.toContain("call ExitPlanMode");
+      } else if (controls) {
+        // local ToolSearch 只曝光入口，Plan 提醒仍须认出尚未展开的候选工具。
+        expect(request.tools.map((tool) => tool.name)).not.toContain("ExitPlanMode");
+        expect(body).toContain("call ExitPlanMode with the complete plan");
+        expect(body).toContain("use AskUserQuestion");
+      } else {
+        expect(body).toContain("ask the user directly");
+        expect(body).toContain("plan mode remains active because its exit tool is unavailable");
+        expect(body).not.toContain("call ExitPlanMode");
+      }
+      f.runtime.beginShutdown();
+    },
+  );
+
   it("previews the first request of a draft without side effects", async () => {
     const f = fixture();
 
@@ -140,7 +203,7 @@ describe("context composition runtime", () => {
     expect(f.reasons).toEqual(["tools"]);
 
     f.reasons.length = 0;
-    f.runtime.updateConfig({ language: "zh-CN" });
+    f.runtime.updateConfig({ outputStyle: undefined });
     expect(f.reasons).toEqual(["context_prefix"]);
 
     f.reasons.length = 0;

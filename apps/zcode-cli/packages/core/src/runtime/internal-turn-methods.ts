@@ -1,3 +1,4 @@
+import type { ToolSearchDelivery } from "@zcode/contracts";
 import type { BackgroundBashOutputResult } from "@zcode/shared";
 import type { ModelToolContract, RuntimeInputPresentation } from "@zcode/contracts";
 import type {
@@ -71,6 +72,7 @@ import type {
   RuntimeBackgroundStopOptions,
   RuntimeBackgroundStopResult,
 } from "./methods/background.js";
+import type { AppendSessionEventOptions } from "./methods/events.js";
 import type {
   AutoCompactLoopContext,
   AutoCompactOutcome,
@@ -223,6 +225,7 @@ export interface AgentRuntimeTurnMethods {
     entries: readonly RuntimeMessageEntry[];
     outcome: Extract<CompactAttemptOutcome, "compacted" | "skipped">;
     tokenCount: number;
+    syncError?: Error;
   }>;
   scheduleTools(toolCalls: ToolCall[]): Promise<ToolSchedule>;
   executeTools(
@@ -320,7 +323,11 @@ export interface AgentRuntimeTurnMethods {
     },
   ): BackgroundTaskInfo;
   createEvent(type: SessionEventType, payload: unknown, traceContext: TraceContext): SessionEvent;
-  appendEvent(event: SessionEvent, traceContext: TraceContext): Promise<void>;
+  appendEvent(
+    event: SessionEvent,
+    traceContext: TraceContext,
+    options?: AppendSessionEventOptions,
+  ): Promise<void>;
   notifyEventSinks(event: SessionEvent, traceContext: TraceContext): Promise<void>;
   ensureSessionPersisted(input: string, traceContext: TraceContext): Promise<void>;
   buildCompactTimelinePayload(
@@ -363,12 +370,15 @@ export interface AgentRuntimeTurnMethods {
     compactBoundary: CompactBoundaryPayload,
     traceContext: TraceContext,
     options?: {
+      created?: number;
       model?: Model;
       operationId?: string;
+      completedTimeline?: CompactTimelinePayload;
       leadingReminderEntries?: readonly RuntimeMessageEntry[];
       postCompactReminderEntries?: readonly RuntimeMessageEntry[];
+      toolSearchDelivery?: ToolSearchDelivery;
     },
-  ): Promise<void>;
+  ): Promise<Error | undefined>;
   persistUserPrompt(
     messageID: MessageId,
     input: string,
@@ -430,6 +440,7 @@ export interface AgentRuntimeTurnMethods {
           finish?: string;
           tokens?: unknown;
           signedReasoningReset?: boolean;
+          toolSearchDelivery?: ToolSearchDelivery;
         }
       | undefined,
     traceContext: TraceContext,

@@ -67,26 +67,6 @@ export declare function publishCuaBrokerRefreshMarker(
   options?: { deadlineMs?: number; now?: () => number },
 ): Promise<CuaBrokerRefreshMarkerHandle>;
 
-export interface HelperNativeAddon {
-  [key: string]: unknown;
-}
-
-export declare function loadRealNativeAddon(options?: unknown): HelperNativeAddon;
-export declare function resolvePackagedNativeAddonPath(options?: unknown): string | undefined;
-export declare function resolveInTreeAddonPath(options?: unknown): string | undefined;
-
-export interface AxReadOnlySource {
-  [key: string]: unknown;
-}
-
-export declare function createAxReadOnlyMethods(
-  source: AxReadOnlySource,
-  registry?: unknown,
-  options?: unknown,
-): Record<string, unknown>;
-export declare const ROLE_TO_KIND: Readonly<Record<string, string>>;
-export declare function roleToKind(role: string): string | undefined;
-
 export declare class CuaHelperLifecycleManager<Managed> {
   constructor(dispose?: (managed: Managed) => Promise<void> | void);
   acquire(options: {
@@ -125,6 +105,7 @@ export interface CuaProductHelperHost {
   readonly running: boolean;
   readonly socketPath: string | null;
   readonly pluginAuthority: string | null;
+  readonly reservedTransport?: CuaHelperTransportHandle;
   start(): Promise<CuaHelperHandle>;
   stop(): Promise<void>;
   restart(): Promise<CuaHelperHandle>;
@@ -143,7 +124,9 @@ export interface CuaHelperHost extends CuaProductHelperHost {
   waitForTransport(timeoutMs?: number): Promise<CuaHelperTransportHandle>;
   queryScreenCaptureProbe(): Promise<{ ok: boolean; reason?: string }>;
   queryScreenRecordingPreflight(): Promise<"granted" | "denied" | "unknown" | undefined>;
-  queryPermissionStatus(): Promise<CuaPermissionStatusQueryReport>;
+  queryPermissionStatus(options?: {
+    includeFunctionalProbes?: boolean;
+  }): Promise<CuaPermissionStatusQueryReport>;
 }
 
 export interface CuaHelperTransportRestartOptions {
@@ -262,5 +245,5 @@ export declare function resolveCuaHelperInstallRoot(env: NodeJS.ProcessEnv): str
 export declare function standaloneHelperCandidatePaths(env?: NodeJS.ProcessEnv): string[];
 export declare function injectPermissionBrokerAgentMcpServers<T>(
   servers: T[] | undefined,
-  options: unknown,
+  options: { socketPath: string; pluginAuthority?: string | null },
 ): T[] | undefined;

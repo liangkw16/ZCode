@@ -11,8 +11,11 @@ import {
   buildEnvInfoSection,
   buildGitSystemContextSection,
   buildIdentitySection,
-  buildSkillsSection,
 } from "../src/context/index.js";
+import {
+  buildSkillsContent,
+  DEFAULT_SKILL_METADATA_BUDGET,
+} from "../src/context/sections/skills.js";
 import { readToolEntry } from "../src/tool/handlers/read.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import type { ContextBuildResult, ContextMetaUserAttachmentSource } from "../src/context/types.js";
@@ -39,6 +42,27 @@ const DEFAULT_CONTEXT_MANAGEMENT_PROMPT = [
 const ADDITIONAL_ACT_DONT_REDERIVE_PROMPT =
   "When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey";
 
+// 主会话 system[2] 在 Context management 之后的两段（system-prompt-contract.md「Finishing work and memory notes」）。
+const EXPECTED_FINISHING_WORK_PROMPT =
+  "# Finishing work\nEnding your turn means your work stops there until asked to continue, and you should not stop unless needed. Please avoid stopping while work the user asked for is still owed. Status notes are welcome, and so are your recommendations on open decisions, but do not stop unnecessarily and carry on with whatever does not depend on the user's answer. If you notice yourself inviting the user to redirect you or offering to wait, instead proceed on the next part of the task. You may meet ordinary obstacles like errors, timeouts, locked files, empty results or failing tools. Diagnose them first, and when they are not real blockers, work through them with the access you have (wait and retry, fix the request, use another tool or source) rather than stopping or checking in. If someone clearly decided something is a hard blocker, such as a file marked not to be touched, access that was intentionally withheld, or a safety guardrail, leave it alone, say plainly what you found, and look for another way to finish the task. Stopping before the task is complete can rarely be merited, i.e. when the task can't move forward without user input, or where the blocker is deliberate and should not be worked past. This does not override the need for confirmation on risky or destructive actions.";
+
+const EXPECTED_MEMORY_NOTES_PROMPT = [
+  "# Memory, notes and feedback",
+  "This adds to the Memory section and takes precedence over it. The rules about saving apply only if this session has a directory for saving memories.",
+  "",
+  "Save only what is applicable and durable:",
+  "applicable: it would directly change your behavior in future sessions, such as an approach the user corrected or steered you away from, or a standing preference they expressed. Not ambient code context or state.",
+  "durable: it applies to multiple future sessions and tasks, not just this one. Not transient task plans or status. If you are uncertain whether something is durable, assume it is not and do not save it.",
+  "",
+  "Avoid saving an unnecessary record of completed work (commits, merges, review outcomes, status summaries). Pointers to external resources and environment facts the user would otherwise have to restate are still worth saving.",
+  "",
+  "Don't overindex on soft feedback - give it the appropriate weight based on the context, and if you can't tell whether it's an instruction or just a comment, ask once but carry on. When saving feedback, record the specifics (what, who, when, why, scope) and label your own interpretations as yours.",
+  "",
+  "Same for your notes - if they contain some caution or limitation, question whether the reason still holds and drop it if not. This isn't a reason to take risky, irreversible, destructive actions without confirmation though, and an old or general go-ahead doesn't count as confirmation, so if the caution is about these kinds of actions then keep it until a human gives confirmation (even if you wrote it yourself).",
+  "",
+  "Don't create planning, decision, or analysis documents unless the user asks for them \u2014 work from the context, not intermediate files.",
+].join("\n");
+
 const TOTAL_TOKENS_LINE = "<total_tokens>15000000 tokens left</total_tokens>";
 
 const REMOVED_AUTONOMY_PARAGRAPHS = [
@@ -49,7 +73,7 @@ const REMOVED_AUTONOMY_PARAGRAPHS = [
 ];
 
 const EXPECTED_ACTION_CAUTION_PROMPT =
-  "For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.";
+  "Reuse the user's authorization for the same target, scope, and effects across steps and turns;";
 
 // 环境、模型、日期只产出 section，由运行时宣告；其余来源读 meta user carrier。
 const RUNTIME_ANNOUNCED_SECTIONS = {
@@ -111,14 +135,15 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("You are ZCode, an interactive agent");
     expect(stableBody).toContain("# Harness");
     const harnessBullets = stableBody.split("# Harness\n")[1]?.split("\n") ?? [];
-    expect(harnessBullets).toHaveLength(5);
+    expect(harnessBullets).toHaveLength(3);
+    expect(stableBody).toContain("Follow the host-provided presentation instructions");
     expect(harnessBullets.every((line) => line.startsWith(" - "))).toBe(true);
     expect(stableBody).not.toContain(EXPECTED_PRONOUNS_PROMPT);
     expect(stableBody).not.toContain("# Session-specific guidance");
     expect(stableBody).not.toContain("# Environment");
     expect(stableBody).not.toContain("# Context management");
     expect(stableBody).not.toContain("Write code that reads like the surrounding code");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(stableBody).not.toContain("# Task Behavior");
     expect(stableBody).not.toContain("# Risky Actions");
     expect(stableBody).not.toContain("# Communication Style");
@@ -127,22 +152,22 @@ describe("ContextBuilder meta user context", () => {
     const dynamicSystem = String(result.systemMessages[2]?.content ?? "");
     expect(dynamicSystem.startsWith(`\n\n${DEFAULT_COMMUNICATION_PROMPT}`)).toBe(true);
     expect(dynamicSystem).toContain(
-      `${DEFAULT_COMMUNICATION_PROMPT}\n\n${EXPECTED_PRONOUNS_PROMPT}\n\nFor actions that are hard to reverse or outward-facing`,
+      `${DEFAULT_COMMUNICATION_PROMPT}\n\n${EXPECTED_PRONOUNS_PROMPT}\n\nReuse the user's authorization for the same target, scope, and effects`,
     );
     expect(dynamicSystem.split(DEFAULT_COMMUNICATION_PROMPT)).toHaveLength(2);
     expect(dynamicSystem.split(EXPECTED_PRONOUNS_PROMPT)).toHaveLength(2);
     const behavior = result.sections.find((section) => section.source === "dynamic_behavior");
-    expect(behavior?.content).toBe(
+    expect(behavior?.content).toContain(
       `${DEFAULT_COMMUNICATION_PROMPT}\n\n${EXPECTED_PRONOUNS_PROMPT}\n\n${EXPECTED_ACTION_CAUTION_PROMPT}`,
     );
     expect(dynamicSystem).not.toContain("# Communicating with the user");
     expect(dynamicSystem).not.toContain("Only write a code comment");
     expect(dynamicSystem).not.toContain("if what you find contradicts how it was described");
     expect(result.systemMessages[2]?.content).toContain(
-      "For actions that are hard to reverse or outward-facing",
+      "Reuse the user's authorization for the same target, scope, and effects",
     );
     expect(
-      result.systemMessages[2]?.content.indexOf("For actions that are hard to reverse"),
+      result.systemMessages[2]?.content.indexOf("Reuse the user's authorization"),
     ).toBeLessThan(result.systemMessages[2]?.content.indexOf("# Context management") ?? -1);
     expect(result.systemMessages[2]?.content).not.toContain("# Session-specific guidance");
     expect(result.systemMessages[2]?.content).not.toContain("`! <command>`");
@@ -161,7 +186,7 @@ describe("ContextBuilder meta user context", () => {
     expect(result.systemMessages[2]?.content).not.toContain("# Agent Identity");
   });
 
-  it("keeps act guidance after context management and ends with the token budget line", () => {
+  it("keeps act guidance after context management without autonomy appendices", () => {
     const result = createContextBuilder({
       workingDirectory: "/workspace",
       envInfo: {
@@ -181,13 +206,80 @@ describe("ContextBuilder meta user context", () => {
     expect(contextManagement?.content).toBe(
       `${DEFAULT_CONTEXT_MANAGEMENT_PROMPT}\n\n${ADDITIONAL_ACT_DONT_REDERIVE_PROMPT}`,
     );
+    expect(dynamicSystem).toContain(ADDITIONAL_ACT_DONT_REDERIVE_PROMPT);
     expect(
-      dynamicSystem.endsWith(`${ADDITIONAL_ACT_DONT_REDERIVE_PROMPT}\n\n${TOTAL_TOKENS_LINE}`),
+      dynamicSystem.endsWith(
+        `${EXPECTED_FINISHING_WORK_PROMPT}\n\n${EXPECTED_MEMORY_NOTES_PROMPT}`,
+      ),
     ).toBe(true);
     expect(dynamicSystem.split(ADDITIONAL_ACT_DONT_REDERIVE_PROMPT)).toHaveLength(2);
-    expect(dynamicSystem.split(TOTAL_TOKENS_LINE)).toHaveLength(2);
+    expect(dynamicSystem).not.toContain(TOTAL_TOKENS_LINE);
+    expect(dynamicSystem).toContain("# Task execution");
+    expect(dynamicSystem).toContain("silence is not approval");
+    expect(dynamicSystem).toContain("Running, unchanged, or inconclusive results are not passes");
+    expect(dynamicSystem).toContain(
+      "Progress updates, plans, and offers to continue are not completion",
+    );
     for (const paragraph of REMOVED_AUTONOMY_PARAGRAPHS) {
       expect(dynamicSystem).not.toContain(paragraph);
+    }
+  });
+
+  it("sends Finishing work and memory notes after context management, with or without a Memory root", () => {
+    for (const memoryRoot of [undefined, "/workspace/.zcode/memory"]) {
+      const dynamicSystem = String(
+        createContextBuilder({
+          workingDirectory: "/workspace",
+          envInfo: {
+            cwd: "/workspace",
+            platform: "darwin",
+            shell: "zsh",
+            osVersion: "Darwin 25.4.0",
+            nodeVersion: "v24.14.0",
+          },
+          ...(memoryRoot ? { memoryRoot } : {}),
+        }).build().systemMessages[2]?.content ?? "",
+      );
+
+      // 不按模型区分；没有 Memory 目录时也发，段内第一句说明保存规则只在有目录时适用。
+      expect(
+        dynamicSystem.endsWith(
+          `${ADDITIONAL_ACT_DONT_REDERIVE_PROMPT}\n\n${EXPECTED_FINISHING_WORK_PROMPT}\n\n${EXPECTED_MEMORY_NOTES_PROMPT}`,
+        ),
+      ).toBe(true);
+      expect(dynamicSystem.includes("# Memory\n")).toBe(memoryRoot !== undefined);
+    }
+  });
+
+  it("does not send Finishing work or memory notes for workflow actors or a custom system prompt", () => {
+    const envInfo = {
+      cwd: "/workspace",
+      platform: "darwin",
+      shell: "zsh",
+      osVersion: "Darwin 25.4.0",
+      nodeVersion: "v24.14.0",
+    } as const;
+    const actorSystem = createContextBuilder({
+      workingDirectory: "/workspace",
+      envInfo,
+      workflowActor: { name: "reviewer" },
+    })
+      .build()
+      .systemMessages.map((message) => String(message.content))
+      .join("");
+    const customSystem = createContextBuilder({
+      workingDirectory: "/workspace",
+      envInfo,
+      customSystemPrompt: "You are concise for this task.",
+    })
+      .build()
+      .systemMessages.map((message) => String(message.content))
+      .join("");
+
+    expect(actorSystem.endsWith(ADDITIONAL_ACT_DONT_REDERIVE_PROMPT)).toBe(true);
+    for (const system of [actorSystem, customSystem]) {
+      expect(system).not.toContain("# Finishing work");
+      expect(system).not.toContain("# Memory, notes and feedback");
     }
   });
 
@@ -298,31 +390,41 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).toContain("Hooks may intercept tool calls");
     expect(stableBody).toContain("Prefer the dedicated file/search tools");
     expect(stableBody).toContain("Independent tool calls can run in parallel");
-    expect(stableBody).toContain("Reference code as `file_path:line_number`");
+    expect(stableBody).toContain("reference code as `file_path:line_number`");
     expect(stableBody).not.toContain("match local style, naming, patterns, and comment density");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(stableBody).not.toContain("Sending content to an external service publishes it");
-    expect(stableBody).not.toContain("Before deleting or overwriting, look at the target");
-    expect(stableBody).not.toContain("Report outcomes faithfully");
+    expect(stableBody).not.toContain("Before deleting or overwriting, inspect the target");
+    expect(stableBody).not.toContain("Report completed work and its evidence");
     expect(stableBody).not.toContain("`! <command>`");
-    expect(stableBody).not.toContain("When the user types `/<skill-name>`");
+    expect(stableBody).not.toContain("When the user explicitly names a skill");
     expect(stableBody).not.toContain("# Task Behavior");
     expect(stableBody).not.toContain("# Risky Actions");
     expect(stableBody).not.toContain("# Communication Style");
 
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
     expect(dynamicSystem).toContain("match its comment density, naming, and idiom");
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
-    expect(dynamicSystem).toContain("Sending content to an external service publishes it");
-    expect(dynamicSystem).toContain("Before deleting or overwriting, look at the target");
-    expect(dynamicSystem).toContain("Report outcomes faithfully");
-    expect(dynamicSystem.indexOf("For actions that are hard to reverse")).toBeLessThan(
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
+    // 合同「Authorization paragraph」：实质扩大或未授权的破坏性/对外操作要先确认；仅“重新评估”不算。
+    // 工具审批前不加口头关卡、既有授权沿用，这两条与确认要求并存。
+    expect(dynamicSystem).toContain(
+      "confirm first when effects materially expand or differ, especially unauthorized irreversible or outward-facing actions",
+    );
+    expect(dynamicSystem).toContain("Do not add a verbal gate before a tool approval");
+    expect(dynamicSystem).not.toContain("reassess materially expanded");
+    expect(dynamicSystem).not.toContain("Sending content to an external service publishes it");
+    expect(dynamicSystem).toContain("Distinguish public reading and authorized services");
+    expect(dynamicSystem).toContain("Before deleting or overwriting, inspect the target");
+    expect(dynamicSystem).toContain("Report completed work and its evidence");
+    expect(dynamicSystem.indexOf("Reuse the user's authorization")).toBeLessThan(
       dynamicSystem.indexOf("# Context management"),
     );
     expect(dynamicSystem).not.toContain("# Session-specific guidance");
     expect(dynamicSystem).not.toContain("`! <command>`");
     expect(dynamicSystem).not.toContain("Use the Agent tool with specialized agents");
-    expect(dynamicSystem).not.toContain("When the user types `/<skill-name>`");
+    expect(dynamicSystem).not.toContain("When the user explicitly names a skill");
     expect(dynamicSystem).not.toContain("Use AskUserQuestion");
     expect(dynamicSystem).not.toContain("spawn Agent with subagent_type=Explore");
     expect(dynamicSystem).not.toContain("Use TodoWrite");
@@ -364,7 +466,6 @@ describe("ContextBuilder meta user context", () => {
         },
       },
       currentDate: "2026-06-04",
-      language: "Chinese",
       outputStyle: {
         name: "Terse",
         prompt: "Keep responses short.",
@@ -400,7 +501,8 @@ describe("ContextBuilder meta user context", () => {
     const meta = metaAttachment(result, "context_prefix");
     expect(meta).not.toContain("<system-reminder>");
     expect(meta).toContain("Project instruction should stay as userContext.");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).toContain(
       "Contents of /workspace/AGENTS.md (project instructions, checked into the codebase):",
@@ -439,7 +541,6 @@ describe("ContextBuilder meta user context", () => {
         osVersion: "Linux 6.6.0",
         nodeVersion: "v24.14.0",
       },
-      language: "Chinese",
       outputStyle: {
         name: "Learning",
         prompt: "Explain tradeoffs while solving the task.",
@@ -463,9 +564,9 @@ describe("ContextBuilder meta user context", () => {
     expect(stable).not.toContain("# Environment");
     expect(stable).not.toContain("# Context management");
     expect(stable).not.toContain("Write code that reads like the surrounding code");
-    expect(stable).not.toContain("For actions that are hard to reverse");
+    expect(stable).not.toContain("Reuse the user's authorization");
     expect(dynamic).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamic.indexOf("For actions that are hard to reverse")).toBeLessThan(
+    expect(dynamic.indexOf("Reuse the user's authorization")).toBeLessThan(
       dynamic.indexOf("# Memory"),
     );
     expect(dynamic).not.toContain("# Session-specific guidance");
@@ -505,7 +606,8 @@ describe("ContextBuilder meta user context", () => {
     );
     const memorySection = result.sections.find((section) => section.source === "memory");
     expect(memorySection?.content).toBe(expected);
-    expect(String(result.systemMessages[2]?.content ?? "").match(/# Memory/g)).toHaveLength(1);
+    // 只数 Memory 段标题本身；`# Memory, notes and feedback` 是另一段。
+    expect(String(result.systemMessages[2]?.content ?? "").match(/^# Memory$/gm)).toHaveLength(1);
   });
 
   it("renders the two project Memory retrieval prompts from the same branch contract", () => {
@@ -616,7 +718,6 @@ describe("ContextBuilder meta user context", () => {
         gitStatusLines: [" M package.json"],
         recentCommits: ["abc123 test commit"],
       },
-      language: "Chinese",
     }).build();
 
     expect(result.systemMessages.map((message) => message.role)).toEqual([
@@ -633,10 +734,12 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("**Is a git repository**: yes");
     expect(stableBody).not.toContain("# Context management");
     expect(stableBody).not.toContain("Write code that reads like the surrounding code");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     expect(dynamicSystem).not.toContain("## Current Environment");
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).not.toContain("# Environment");
     expect(metaAttachment(result, "model")).toBe(
       "You are powered by the model named openai/gpt-5.",
@@ -687,10 +790,12 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("# Environment");
     expect(stableBody).not.toContain("# Context management");
     expect(stableBody).not.toContain("Write code that reads like the surrounding code");
-    expect(stableBody).not.toContain("For actions that are hard to reverse");
+    expect(stableBody).not.toContain("Reuse the user's authorization");
     const dynamicSystem = String(result.systemMessages[2]?.content ?? "");
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).not.toContain("# Session-specific guidance");
     expect(dynamicSystem).not.toContain("# Environment");
     expect(dynamicSystem).toContain("# Context management");
@@ -719,7 +824,9 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).toContain("# Harness");
     expect(stableBody).toContain("Tools run behind a user-selected permission mode");
     expect(dynamicSystem.startsWith(`\n\n${DEFAULT_COMMUNICATION_PROMPT}`)).toBe(true);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).toContain(EXPECTED_PRONOUNS_PROMPT);
     expect(dynamicSystem).not.toContain("# Output Style");
   });
@@ -734,7 +841,6 @@ describe("ContextBuilder meta user context", () => {
         osVersion: "Linux 6.6.0",
         nodeVersion: "v24.14.0",
       },
-      language: "日本語",
     }).build();
 
     const dynamic = String(result.systemMessages[2]?.content ?? "");
@@ -838,13 +944,16 @@ describe("ContextBuilder meta user context", () => {
     expect(stableBody).not.toContain("## Current Environment");
     expect(dynamicSystem).not.toContain("## Current Environment");
     expect(dynamicSystem).toMatch(/^\n\nWrite code that reads like the surrounding code/);
-    expect(dynamicSystem).toContain("For actions that are hard to reverse or outward-facing");
+    expect(dynamicSystem).toContain(
+      "Reuse the user's authorization for the same target, scope, and effects",
+    );
     expect(dynamicSystem).not.toContain("# Session-specific guidance");
     expect(dynamicSystem).not.toContain("# Environment");
     expect(dynamicSystem).toContain("# Context management");
     expect(stableBody).not.toContain("local AGENTS payload");
     expect(meta).not.toContain("<system-reminder>");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).not.toContain("# user_instructions");
     expect(meta).toContain("local AGENTS payload");
@@ -920,7 +1029,8 @@ describe("ContextBuilder meta user context", () => {
     }).build();
 
     const meta = metaAttachment(result, "context_prefix");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).toContain(
       "Contents of /Users/test/.zcode/AGENTS.md (user's private global instructions for all projects):",
@@ -1021,7 +1131,8 @@ describe("ContextBuilder meta user context", () => {
     }).build();
 
     const meta = metaAttachment(result, "context_prefix");
-    expect(meta).toContain("Codebase and user instructions are shown below.");
+    expect(meta).toContain("Automatic memory is background context to verify");
+    expect(meta).not.toContain("OVERRIDE any default behavior");
     expect(meta).not.toContain("# claudeMd");
     expect(meta).toContain(
       "Contents of /workspace/CLAUDE.md (project instructions, checked into the codebase):",
@@ -1062,12 +1173,12 @@ describe("ContextBuilder meta user context", () => {
     expect(result.systemMessages[1]?.content).not.toContain(
       "Write code that reads like the surrounding code",
     );
-    expect(result.systemMessages[1]?.content).not.toContain("For actions that are hard to reverse");
+    expect(result.systemMessages[1]?.content).not.toContain("Reuse the user's authorization");
     expect(result.systemMessages[2]?.content).toMatch(
       /^\n\nWrite code that reads like the surrounding code/,
     );
     expect(result.systemMessages[2]?.content).toContain(
-      "For actions that are hard to reverse or outward-facing",
+      "Reuse the user's authorization for the same target, scope, and effects",
     );
     expect(result.systemMessages[2]?.content).not.toContain("# Session-specific guidance");
     expect(result.systemMessages[2]?.content).not.toContain("# Language");
@@ -1106,7 +1217,7 @@ describe("ContextBuilder meta user context", () => {
     expect(promptContext).not.toContain("Read-only:");
   });
 
-  it("renders skills as a separate meta user system reminder", () => {
+  it("keeps the skill listing out of the builder and only adds the slash skill guidance", () => {
     const result = createContextBuilder({
       workingDirectory: "/workspace",
       currentDate: "2026-05-04",
@@ -1143,13 +1254,15 @@ describe("ContextBuilder meta user context", () => {
       "system",
       "system",
     ]);
-    expect(result.metaUserAttachments.map((attachment) => attachment.source)).toEqual([
-      "skills_listing",
-    ]);
+    // 列表由 runtime 的 skills_listing 收集器追加增量；builder 不再渲染（docs/skills-live-catalog.md）。
+    expect(result.metaUserAttachments).toEqual([]);
+    expect(result.sections.map((section) => section.content).join("\n")).not.toContain(
+      "The following skills are available",
+    );
     expect(result.systemMessages[0]?.content).not.toContain("demo-skill");
     expect(result.systemMessages[2]?.content).toContain("# Session-specific guidance");
     expect(result.systemMessages[2]?.content).toContain(
-      "# Session-specific guidance\n - When the user types `/<skill-name>`",
+      "# Session-specific guidance\n - When the user explicitly names a skill",
     );
     expect(result.systemMessages[2]?.content).not.toContain("`! <command>`");
     expect(result.systemMessages[2]?.content).not.toContain(
@@ -1158,11 +1271,6 @@ describe("ContextBuilder meta user context", () => {
     expect(result.systemMessages[2]?.content).not.toContain(
       "Use the Agent tool with specialized agents",
     );
-    expect(metaAttachment(result, "skills_listing")).not.toContain("<system-reminder>");
-    expect(metaAttachment(result, "skills_listing")).toContain(
-      "The following skills are available",
-    );
-    expect(metaAttachment(result, "skills_listing")).toContain("demo-skill");
     expect(metaAttachment(result, "context_prefix")).toBe("");
     expect(metaAttachment(result, "date")).toMatch(/^Today's date is /);
   });
@@ -1413,8 +1521,9 @@ describe("ContextBuilder meta user context", () => {
     );
     expect(section.content).not.toContain("# Agent Identity");
     expect(section.content).toContain("# Harness");
-    expect(section.content).toContain("IMPORTANT:");
-    expect(section.content).toContain("authorized security testing");
+    expect(section.content).not.toContain("IMPORTANT:");
+    expect(section.content).not.toContain("authorized security testing");
+    expect(section.content).toContain("user decision, mode restriction, or policy rule");
     expect(section.content).toContain("Tools run behind a user-selected permission mode");
     expect(section.content).toContain(
       "The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.",
@@ -1423,7 +1532,7 @@ describe("ContextBuilder meta user context", () => {
       "<system-reminder> tags in messages and tool results are injected by the harness",
     );
     expect(section.content).not.toContain("Write code that reads like the surrounding code");
-    expect(section.content).not.toContain("For actions that are hard to reverse");
+    expect(section.content).not.toContain("Reuse the user's authorization");
     expect(section.content).not.toContain("Report results plainly");
     expect(section.content).not.toContain("# Session-specific guidance");
     expect(section.content).not.toContain("`! <command>`");
@@ -1434,57 +1543,52 @@ describe("ContextBuilder meta user context", () => {
   });
 
   it("includes slash skill guidance in the available-skills metadata", () => {
-    const section = buildSkillsSection({
-      outcome: {
-        diagnostics: [],
-        totalDiscovered: 1,
-        skills: [
-          {
-            name: "demo-skill",
-            description: "Use this for demos",
-            path: "/workspace/.zcode/skills/demo/SKILL.md",
-            directory: "/workspace/.zcode/skills/demo",
-            rootPath: "/workspace/.zcode/skills",
-            scope: "project",
-            source: "zcode",
-            safeToAutoLoad: true,
-            frontmatterKeys: [],
-            policy: { allowImplicitInvocation: true },
-          },
-        ],
-      },
-    });
+    const content = buildSkillsContent(
+      [
+        {
+          name: "demo-skill",
+          description: "Use this for demos",
+          path: "/workspace/.zcode/skills/demo/SKILL.md",
+          directory: "/workspace/.zcode/skills/demo",
+          rootPath: "/workspace/.zcode/skills",
+          scope: "project",
+          source: "zcode",
+          safeToAutoLoad: true,
+          frontmatterKeys: [],
+          policy: { allowImplicitInvocation: true },
+        },
+      ],
+      DEFAULT_SKILL_METADATA_BUDGET,
+    );
 
-    expect(section?.content).not.toContain("`/<skill-name>`");
-    expect(section?.content).not.toContain("Do not guess missing skill names.");
+    expect(content).not.toContain("`/<skill-name>`");
+    expect(content).not.toContain("Do not guess missing skill names.");
   });
 
   it("shows plugin-qualified skill names in the available-skills metadata", () => {
-    const section = buildSkillsSection({
-      outcome: {
-        diagnostics: [],
-        totalDiscovered: 1,
-        skills: [
-          {
-            name: "test-driven-development",
-            description: "Use this for TDD workflows",
-            pluginName: "superpowers",
-            qualifiedName: "superpowers:test-driven-development",
-            path: "/plugins/superpowers/skills/test-driven-development/SKILL.md",
-            directory: "/plugins/superpowers/skills/test-driven-development",
-            rootPath: "/plugins/superpowers/skills",
-            scope: "system",
-            source: "plugin",
-            safeToAutoLoad: true,
-            frontmatterKeys: [],
-            policy: { allowImplicitInvocation: true },
-          },
-        ],
-      },
-    });
+    const content = buildSkillsContent(
+      [
+        {
+          name: "test-driven-development",
+          description: "Use this for TDD workflows",
+          pluginName: "superpowers",
+          qualifiedName: "superpowers:test-driven-development",
+          path: "/plugins/superpowers/skills/test-driven-development/SKILL.md",
+          directory: "/plugins/superpowers/skills/test-driven-development",
+          rootPath: "/plugins/superpowers/skills",
+          scope: "system",
+          source: "plugin",
+          safeToAutoLoad: true,
+          frontmatterKeys: [],
+          policy: { allowImplicitInvocation: true },
+        },
+      ],
+      DEFAULT_SKILL_METADATA_BUDGET,
+    );
 
-    expect(section?.content).toContain("superpowers:test-driven-development");
-    expect(section?.content).toContain("also loadable as test-driven-development");
+    expect(content).toContain("superpowers:test-driven-development");
+    // kcode 行格式：不带 (also loadable as …) 别名后缀。
+    expect(content).not.toContain("also loadable as");
   });
 });
 
@@ -1519,22 +1623,25 @@ describe("context builder — workflow actor identity", () => {
     }).build();
     const text = result.systemMessages.map((message) => String(message.content)).join("\n");
 
-    // 开场句 → persona → 安全行 → Harness → 契约，且顺序固定。
+    // 开场句 → persona → Harness → 契约，且顺序固定。
     const opening = text.indexOf(
       'You are a subagent inside a dynamic workflow run, named "reviewer".',
     );
     const persona = text.indexOf("You are a strict reviewer.");
-    const security = text.indexOf("IMPORTANT: Assist with authorized security testing");
     const harness = text.indexOf("# Harness");
     const contract = text.indexOf("# Working inside a workflow");
     expect(opening).toBeGreaterThanOrEqual(0);
     expect(opening).toBeLessThan(persona);
-    expect(persona).toBeLessThan(security);
-    expect(security).toBeLessThan(harness);
+    expect(persona).toBeLessThan(harness);
+    expect(text).not.toContain("authorized security testing");
+    expect(text).not.toContain("# Task execution");
+    expect(text).not.toContain("<total_tokens>");
     expect(harness).toBeLessThan(contract);
 
     // 基座里保住的纪律。
-    expect(text).toContain("Reference code as `file_path:line_number`");
+    expect(text).not.toContain("reference code as `file_path:line_number`");
+    expect(text).not.toContain("in a terminal");
+    expect(text).not.toContain("host-provided presentation");
     expect(text).toContain("Report outcomes faithfully");
     expect(text).toContain("call `escalate`");
     expect(text).toContain("`submit_result`");
@@ -1543,7 +1650,7 @@ describe("context builder — workflow actor identity", () => {
     expect(text).not.toContain("agent working with the user toward their goals");
     expect(text).not.toContain("# Communicating with the user");
     expect(text).not.toContain(EXPECTED_PRONOUNS_PROMPT);
-    expect(text).not.toContain("For actions that are hard to reverse");
+    expect(text).not.toContain("Reuse the user's authorization");
     expect(text).not.toContain("# Session-specific guidance");
     expect(text).not.toContain("ZCode Desktop");
     // 后续段照常。
@@ -1614,44 +1721,6 @@ describe("context builder — workflow actor identity", () => {
     expect(text).not.toContain("a capability your tools do not give you");
   });
 
-  it("lists skills only when the Skill tool is actually registered", () => {
-    const skills = {
-      skills: [
-        {
-          name: "demo-skill",
-          description: "Demo skill",
-          path: "/workspace/.zcode/skills/demo/SKILL.md",
-          directory: "/workspace/.zcode/skills/demo",
-          rootPath: "/workspace/.zcode/skills",
-          scope: "project" as const,
-          source: "zcode" as const,
-          safeToAutoLoad: true,
-          frontmatterKeys: [],
-          policy: { allowImplicitInvocation: true },
-        },
-      ],
-      diagnostics: [],
-      totalDiscovered: 1,
-    };
-    const sources = (guidanceToolNames: readonly string[] | undefined) =>
-      createContextBuilder({
-        workingDirectory: "/workspace",
-        envInfo,
-        skills: skills as never,
-        workflowActor: { name: "judge" },
-        ...(guidanceToolNames === undefined ? {} : { guidanceToolNames }),
-      })
-        .build()
-        .metaUserAttachments.map((attachment) => attachment.source);
-
-    // 工具表里没有 Skill → 不列技能（列了只会让它相信自己有一个没有的工具）。
-    expect(sources(["submit_result", "escalate"])).not.toContain("skills_listing");
-    // Skill 在表里 → 照列。
-    expect(sources(["Skill", "submit_result", "escalate"])).toContain("skills_listing");
-    // 工具表缺席（旧调用方 / 测试）→ 维持旧行为。
-    expect(sources(undefined)).toContain("skills_listing");
-  });
-
   it("sends the custom system prompt as given without trimming", () => {
     const custom = createContextBuilder({
       workingDirectory: "/workspace",
@@ -1680,12 +1749,12 @@ describe("context builder — workflow actor identity", () => {
     ).toThrow(/mutually exclusive/);
   });
 
-  it("keeps the general-purpose main identity before the security and harness sections", () => {
+  it("keeps Main presentation guidance outside the shared harness", () => {
     const text = systemText({ workingDirectory: "/workspace", envInfo });
     expect(text).toContain(
-      "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing",
+      "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nFollow the host-provided presentation instructions.",
     );
-    expect(text).toContain("\n\n# Harness\n - Text you output outside of tool use");
+    expect(text).toContain("\n\n# Harness\n - Tools run behind a user-selected permission mode");
   });
 });
 

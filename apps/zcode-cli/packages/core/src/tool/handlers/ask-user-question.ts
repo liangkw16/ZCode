@@ -17,9 +17,15 @@ import type { ToolEntry, ToolHandler } from "../types.js";
 
 const MAX_ASK_USER_QUESTION_MODEL_BYTES = 100_000;
 
+// 空/部分答案只结束本次交互，不能把未答的必要决策或操作授权补成默认同意。
+const UNANSWERED_QUESTION_GUIDANCE =
+  "Unanswered questions do not create user preferences or authorization. Continue independent work; keep necessary unanswered decisions unresolved and pause only actions that depend on them. Optional choices may use reasonable defaults within the existing authorization. If the user explicitly delegated a decision to your judgment, proceed within that scope without asking again.";
+
 const ASK_USER_QUESTION_DESCRIPTION =
   [
     "Use this tool only when you are blocked on a decision that is genuinely the user's to make: one you cannot resolve from the request, the code, or sensible defaults.",
+    "Do not ask again for decisions already made or defaults the user has authorized you to choose. Do not turn optional clarification into a mandatory pause: use a reasonable default within the existing scope and briefly explain it when useful.",
+    UNANSWERED_QUESTION_GUIDANCE,
     "",
     "Usage notes:",
     '- Users will always be able to select "Other" to provide custom text input',
@@ -131,7 +137,7 @@ export const askUserQuestionToolEntry: ToolEntry = {
 function formatAskUserQuestionModelContent(output: unknown): string {
   const result = output as AskUserQuestionOutput;
   if (Object.keys(result.answers).length === 0) {
-    return "The user did not provide answers to these questions. Continue using your best judgment; do not treat this as a rejection or invent a user preference.";
+    return `The user did not provide answers to these questions. Skipping is not a rejection. ${UNANSWERED_QUESTION_GUIDANCE}`;
   }
   const answersText = Object.entries(result.answers)
     .map(([questionText, answer]) => {
@@ -151,8 +157,8 @@ function formatAskUserQuestionModelContent(output: unknown): string {
     (question) => !(question.question in result.answers),
   ).length;
   if (unansweredCount > 0) {
-    return `The user answered some questions and skipped ${unansweredCount}. Provided answers: ${answersText}. Continue with the provided answers and use your best judgment for the unanswered questions; do not invent user preferences.`;
+    return `The user answered some questions and skipped ${unansweredCount}. Provided answers: ${answersText}. ${UNANSWERED_QUESTION_GUIDANCE}`;
   }
 
-  return `User has answered your questions: ${answersText}. You can now continue with the user's answers in mind.`;
+  return `User has answered your questions: ${answersText}. Continue within these answers and the existing authorization; answering questions does not approve unrelated actions or replace Plan approval.`;
 }

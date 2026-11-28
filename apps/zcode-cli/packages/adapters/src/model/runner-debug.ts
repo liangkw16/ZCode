@@ -10,6 +10,9 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ModelTextResult } from "@zcode/contracts";
+// 修复原因：模型 IO 落盘目录硬编码 ".zcode"，kcode 构建下会把请求/响应写进 ZCode 的目录
+// （而轨迹读取和导出日志按 segment 读 ~/.kcode）。走窄入口，不拉 contracts 桶文件。
+import { ZCODE_DATA_DIR_SEGMENT } from "@zcode/contracts/path";
 import { ZCODE_RUNTIME_ENV_KEY, normalizeZCodeRuntimeEnv } from "@zcode/shared";
 import { redactAnthropicRequestMetadata } from "./anthropic-request-metadata.js";
 import type { EnvRecord } from "./model-execution.js";
@@ -585,9 +588,10 @@ function sanitizeFileSegment(value?: string): string {
 }
 
 // storage profile 回滚删除了自定义 CLI 根模块，遗留 import 会让 adapters 无法构建。
-// 这里保持历史语义：开发态写 ~/.zcode/cli/debug，生产态写 ~/.zcode/cli/rollout。
+// 这里保持历史语义：开发态写 ~/<segment>/cli/debug，生产态写 ~/<segment>/cli/rollout，
+// segment 随产品（.zcode | .kcode）。
 function getModelIOBaseDir(isDev: boolean): string {
-  return join(homedir(), ".zcode", "cli", isDev ? "debug" : "rollout");
+  return join(homedir(), ZCODE_DATA_DIR_SEGMENT, "cli", isDev ? "debug" : "rollout");
 }
 
 function stringifyDebugRecord(record: Record<string, unknown>): string {

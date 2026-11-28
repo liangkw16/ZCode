@@ -1,10 +1,1 @@
-export function createPipSessionClient(_options) {
-  return {
-    enabled: false,
-    async connect() {},
-    async send() {
-      return { applied: false };
-    },
-    close() {},
-  };
-}
+export { createPipSessionClient } from "./dist/adapters/pip-client.js";

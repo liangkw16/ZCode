@@ -27,6 +27,36 @@ describe("AI SDK tool result media projection", () => {
     ]);
   });
 
+  it("keeps an ordinary tool result that merely mentions frame_id or image_ref", () => {
+    // 修复回归：凭据检测曾按裸词命中。Grep / Read 返回提到这两个词的代码或文档时，整条结果会被
+    // 替换成“帧引用不可投递”的报错——包括本仓自己的源码。
+    for (const supportsImages of [true, false]) {
+      const messages = toAiSdkMessages(
+        [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "text",
+                text: [
+                  "    12| export function parseOfficialCuaImageRef(block: unknown) {",
+                  "   225|       image_ref: { frame_id: frameId, width: raster.width },",
+                  "   231|       // The frame_id names one exact raster.",
+                ].join("\n"),
+              },
+            ],
+            toolCallId: "call_read_source",
+            toolName: "Read",
+          },
+        ],
+        { providerKind: "anthropic", supportsImages, stripMedia: !supportsImages },
+      );
+      const output = (messages[0] as any).content[0].output.value;
+      expect(JSON.stringify(output)).toContain("parseOfficialCuaImageRef");
+      expect(JSON.stringify(output)).not.toContain("coordinate frame reference");
+    }
+  });
+
   it("preserves a real Anthropic CUA observation result in order", () => {
     const frameRef = JSON.stringify({
       image_ref: { frame_id: "frame-complete", width: 1, height: 1, actionable: true },

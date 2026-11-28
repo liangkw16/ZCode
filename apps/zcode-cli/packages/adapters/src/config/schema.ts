@@ -227,6 +227,59 @@ const modelAnomalyGuardSchema = z.object({
   maxBudgetWarningsPerTurn: z.number().int().nonnegative().optional(),
 });
 
+// Compact 配置采用 strict + superRefine 的 fail-fast 语义（对齐 DeepSeek Harness
+// 的加载即报错原则）：未知字段与非法组合在配置装载阶段直接拒绝，而不是静默忽略。
+const compactRatioSchema = z.number().finite().gt(0).lt(1);
+const compactMicrocompactSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    thresholdTokens: positiveIntegerSchema.optional(),
+    idleThresholdMinutes: positiveNumberSchema.optional(),
+    keepRecentToolResults: positiveIntegerSchema.optional(),
+    compactableToolNames: z.array(z.string().min(1)).optional(),
+    clearErrorResults: z.boolean().optional(),
+    minTokenSavings: positiveIntegerSchema.optional(),
+  })
+  .strict();
+// 与全局段数值规则完全一致；21K 输出预留上限由 policy 层 min-cap 生效，schema 不重复校验。
+const compactModelOverrideSchema = z
+  .object({
+    contextWindowTokens: positiveIntegerSchema.optional(),
+    bufferTokens: positiveIntegerSchema.optional(),
+    outputReserveTokens: positiveIntegerSchema.optional(),
+    thresholdRatio: compactRatioSchema.optional(),
+  })
+  .strict();
+const compactSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    contextWindowTokens: positiveIntegerSchema.optional(),
+    bufferTokens: positiveIntegerSchema.optional(),
+    outputReserveTokens: positiveIntegerSchema.optional(),
+    thresholdRatio: compactRatioSchema.optional(),
+    keepRecentTokens: positiveIntegerSchema.optional(),
+    keepRecentRounds: positiveIntegerSchema.optional(),
+    summaryMaxOutputTokens: positiveIntegerSchema.optional(),
+    summaryProvider: z.string().min(1).optional(),
+    summaryModel: z.string().min(1).optional(),
+    maxConsecutiveFailures: positiveIntegerSchema.optional(),
+    modelOverrides: z
+      .record(z.string().min(1), z.record(z.string().min(1), compactModelOverrideSchema))
+      .optional(),
+    microcompact: compactMicrocompactSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    // 摘要模型 provider/model 必须成对出现：只写一半无法构造有效的 ModelSelection。
+    if ((value.summaryProvider === undefined) !== (value.summaryModel === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "compact.summaryProvider and compact.summaryModel must be set together",
+        path: value.summaryProvider === undefined ? ["summaryProvider"] : ["summaryModel"],
+      });
+    }
+  });
+
 // Hooks schema：
 // 理想态是 re-export shared/workspace-hook-config，但两个 pnpm workspace 解析出物理
 // 不同的 zod 实例（adapters 4.4.3 / shared 4.3.6）：shared schema 嵌入本包组合 schema
@@ -263,7 +316,11 @@ export const hookCommandSchema = z
 
 export const hookMatcherSchema = z
   .object({
-    matcher: z.string().min(1).optional(),
+    // 旧配置用空串表示无筛选；拒绝空串会让整份用户配置失效。
+    matcher: z
+      .string()
+      .transform((matcher) => matcher || undefined)
+      .optional(),
     hooks: z.array(z.discriminatedUnion("type", [hookProcessSchema, hookCommandSchema])).min(1),
   })
   .strict();
@@ -307,6 +364,7 @@ export const ZCodeConfigFileSchema = z
     toolConcurrency: toolConcurrencySchema.optional(),
     modelAnomalyGuard: modelAnomalyGuardSchema.optional(),
     hooks: hooksSchema.optional(),
+    compact: compactSchema.optional(),
   })
   .passthrough();
 
@@ -319,7 +377,24 @@ const projectConfigFileSchema = ZCodeConfigFileSchema.pick({
   command: true,
 })
   .extend({
-    plugins: pluginsSchema.pick({ enabledPlugins: true, options: true }).optional(),
+    // 插件选项可展开为解释器、命令和环境变量；已安装插件不能替仓库输入建立信任。
+    // 项目级显式设置由用户私有存储提供，仓库 options 连校验也不参与，避免坏值拖垮其它声明。
+    plugins: pluginsSchema
+      .pick({ enabledPlugins: true })
+      .extend({
+        // 项目 plugins.dirs 只是待信任候选，不进入可执行配置（normalizeProjectConfig 再剥离）；
+        // 非法值按缺省处理，不能拖垮同文件的其它声明。
+        dirs: z
+          .preprocess(
+            (value) =>
+              Array.isArray(value)
+                ? value.filter((item) => typeof item === "string" && item.trim().length > 0)
+                : undefined,
+            z.array(z.string()).optional(),
+          )
+          .optional(),
+      })
+      .optional(),
     skills: z
       .preprocess(
         (value) =>
@@ -451,6 +526,7 @@ function parsedConfigFileToRuntimePatch(parsed: ZCodeConfigFile): RuntimeConfigP
   if (parsed.toolConcurrency) config.toolConcurrency = parsed.toolConcurrency;
   if (parsed.modelAnomalyGuard) config.modelAnomalyGuard = parsed.modelAnomalyGuard;
   if (parsed.hooks) config.hooks = parsed.hooks;
+  if (parsed.compact) config.compact = parsed.compact;
 
   return config;
 }

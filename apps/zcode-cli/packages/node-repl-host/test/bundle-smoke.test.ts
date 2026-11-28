@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,11 +270,21 @@ describe("node_repl host and browser-use runtime bundles", () => {
   });
 
   it(
-    "allows a development bundle with an empty helper build id",
+    "identifies an empty-Helper-id bundle by its actual runtime bytes",
     async () => {
       const outfile = join(outputDirectory, "mcp", "server.guard.mjs");
       const devResult = await buildNodeReplHostBundle({ outfile, cuaHelperBuildId: "" });
       expect(devResult.cuaHelperBuildId).toBe("");
+      const identityPath = join(outputDirectory, "build-identity.json");
+      const identity = await readFile(identityPath, "utf8");
+      expect(JSON.parse(identity)).toEqual({
+        cuaHelperBuildId: "",
+        runtimeSha256: createHash("sha256")
+          .update(await readFile(outfile))
+          .digest("hex"),
+      });
+      await buildNodeReplHostBundle({ outfile, cuaHelperBuildId: "" });
+      expect(await readFile(identityPath, "utf8")).toBe(identity);
     },
     buildTimeoutMs,
   );

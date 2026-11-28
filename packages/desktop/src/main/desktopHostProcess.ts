@@ -3,7 +3,7 @@ import {
   createSystemCredentialCipher,
   executeCredentialCipherRequest,
 } from "@zcode/shared/credential-security";
-import { getAppConfigDir } from "@zcode/services/node";
+import { getCredentialsFilePath } from "@zcode/services/node";
 import { ingestToolExecResource } from "./desktopResourceTelemetry.js";
 import { bindAppControlNavigationHost } from "#src/app-control-navigation/main.js";
 import { ingestMcpResourceSamples } from "./processResourceMcpTelemetrySource.js";
@@ -32,6 +32,7 @@ import {
   RUNTIME_ZCODE_DEBUG,
   serializeLaunchMarks,
   ZCODE_DESKTOP_CONTEXT_PROMPT_ENABLED_ENV,
+  ZCODE_DATA_DIR_SEGMENT,
 } from "@zcode/shared";
 import type {
   PluginSandboxHandle,
@@ -98,8 +99,11 @@ export interface HostInitMessage {
   }>;
   agentSpawnFallbackCwd?: string;
   remoteAssets?: RemoteAssetDirs;
+  /** Main 持有的 Agent 回复语言（null 为未设置）；后续变化由 reply-language-changed 推送。 */
+  replyLanguage: string | null;
   /** Main 解析后的 ZCode Built-in Provider Config 路径；Host/Services 不感知 Electron 安装布局。 */
   zcodeBuiltinProviderConfigFilePath: string;
+  /** 构建固定目标，不包含安装状态；本机 Host 用共享纯函数解析记录地址。 */
   /** Main 提前异步采集并过滤的本机 runtime 环境；只允许传给 InitLocal。 */
   runtimeProcessEnvPatch?: Record<string, string>;
 }
@@ -266,9 +270,8 @@ export function spawnHostProcess(
 ): ElectronUtilityProcess {
   const hostId = randomUUID();
   // 系统库只由 Main 访问；路径在 fork 时绑定，Host 不能指定其他凭据目录。
-  const credentialCipher = createSystemCredentialCipher({
-    filePath: join(getAppConfigDir(), "credentials.json"),
-  });
+  // 与 Host 凭据服务共用同一路径解析入口，保证 Main 绑定的 cipher 与 Host 读写的文件一致。
+  const credentialCipher = createSystemCredentialCipher({ filePath: getCredentialsFilePath() });
   const glmBinaryPath = resolveBundledGlmBinaryPath();
   const execArgv = [
     ...(RUNTIME_ZCODE_DEBUG ? [`--inspect-brk=${RUNTIME_ZCODE_DEBUG}`] : []),
@@ -351,9 +354,11 @@ export function spawnHostProcess(
       // 修复原因（ZCT-2120723935487688704）：切换数据存储路径只复制凭据文件，新根缺少系统条目，
       // 重启后掉登录且无法重新登录。Host 只提供数据根；凭据路径由 Main 按 copyDataDirectory 的
       // 目标布局推导，密钥不离开 Main，也不开放对目标目录的加解密。
+      // 修复原因：copyDataDirectory 已按 segment（.zcode | .kcode）落盘，这里仍写死 ".zcode"，
+      // kcode 构建下切换数据目录后凭据文件与密钥条目分属两个目录，重启即掉登录。
       const share = isAbsolute(targetBaseDir)
         ? credentialCipher.shareKeyWithCopiedCredentials(
-            join(targetBaseDir, ".zcode", "v2", "credentials.json"),
+            join(targetBaseDir, ZCODE_DATA_DIR_SEGMENT, "v2", "credentials.json"),
           )
         : Promise.reject(new Error("Data root must be absolute"));
       void share

@@ -420,7 +420,6 @@ describe("lifecycle hook context persistence", () => {
       "reminder environment",
       "reminder model",
       "reminder output_style_instructions",
-      "reminder total_tokens_reminder",
       "reminder output_style",
       "hook UPS:first",
       "reminder date",
@@ -679,8 +678,12 @@ describe("lifecycle hook context persistence", () => {
     const bundle = withContext.bundles.find((messages) =>
       messages.some((message) => message.kind === "compact_summary"),
     );
-    expect(bundle?.at(-1)).toMatchObject({ source: "hook_context" });
-    expect(bundle?.at(-1)?.text).toContain("SS:compact x");
+    expect(bundle?.filter((message) => message.kind !== "timeline_event").at(-1)).toMatchObject({
+      source: "hook_context",
+    });
+    expect(bundle?.filter((message) => message.kind !== "timeline_event").at(-1)?.text).toContain(
+      "SS:compact x",
+    );
     // 压缩后 token 计入了这段上下文（约 2000 token）。
     const [boundaryWith] = await withContext.compactBoundaries(sessionId);
     const [boundaryWithout] = await withoutContext.compactBoundaries(sessionId);

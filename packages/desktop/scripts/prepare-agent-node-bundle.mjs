@@ -22,14 +22,12 @@ import {
   isSharpRequiredByComputerUse,
   stageSharpIntoBundledAgents,
 } from "./sharp-package-assets.mjs";
-import { stageKoffiIntoBundledAgents } from "./koffi-package-assets.mjs";
 import { BUNDLED_NPM_VERSION, stageBundledNpm } from "./bundled-npm-assets.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptDir, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const cliBundlePath = resolve(repoRoot, "apps/zcode-cli/packages/cli/dist/zcode.cjs");
-const adaptersRoot = resolve(repoRoot, "apps/zcode-cli/packages/adapters");
 const pnpmRunEnv = {
   ...process.env,
   // pnpm 11 会在 apps/zcode-cli 子 workspace 执行 run 前触发 install；
@@ -99,6 +97,16 @@ const browserUseRequiredRuntimePaths = [
 ];
 // 文档插件（documents / pdf / presentations / spreadsheets）的查看面板由共享包
 // @zcode/office-runtime 构建进各插件 dist/；插件包自身没有 TypeScript 源码。
+const officeInvocationPaths = [
+  "scripts/zcode_libreoffice.py",
+  "scripts/libreoffice-profile/user/registrymodifications.xcu",
+  "scripts/libreoffice-profile/user/basic/script.xlc",
+  "scripts/libreoffice-profile/user/basic/dialog.xlc",
+  "scripts/libreoffice-profile/user/basic/Standard/script.xlb",
+  "scripts/libreoffice-profile/user/basic/Standard/dialog.xlb",
+  "scripts/libreoffice-profile/user/basic/Standard/ZCode.xba",
+];
+
 const officeViewerRuntimePaths = ["dist/server.mjs", "dist/ui/assets.json", "dist/ui/panel.html"];
 const officialPluginPackages = [
   {
@@ -115,9 +123,9 @@ const officialPluginPackages = [
     requiresRuntime: true,
     requiredRuntimePaths: officeViewerRuntimePaths,
     requiredSeedPaths: [
-      "agents/visual-judge.md",
       "skills/docx/SKILL.md",
       "skills/docx-viewer/SKILL.md",
+      ...officeInvocationPaths,
     ],
     runtimeBuildScript: "../office-runtime/scripts/build.mjs",
     stagedPath: "packages/documents-plugin",
@@ -135,9 +143,9 @@ const officialPluginPackages = [
     requiresRuntime: true,
     requiredRuntimePaths: officeViewerRuntimePaths,
     requiredSeedPaths: [
-      "agents/visual-judge.md",
       "skills/pdf/SKILL.md",
       "skills/pdf-viewer/SKILL.md",
+      ...officeInvocationPaths,
     ],
     runtimeBuildScript: "../office-runtime/scripts/build.mjs",
     stagedPath: "packages/pdf-plugin",
@@ -148,9 +156,9 @@ const officialPluginPackages = [
     requiresRuntime: true,
     requiredRuntimePaths: officeViewerRuntimePaths,
     requiredSeedPaths: [
-      "agents/visual-judge.md",
       "skills/pptx/SKILL.md",
       "skills/pptx-viewer/SKILL.md",
+      ...officeInvocationPaths,
     ],
     runtimeBuildScript: "../office-runtime/scripts/build.mjs",
     stagedPath: "packages/presentations-plugin",
@@ -161,9 +169,9 @@ const officialPluginPackages = [
     requiresRuntime: true,
     requiredRuntimePaths: officeViewerRuntimePaths,
     requiredSeedPaths: [
-      "agents/visual-judge.md",
       "skills/xlsx/SKILL.md",
       "skills/xlsx-viewer/SKILL.md",
+      ...officeInvocationPaths,
     ],
     runtimeBuildScript: "../office-runtime/scripts/build.mjs",
     stagedPath: "packages/spreadsheets-plugin",
@@ -284,17 +292,24 @@ const officialPluginPackages = [
     requiresRuntime: false,
     requiredSeedPaths: [
       "skills/design/SKILL.md",
+      "skills/design/references/app.md",
       "skills/design/references/catalog.md",
       "skills/design/references/check.md",
       "skills/design/references/create.md",
+      "skills/design/references/deck.md",
       "skills/design/references/design-system.md",
+      "skills/design/references/image.md",
       "skills/design/references/interact.md",
-      "skills/design/references/output.md",
+      "skills/design/references/motion.md",
+      "skills/design/references/page.md",
       "skills/design/references/redesign.md",
       "skills/design/scripts/adapt-canvas.mjs",
+      "skills/design/scripts/audit-page.js",
+      "skills/design/scripts/audit.mjs",
       "skills/design/scripts/design-lint.mjs",
       "skills/design/scripts/design-tokens.mjs",
       "skills/design/scripts/import-design-system.mjs",
+      "skills/design/scripts/probe.js",
       "hooks/hooks.json",
       "hooks/run-hook.cmd",
       "hooks/design-rules",
@@ -517,22 +532,6 @@ function stageSharpForNodeReplPlugin() {
   }
 }
 
-function stageKoffiForCuaPlugin() {
-  const cuaPluginStagedDir = resolve(glmDir, "packages", "zcode-cua-plugin");
-  if (!existsSync(resolve(cuaPluginStagedDir, ".zcode-plugin", "plugin.json"))) {
-    console.log("[prepare:agent-bundle] zcode-cua-plugin not staged, skip koffi staging");
-    return;
-  }
-  stageKoffiIntoBundledAgents({
-    koffiPackageRoot: adaptersRoot,
-    glmDir: cuaPluginStagedDir,
-    targetPlatform: { os: platform, arch },
-  });
-  console.log(
-    `[prepare:agent-bundle] staged koffi into ${resolve(cuaPluginStagedDir, "node_modules")} (${platform}-${arch})`,
-  );
-}
-
 // 修复原因：Electron 生产包只带 resources/glm/zcode.cjs 时，app-server 进程的
 // __dirname 附近没有官方插件目录，启动时 seed 找不到 source，用户侧不会自动得到内置插件。
 // 这里把官方插件按 bootstrap 的 rootCandidates 期望放到 glm/packages/*-plugin，
@@ -545,5 +544,5 @@ await stageBundle();
 stageOfficialPlugins();
 stageBundledSkillPack();
 await stageBundledNpmRuntime();
-stageKoffiForCuaPlugin();
+
 stageSharpForNodeReplPlugin();

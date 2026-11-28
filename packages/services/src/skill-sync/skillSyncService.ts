@@ -3,7 +3,7 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { SKILL_DATA_SYNC_MAX_ITEM_BYTES } from "@zcode/shared";
+import { SKILL_DATA_SYNC_MAX_ITEM_BYTES, ZCODE_DATA_DIR_SEGMENT } from "@zcode/shared";
 import type { ISkillSyncService } from "./skillSync.js";
 import {
   MAX_SKILL_SCAN_DEPTH,
@@ -34,7 +34,7 @@ export function resolveUserHomeDir(): string {
 }
 
 export function getUserZcodeSkillRoot(): string {
-  return join(resolveUserHomeDir(), ".zcode", "skills");
+  return join(resolveUserHomeDir(), ZCODE_DATA_DIR_SEGMENT, "skills");
 }
 
 function getUserAgentsSkillRoot(): string {
@@ -120,9 +120,11 @@ async function collectCoveredSkillDirectoryNamesInRoot(root: string): Promise<Se
   if (!existsSync(root)) {
     return directoryNames;
   }
-  const stack: Array<{ directoryPath: string; relativePath: string; depth: number }> = [
-    { directoryPath: root, relativePath: "", depth: 0 },
-  ];
+  const stack: Array<{
+    directoryPath: string;
+    relativePath: string;
+    depth: number;
+  }> = [{ directoryPath: root, relativePath: "", depth: 0 }];
 
   while (stack.length > 0) {
     const current = stack.pop();

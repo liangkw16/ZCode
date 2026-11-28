@@ -34,7 +34,7 @@ import {
   findMissingMacElectronLocales,
   resolveMacElectronFrameworkResourcesDir,
 } from "./scripts/mac-electron-locales.mjs";
-import { verifyStagedKoffi } from "./scripts/koffi-package-assets.mjs";
+
 import {
   finalizePackagedWindowsCuaHelper,
   resolveElectronBuilderWindowsTarget,
@@ -74,8 +74,14 @@ const shouldEnableMacSigning =
 const workspaceRoot = resolve(import.meta.dirname, "../..");
 const desktopPackageRoot = import.meta.dirname;
 // Computer Use Helper（macOS .app、Windows runtime）只随真实 producer 打包；开源占位包下跳过随包资源与校验。
-const shouldPackageComputerUseHelper = isRealComputerUseProducerInstalled({ desktopPackageRoot });
+const shouldPackageComputerUseHelper = isRealComputerUseProducerInstalled({
+  desktopPackageRoot,
+  platform: targetPlatform.os,
+});
 const HELPER_FILENAME = "zcode-browser-import-helper.exe";
+// 预装工具的 Windows 入口 shim 会被复制到用户的预装 bin 目录，由 Agent 直接运行，必须与 App 同一签名。
+const PREINSTALLED_ENTRY_SHIM = "preinstalled-entry-shim/zcode-preinstalled-entry-shim.exe";
+const BROWSER_IMPORT_HELPER = `browser-import/${HELPER_FILENAME}`;
 const runtimeModuleLookupRoots = [
   desktopPackageRoot,
   workspaceRoot,
@@ -84,9 +90,9 @@ const runtimeModuleLookupRoots = [
 ];
 const desktopDistDir = process.env.ZCODE_DESKTOP_DIST_DIR || "dist";
 const bundledCuaHelperSource = resolve(
-  desktopPackageRoot,
-  "bundled-cua-helper",
-  targetPlatform.arch,
+  workspaceRoot,
+  "packages/zcode-cua/dist/native",
+  `darwin-${targetPlatform.arch}`,
   HELPER_APP_NAME,
 );
 const DEFAULT_ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/";
@@ -543,18 +549,6 @@ function assertPackagedCuaSharp(context) {
   }
 }
 
-function assertPackagedCuaKoffi(context) {
-  const problems = verifyStagedKoffi({
-    resourcesDir: resolvePackagedResourcesDir(context),
-    targetPlatform,
-  });
-  if (problems.length > 0) {
-    throw new Error(
-      `CUA plugin koffi runtime is incomplete in the packaged app:\n- ${problems.join("\n- ")}`,
-    );
-  }
-}
-
 function assertSignedWindowsHelper(context, relativeHelperPath) {
   if (context.electronPlatformName !== "win32" || !shouldEnableWindowsVsign) return;
   const helperPath = resolve(context.appOutDir, "resources", relativeHelperPath);
@@ -767,7 +761,6 @@ export default {
       assertPackagedNodePtyPrebuild(context),
     );
     runTimedSync("afterPack:assertPackagedCuaSharp", () => assertPackagedCuaSharp(context));
-    runTimedSync("afterPack:assertPackagedCuaKoffi", () => assertPackagedCuaKoffi(context));
     runTimedSync("afterPack:assertPackagedCuaHelper", () => assertPackagedCuaHelper(context));
     runTimedSync("afterPack:assertPackagedMacElectronLocales", () =>
       assertPackagedMacElectronLocales(context),
@@ -795,7 +788,17 @@ export default {
     }
     if (shouldPackageWindowsBrowserImportHelper) {
       runTimedSync("afterPack:signWindowsBrowserImportHelper", () =>
-        signWindowsHelper(context, `browser-import/${HELPER_FILENAME}`),
+        signWindowsHelper(context, BROWSER_IMPORT_HELPER),
+      );
+    }
+    if (targetPlatform.os === "win32") {
+      // extraResources 缺源文件时 electron-builder 不报错；没有 shim，Windows 预装入口全部无法写入。
+      const shimPath = resolve(context.appOutDir, "resources", PREINSTALLED_ENTRY_SHIM);
+      if (!existsSync(shimPath)) {
+        throw new Error(`Preinstalled entry shim is missing in the packaged app: ${shimPath}`);
+      }
+      runTimedSync("afterPack:signPreinstalledEntryShim", () =>
+        signWindowsHelper(context, PREINSTALLED_ENTRY_SHIM),
       );
     }
   },
@@ -803,10 +806,13 @@ export default {
     if (context.electronPlatformName === "win32") {
       assertSignedWindowsHelper(context, "tools/runtime-host/zcode-runtime-host.exe");
       assertSignedWindowsHelper(context, "tools/runtime-host/zcode-installer-process-helper.exe");
+      runTimedSync("afterSign:assertSignedPreinstalledEntryShim", () =>
+        assertSignedWindowsHelper(context, PREINSTALLED_ENTRY_SHIM),
+      );
     }
     if (shouldPackageWindowsBrowserImportHelper) {
       runTimedSync("afterSign:assertSignedWindowsBrowserImportHelper", () =>
-        assertSignedWindowsHelper(context, `browser-import/${HELPER_FILENAME}`),
+        assertSignedWindowsHelper(context, BROWSER_IMPORT_HELPER),
       );
     }
     if (context.electronPlatformName === "win32" && shouldEnableWindowsVsign) {
@@ -864,8 +870,9 @@ export default {
       to: "config/provider/zcode-builtin.json",
     },
     {
-      // 应用图标：打包后放入 resources 目录，主进程通过 process.resourcesPath 加载
-      from: "build/icon.png",
+      // 应用图标：打包后放入 resources 目录，主进程通过 process.resourcesPath 加载。
+      // KCode 档换用专属图标资源，避免并排安装时与 ZCode 共用同一张图。
+      from: desktopProductIdentity.resourceIconPath,
       to: "icon.png",
     },
     ...(targetPlatform.os === "linux"
@@ -889,6 +896,15 @@ export default {
             // 这里不复用窗口 PNG，避免通知区域在高 DPI 下退化成模糊缩放图。
             from: "build/icon.ico",
             to: "tray_icon.ico",
+          },
+        ]
+      : []),
+    ...(targetPlatform.os === "win32"
+      ? [
+          {
+            // 预装工具入口 shim；Main 按 process.resourcesPath 解析后交给预装进程。
+            from: `bundled-tools/${targetPlatform.key}/preinstalled-entry-shim/zcode-preinstalled-entry-shim.exe`,
+            to: PREINSTALLED_ENTRY_SHIM,
           },
         ]
       : []),
@@ -951,6 +967,9 @@ export default {
     target: ["dmg", "zip"],
     category: "public.app-category.developer-tools",
     artifactName: buildDesktopArtifactName("mac"),
+    // 图标随身份走：KCode 用 build/kcode/icon.icns，production/preview 显式指回默认值（与
+    // electron-builder 的默认解析结果一致），保证非 kcode 构建产物零变化。
+    icon: desktopProductIdentity.macIconPath,
     // macOS 语言包是 en.lproj / zh_CN.lproj，沿用顶层 "en-US" 会一个都匹配不上被全部删掉，
     // Chromium 自带文案随之丢失（视频控件菜单只剩图标、播放速度子菜单空白）。
     electronLanguages: MAC_ELECTRON_LANGUAGES,

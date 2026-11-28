@@ -195,11 +195,19 @@ stop_computer_control({reason?})
   clamped to 0–100.
 - `text_range` — `[start, length]` into the element's current value. `select_text`
   without it selects the whole value.
-- `strategy` — `auto | a11y | event`. `auto` prefers accessibility and falls back
-  to synthetic events; the other two force one path. `event` sends global input and
+- `strategy` — `auto | a11y | event`, accepted by `left_click`, `left_click_drag`,
+  `scroll`, `type`, `key` and `set_value`. `auto` prefers accessibility and falls
+  back to synthetic events; the other two force one path and are refused, with
+  nothing sent, when the action has no such path. `a11y` serves `left_click`,
+  `scroll` and `set_value` on an element; `event` serves `left_click`,
+  `left_click_drag`, `scroll`, `type` and `key`. `event` sends global input and
   requires the target app (and `window_id`, when given) to be frontmost already —
   it never activates anything, so on a background app it is refused with
   `FOREGROUND_REQUIRED` and nothing is sent. Target an element instead.
+- `get_app_state` captures a raster only when `include_screenshot` is `true`. A
+  tree-only observation neither creates a new frame nor withdraws an earlier one
+  that is still valid; a coordinate target binds to the session's latest
+  actionable raster.
 - `return_state` — `compact | full | none` (default `none`). Returns the app state
   in the same call, saving a separate observation. The bound API does its own
   observing, so this only matters when you call a tool directly.
@@ -212,17 +220,16 @@ stop_computer_control({reason?})
 ## Tool results
 
 The bound API returns typed values. `computer.*` instead hands back what the tool
-itself produced, after one unwrapping step, so a call resolves to one of three
-shapes:
+itself produced after unwrapping. A separate JSON block that mirrors the producer's
+compact structured metadata is ignored for this step. The metadata remains in the
+host output. A call resolves to one of three shapes.
 
 - **The parsed payload.** A result carrying exactly one text block is
   `JSON.parse`d for you, so you get the tool's own shape with no `content` to
   walk. `list_apps` and `list_windows` land here.
 - **A plain string.** The same single-text-block result, when its text is not
   JSON. `get_app_state` without a screenshot lands here, so you get the rendered
-  tree and nothing else: the `structuredContent` that carried `state_id` and the
-  element rows does not survive the unwrap. Use a bound app's `elements()` for
-  that table.
+  tree. Use a bound app's `elements()` to access the element table.
 - **The raw MCP envelope,** `{ content: [...] }`. Returned unchanged for anything
   else, most often because `include_screenshot: true` added an image block. Read
   the blocks out of `content`; there is no parsed payload, and the envelope also
@@ -347,6 +354,8 @@ Minimize round trips while keeping the state fresh:
 await target.click(42);
 await target.setValue(42, "example.com");
 await target.pressKey("Return");
+// macOS typeText pastes while the app is frontmost and types key by key into a
+// background app.
 await target.typeText("hello");
 await target.scroll(42, "down", 1);
 await target.scroll([640, 480], "down", 1);
@@ -364,6 +373,17 @@ await target.getAXState();
   `emitImage`: a second raster in one result breaks the one-raster rule and the
   frame is removed entirely, leaving no picture at all. Pass `{ emit: false }` to
   suppress the display and still get the value back.
+
+`getAXState()` returns a **string**, not an MCP content object. To inspect it:
+
+```javascript
+const tree = await app.getAXState({ emit: false, disableDiffing: true });
+const line = tree.split("\n").find((text) => text.includes("Submit"));
+```
+
+Do not read `tree.content`: it is undefined. `getAXStateAndScreenshot()` returns
+`{ state, screenshot? }`; its tree is the string `result.state`.
+
 - Action methods display nothing and resolve to `undefined` on success.
 
 ## Errors
@@ -379,10 +399,12 @@ when they do not. The fields you act on:
   `STRUCTURED_STATE_UNAVAILABLE`, `INTERNAL`.
 - `actionSent` — whether the action may already have reached the app. Retry a
   non-idempotent action only when this is `false`; otherwise observe first.
-- `FOREGROUND_REQUIRED` comes only from `strategy: "event"` (and from `paste` on a
-  background app). On macOS nothing in this surface can bring an app forward, so do
-  not retry it and do not look for an activation call: switch to an element target,
-  `setValue`, or an accessibility action, which all work on a background app.
+- `FOREGROUND_REQUIRED` comes from `strategy: "event"` on a background app, from
+  `paste` on a background app, and from `typeText` on a background app when its
+  first character did not land (that one has `actionSent: true`). On macOS
+  nothing in this surface can bring an app forward, so do not retry it and do not
+  look for an activation call: switch to an element target, `setValue`, or an
+  accessibility action, which all work on a background app.
 - `retry` — `"reobserve"`, `"retry"` or `"never"`.
 
 ```js
@@ -446,6 +468,11 @@ technology after an access refusal.
   pasteboard and restores the user's clipboard afterwards. A paste no app reads
   fails with a timeout rather than reporting success. A paste shortcut cannot name
   a target field, so it lands wherever the keyboard focus is — check the result.
+- On macOS, `typeText` pastes the whole text while the app is frontmost. Into a
+  background app it sends the text one character at a time as key events, and
+  stops after the first character when the focused field did not change — that
+  report has `actionSent: true`, so observe before retrying. A tab moves the
+  focus there, as it does when the user presses it.
 - There is no need to open or launch apps; `agent.computerUse.getApp(...)` launches the app in
   the background if it is not already running. There is no separate launch tool.
   Its argument is a display name, a
@@ -469,3 +496,5 @@ result. If an action leaves the state unchanged, produces no results, or only
 reaches an intermediate page, try another approach. Respond only after the
 requested state is visibly present, or explain a concrete blocker you cannot
 resolve.
+
+On macOS, one scroll page is 80% of the target window’s size on the requested axis. Re-observe the viewport to confirm movement; a successful dispatch alone does not prove it scrolled.

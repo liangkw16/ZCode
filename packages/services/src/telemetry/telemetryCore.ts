@@ -7,6 +7,7 @@ import {
   buildZCodeSourceHeadersFromContext,
   rewriteZCodeEndpointUrl,
   sanitizeTelemetryEventDetail,
+  ZCODE_DATA_DIR_SEGMENT,
   type TelemetryEventPayload,
   type TelemetryRendererContext,
   type OAuthLoginAttribution,
@@ -129,16 +130,18 @@ function toLocalDateKey(timestamp: number, timeZone: string): string {
   return `${year}-${month}-${day}`;
 }
 
+// 修复原因：显式传入 homeDir 时状态文件与锁原先落在硬编码的 "~/.zcode/v2"，kcode 构建下
+// 会和 ZCode 共用同一个遥测设备标识（kcode-full-isolation 设计 §4.1 的 telemetry 设备标识）。
 function resolveTelemetryStateFile(homeDir?: string): string {
   if (homeDir) {
-    return join(homeDir, ".zcode", "v2", "telemetry-state.json");
+    return join(homeDir, ZCODE_DATA_DIR_SEGMENT, "v2", "telemetry-state.json");
   }
   return join(getAppConfigDir(), "telemetry-state.json");
 }
 
 function resolveTelemetryLockFile(homeDir?: string): string {
   if (homeDir) {
-    return join(homeDir, ".zcode", "v2", "telemetry-state.lock");
+    return join(homeDir, ZCODE_DATA_DIR_SEGMENT, "v2", "telemetry-state.lock");
   }
   return join(getAppConfigDir(), "telemetry-state.lock");
 }

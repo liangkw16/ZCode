@@ -24,7 +24,7 @@ const hasComputerUseProducer = isRealComputerUseProducerInstalled({
 const computerUseDevEnv = hasComputerUseProducer ? await resolveComputerUseDevEnv() : {};
 
 async function resolveComputerUseDevEnv() {
-  const { DEV_HELPER_APP_NAME } = await import("@zcode/zcode-cua/broker/helperConstants");
+  const { HELPER_APP_NAME } = await import("@zcode/zcode-cua/broker/helperConstants");
   const sourceBuiltCuaHelperVersion = JSON.parse(
     readFileSync(join(repoRoot, "package.json"), "utf8"),
   ).version;
@@ -34,9 +34,10 @@ async function resolveComputerUseDevEnv() {
   const sourceBuiltCuaHelperApp = join(
     repoRoot,
     "packages",
-    "desktop",
-    "dist-cua-helper",
-    DEV_HELPER_APP_NAME,
+    "zcode-cua",
+    "dist/native",
+    `darwin-${process.arch}`,
+    HELPER_APP_NAME,
   );
   return {
     // Standard dev launch must test the Helper built from this checkout.
@@ -99,10 +100,7 @@ function run(command, args) {
 
 try {
   if (process.platform === "darwin" && hasComputerUseProducer) {
-    await run(process.execPath, [
-      resolve(repoRoot, "scripts/build-cua-helper-app.mjs"),
-      "--allow-unsigned-launcher-local-dev",
-    ]);
+    await run(process.execPath, [resolve(repoRoot, "packages/zcode-cua/scripts/build.mjs")]);
   }
   // The public dev scripts delegate here instead of invoking the package's
   // `dev` lifecycle directly, so pnpm will not run `pre-dev` automatically.

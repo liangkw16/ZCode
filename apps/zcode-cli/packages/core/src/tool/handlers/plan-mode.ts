@@ -49,7 +49,7 @@ export const enterPlanModeHandler: ToolHandler = async (input, context) => {
 
   return {
     message:
-      "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.",
+      "Entered plan mode. Read-only exploration is now active; entering did not require a separate approval prompt.",
     mode: transition.mode,
     previousMode: transition.previousMode,
     planEnabled: transition.planEnabled,
@@ -262,15 +262,11 @@ function formatEnterPlanModeModelContent(output: unknown): string {
   const result = output as EnterPlanModeOutput;
   return `${result.message}
 
-In plan mode, you should:
-1. Thoroughly explore the codebase to understand existing patterns
-2. Identify similar features and architectural approaches
-3. Consider multiple approaches and their trade-offs
-4. Use AskUserQuestion if you need to clarify the approach
-5. Design a concrete implementation strategy
-6. When ready, use ExitPlanMode to present your plan for approval
+Use available read-only tools to understand the request and reuse existing code. Keep planning proportional to the task. Clarify only necessary decisions that the user must supply, using AskUserQuestion if available or asking directly otherwise.
 
-Remember: DO NOT write or edit any files yet. This is a read-only exploration and planning phase.`;
+For an implementation plan ready for approval, pass its complete text in ExitPlanMode.plan if the tool is available. This requests approval even if the previous mode was yolo. If the tool is unavailable, show the plan and explain that plan mode remains active; a text reply does not switch modes. For pure research, return your findings directly without requesting implementation approval.
+
+Do not write or edit files, including spec or plan files, while plan mode is active. A document-writing request does not override this boundary; present the content and explain that the user or host must change modes before writing it.`;
 }
 
 function formatExitPlanModeModelContent(output: unknown): string {

@@ -2,6 +2,8 @@ export {
   buildCompactPrompt,
   buildCompactSummaryMessage,
   formatCompactSummary,
+  hasCompactSummaryBlock,
+  selectCompactSummaryText,
 } from "./prompt.js";
 export {
   COMPACT_PROMPT_TOO_LONG_RETRY_MARKER,
@@ -15,13 +17,14 @@ export {
   hasEnoughMessagesToCompact,
 } from "./manual.js";
 export {
+  MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   AUTOCOMPACT_BUFFER_TOKENS,
   DEFAULT_AUTOCOMPACT_THRESHOLD_PERCENT,
   DEFAULT_AUTOCOMPACT_OUTPUT_RESERVE_TOKENS,
   DEFAULT_COMPACT_CONTEXT_WINDOW,
   MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
-  MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   getAutoCompactOutputReserveTokens,
+  applyCompactModelOverrides,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   shouldAutoCompact,
@@ -42,7 +45,11 @@ export type {
   CompactModelMessage,
   TokenUsageLike,
 } from "./manual.js";
-export type { AutoCompactDecision, AutoCompactPolicyConfig } from "./policy.js";
+export type {
+  AutoCompactDecision,
+  AutoCompactPolicyConfig,
+  CompactModelOverrideResolution,
+} from "./policy.js";
 export type { AutoCompactTokenOverride, AutoCompactTokenSource } from "./policy.js";
 export type {
   LocalMicrocompactBoundaryPayload,

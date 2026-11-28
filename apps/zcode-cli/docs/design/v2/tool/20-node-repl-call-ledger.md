@@ -152,3 +152,37 @@ tools/call 结束 ──▶ ledger 条目关闭：之后带这个 token 的请�
   `zcode/nodeReplBrowserUse`、`zcode/nodeReplComputerUse` 被删除。
 - 真实 Worker 回归（`bundle-smoke.test.ts`）：cell 经 `worker_threads` 冒充结果，带上 `cuaApp`、截图下标、
   `browserUse` / `computerUse` 字段和两个会话能力 key，工具结果里不出现这四个可信 key。
+
+### 调用中断后的 CUA 收尾（2026-11-17）
+
+`node-repl-host` 是每次 cell 已受理 CUA 请求的生命周期所有者；producer runtime 继续独占
+AccessibilitySession、输入保持注册表与动作队列，Helper 继续独占原生输入和 controller lease。
+中断仅关闭 Worker socket 不代表原生动作结束。broker 在 producer 调用上下文之外广播取消，
+由 producer 现有取消回调清理原生输入，等待已受理请求真正结束后才允许下一 cell。
+中断不关闭 runtime session：保留观察状态及输入保持编号，避免重用已取消的原生保持标识。
+```mermaid
+sequenceDiagram
+    participant Q as cell 串行准入
+    participant B as CUA broker
+    participant R as producer runtime
+    participant H as Helper
+    Q->>B: 可信 token / context
+    B->>R: execute(signal)
+    R->>H: 动作（可能已发送）
+    Q->>Q: 取消、超时或 cell 结束，关闭 token
+    Q->>B: finishCall(token)
+    B->>R: abort（producer 调用上下文之外）
+    R->>H: cancel_input_holds（独立连接）
+    H-->>R: 原动作真实结束
+    R-->>B: execute settled（含原生清理）
+    B-->>Q: 允许下一 cell
+```
+
+- broker 按可信 token 跟踪已受理工作；token 关闭后拒绝迟到请求。正常已完成请求无需重置 session。
+- 取消后广播 abort，等待原操作和清理结束，最后释放同一会话的 cell 串行准入；不得用超时冒充清理成功。
+- 不重试 `possibly_sent` 动作，不删除或抢占活跃 Helper lease，不取消其他会话；不改变显式
+  `stop_computer_control` 的停止合同。desktop-continuous 和 web-remote-replayable 共用此收尾，
+  各自原有流投递、owner/lease 与 stale-run 校验保持有效。
+- 验收：已受理输入在取消/超时后通过 producer 取消回调清理；清理和原操作未结束时下一 cell 不得进入；
+  同一会话下一次观察成功；正常调用不中断；取消不重置 session；陈旧 token 拒绝；真实 Helper 中断后可重新观察、
+  操作并截图；真实配置冷启动和安装后真实模型 TextEdit 操作通过。

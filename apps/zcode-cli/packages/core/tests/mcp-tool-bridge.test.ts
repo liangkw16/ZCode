@@ -1,8 +1,11 @@
+import { createMockMcpPort } from "./mcp-runtime-fixture.js";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createRootTraceContext,
   createSessionId,
+  createToolCallId,
+  createTurnId,
   ZCODE_MCP_BROWSER_SCREENSHOT_CONTENT_INDICES_META_KEY,
   ZCODE_MCP_ERROR_PRESENTATION_MESSAGE_ONLY,
   ZCODE_MCP_ERROR_PRESENTATION_META_KEY,
@@ -23,6 +26,8 @@ import {
   MCP_IMAGE_INLINE_RAW_BYTES,
   registerMcpTools,
 } from "../src/mcp/index.js";
+import { PermissionService, defaultPermissionConfig } from "../src/permission/service.js";
+import { createToolExecutor } from "../src/tool/executor.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import type { ToolEntry, ToolExecutionContext } from "../src/tool/types.js";
 import { createTestAgentRuntime } from "./test-agent-runtime.js";
@@ -138,7 +143,14 @@ describe("MCP tool bridge", () => {
     const mcpPort = createMockMcpPort({
       callTool,
       connectConfiguredServers: async () => ({
-        statuses: {},
+        statuses: {
+          [ZCODE_CUA_OFFICIAL_MCP_SERVER_NAME]: {
+            status: "connected",
+            transport: "stdio",
+            toolCount: 1,
+            updatedAt: "now",
+          },
+        },
         tools: [
           {
             serverName: ZCODE_CUA_OFFICIAL_MCP_SERVER_NAME,
@@ -219,7 +231,14 @@ describe("MCP tool bridge", () => {
         eventStore: createTestSessionEventStore(),
         mcpPort: createMockMcpPort({
           connectConfiguredServers: async () => ({
-            statuses: {},
+            statuses: {
+              [ZCODE_CUA_OFFICIAL_MCP_SERVER_NAME]: {
+                status: "connected",
+                transport: "stdio",
+                toolCount: 1,
+                updatedAt: "now",
+              },
+            },
             tools: [
               {
                 serverName: ZCODE_CUA_OFFICIAL_MCP_SERVER_NAME,
@@ -481,6 +500,59 @@ describe("MCP tool bridge", () => {
       expect.objectContaining({ runtimeScope: "subagent" }),
       expect.anything(),
     );
+  });
+
+  it.each([
+    ["matches one oneOf branch", { mode: "read" }, true],
+    ["matches no oneOf branch", { mode: "delete" }, false],
+    ["matches two oneOf branches", { mode: "write" }, false],
+  ])("calls the MCP server only when the input %s next to anyOf", async (_case, input, valid) => {
+    // 同一节点的 anyOf 与 oneOf 都要满足（docs/model-tool-call-validation.md）。工具在 allowedTools 里，
+    // 合法输入能走到 MCP 调用，所以不合法输入没有调用只能是首次校验拒绝的，不是权限拒绝的。
+    const registry = createToolRegistry();
+    const callTool = vi.fn(async () => ({ content: [] }));
+    registerMcpTools(registry, createMockMcpPort({ callTool }), [
+      {
+        serverName: "files",
+        toolName: "open",
+        inputSchema: {
+          type: "object",
+          properties: { mode: { type: "string" } },
+          anyOf: [{ required: ["mode"] }],
+          oneOf: [
+            { properties: { mode: { const: "read" } } },
+            { properties: { mode: { const: "write" } } },
+            { properties: { mode: { enum: ["write", "sync"] } } },
+          ],
+        },
+      },
+    ]);
+    const sessionId = createSessionId("mcp-union-validation");
+    const turnId = createTurnId("mcp-union-turn");
+    const traceContext = createRootTraceContext({ sessionId, turnId });
+    const executor = createToolExecutor({
+      emitEvent: async () => {},
+      permissionService: new PermissionService({
+        ...defaultPermissionConfig,
+        allowedTools: new Set(["mcp__files__open"]),
+      }),
+      registry,
+      sessionId,
+      turnId,
+      traceContext,
+    });
+
+    const result = await executor.execute(
+      { id: createToolCallId("mcp-union-call"), input, name: "mcp__files__open" },
+      { traceContext },
+    );
+
+    expect(callTool).toHaveBeenCalledTimes(valid ? 1 : 0);
+    expect(result.success).toBe(valid);
+    if (!valid) {
+      expect(result.modelContent).toContain("<tool_use_error>InputValidationError:");
+      expect(result.modelContent).toContain('"code": "invalid_union"');
+    }
   });
 
   it("uses the session workspace key instead of the working directory (managed worktree)", async () => {
@@ -883,6 +955,9 @@ describe("MCP tool bridge", () => {
     const registry = createToolRegistry();
     const imageData =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    // 修复原因：上游开源仓库的 frame-contract 是空壳实现，原夹具的 frame_exact_001 能原样通过；
+    // 本仓换成真实契约后 frame_id 必须以 "frame-" 开头，否则按伪造引用拒绝。夹具改成合法 id，
+    // 用例原意（权威帧逐字节保留）不变；规则由 packages/zcode-cua/test/frame-contract.test.ts 钉住。
     const result = {
       content: [
         { type: "image" as const, data: imageData, mimeType: "image/png" },
@@ -891,14 +966,14 @@ describe("MCP tool bridge", () => {
           text: JSON.stringify({
             image_ref: {
               actionable: true,
-              frame_id: "frame_exact_001",
+              frame_id: "frame-exact-001",
               height: 1,
               width: 1,
             },
           }),
         },
       ],
-      _meta: officialCuaIntegrityMeta("frame_exact_001", imageData),
+      _meta: officialCuaIntegrityMeta("frame-exact-001", imageData),
     };
     const callTool = vi.fn(async () => result);
     registerMcpTools(
@@ -1015,7 +1090,10 @@ describe("MCP tool bridge", () => {
 
   it("keeps official CUA receipt normalization out of the bridge budget path", async () => {
     const registry = createToolRegistry();
-    const oversizedState = `state_id=s-2 app=Example\n${"tree-node ".repeat(30_000)}`;
+    // 修复原因：真实 frame 契约把超过 263168 字节的文本按潜在凭据载体 fail-closed（上游空壳实现
+    // 不设此限，原夹具 30_000 次重复约 300 KB 会直接命中）。这里取 256 KiB 到 263168 字节之间：
+    // 仍超出 resultBudget 触发截断路径，又不触发凭据防护，用例原意（receipt 不被预算改写）不变。
+    const oversizedState = `state_id=s-2 app=Example\n${"tree-node ".repeat(26_300)}`;
     const receipt = cuaActionReceipt();
     registerMcpTools(
       registry,
@@ -1049,7 +1127,7 @@ describe("MCP tool bridge", () => {
     ]);
   });
 
-  it("keeps structured content as ordinary MCP result text for official CUA receipts", async () => {
+  it("keeps structured data for consumers while projecting official CUA receipt content", async () => {
     const registry = createToolRegistry();
     registerMcpTools(
       registry,
@@ -1076,8 +1154,8 @@ describe("MCP tool bridge", () => {
     const modelContent = entry?.formatModelContent?.(output);
 
     expect(output?.isError).not.toBe(true);
-    expect(modelContent).toContain("Structured content:");
-    expect(modelContent).toContain("receipt-only");
+    expect(modelContent).toBe(cuaActionReceipt());
+    expect(output?.structuredContent).toEqual({ diagnostic: "receipt-only" });
     expect(modelContent).not.toContain("refresh_required");
   });
 
@@ -1548,23 +1626,6 @@ describe("MCP tool bridge", () => {
   });
 });
 
-function createMockMcpPort(overrides: Partial<McpPort> = {}): McpPort {
-  return {
-    connectConfiguredServers: async () => ({ statuses: {}, tools: [] }),
-    connectServer: async () => ({
-      status: "connected",
-      transport: "stdio",
-      toolCount: 1,
-      updatedAt: "now",
-    }),
-    disconnectServer: async () => undefined,
-    status: async () => ({}),
-    listTools: async () => [],
-    callTool: async () => ({ content: [] }),
-    close: async () => {},
-    ...overrides,
-  };
-}
 function createToolContext(
   overrides: Partial<
     Pick<
